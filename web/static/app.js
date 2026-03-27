@@ -302,12 +302,31 @@ async function renderFeaturesPage() {
               <td><span class="badge badge-neutral">${f.script_count} scripts</span></td>
               <td class="text-muted text-sm">${fmtDate(f.created_at)}</td>
               <td><div class="table-actions">
+                <button class="btn btn-xs btn-ghost" onclick="editFeatureModal('${f.id}','${escHtml(f.name)}')">Edit</button>
                 <button class="btn btn-xs btn-outline-danger" onclick="deleteFeature('${f.id}','${escHtml(f.name)}')">Delete</button>
               </div></td>
             </tr>`).join('')}
         </tbody>
       </table>
     </div>`
+}
+
+async function editFeatureModal(id, name) {
+  showModal('Edit Feature', `
+    <div class="form-group">
+      <label class="form-label">Feature Name</label>
+      <input type="text" id="edit-feat-name" value="${name}" autofocus>
+    </div>`, [
+    { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
+    { label: 'Save', cls: 'btn-primary', action: async () => {
+      const newName = document.getElementById('edit-feat-name').value.trim()
+      if (!newName) return
+      const res = await api('PUT', '/features/' + id, { name: newName })
+      if (res.ok === false) { toast(res.error, 'error'); return }
+      closeModal(); toast('Feature renamed')
+      renderFeaturesPage()
+    }}
+  ])
 }
 
 async function createFeatureModal() {
@@ -357,6 +376,11 @@ async function renderScriptsPage() {
 
   window._features = features
 
+  const selectedFeature = window._scriptsFilterFeature || ''
+  const filtered = selectedFeature
+    ? scripts.filter(s => s.feature_id === selectedFeature)
+    : scripts
+
   page.innerHTML = `
     <div class="page-header">
       <div class="page-header-text">
@@ -368,6 +392,12 @@ async function renderScriptsPage() {
         <button class="btn btn-primary" onclick="createScriptModal()">+ New Script</button>
       </div>
     </div>
+    <div class="filter-bar">
+      <select class="filter-select" onchange="window._scriptsFilterFeature=this.value;renderScriptsPage()">
+        <option value="">All Features</option>
+        ${features.map(f => `<option value="${f.id}" ${f.id === selectedFeature ? 'selected' : ''}>${escHtml(f.name)}</option>`).join('')}
+      </select>
+    </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
@@ -377,9 +407,9 @@ async function renderScriptsPage() {
           <th></th>
         </tr></thead>
         <tbody>
-          ${scripts.length === 0
+          ${filtered.length === 0
             ? `<tr><td colspan="4"><div class="empty-state"><div class="empty-state-icon">\u2328</div><p>No scripts yet.</p></div></td></tr>`
-            : scripts.map(s => `
+            : filtered.map(s => `
             <tr>
               <td><strong>${escHtml(s.name)}</strong></td>
               <td><span class="text-muted text-sm">${escHtml(s.feature_name||'\u2014')}</span></td>
@@ -605,6 +635,16 @@ async function editSuiteModal(id) {
       .map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')
 
     return `
+      <div class="form-group">
+        <label class="form-label">Suite Name</label>
+        <div class="input-row">
+          <input type="text" id="edit-suite-name" value="${escHtml(suite.name)}">
+          <button class="btn btn-sm btn-ghost" onclick="renameSuite('${id}')">Rename</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Scripts</label>
+      </div>
       <div class="suite-script-list">
         ${suiteScripts.length === 0
           ? '<p class="text-muted">No scripts in this suite yet.</p>'
@@ -629,6 +669,15 @@ async function editSuiteModal(id) {
   window._editSuiteId = id
   window._editSuiteScripts = suiteScripts
   window._editAllScripts = allScripts
+}
+
+async function renameSuite(suiteId) {
+  const newName = document.getElementById('edit-suite-name').value.trim()
+  if (!newName) return
+  const res = await api('PUT', '/suites/' + suiteId, { name: newName })
+  if (res.ok === false) { toast(res.error, 'error'); return }
+  toast('Suite renamed')
+  editSuiteModal(suiteId)
 }
 
 async function addSuiteScript(suiteId) {

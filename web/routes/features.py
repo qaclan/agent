@@ -63,6 +63,33 @@ def create_feature():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route('/api/features/<feature_id>', methods=['PUT'])
+def update_feature(feature_id):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        data = request.get_json(force=True)
+        name = data.get("name", "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "Feature name is required"}), 400
+
+        conn = get_conn()
+        feat = conn.execute(
+            "SELECT * FROM features WHERE id = ? AND project_id = ?",
+            (feature_id, project_id),
+        ).fetchone()
+        if not feat:
+            return jsonify({"ok": False, "error": f"Feature {feature_id} not found"}), 404
+
+        conn.execute("UPDATE features SET name = ? WHERE id = ?", (name, feature_id))
+        conn.commit()
+        return jsonify({"ok": True, "id": feature_id, "name": name})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/features/<feature_id>', methods=['DELETE'])
 def delete_feature(feature_id):
     try:
