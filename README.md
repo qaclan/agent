@@ -6,32 +6,6 @@ A standalone CLI and Web tool for QA test management and execution. Manage proje
 
 Built with Python, Click, and Rich. Harnessing the power of Playwright for browser test recording and execution.
 
-## Run with Docker Compose
-
-The fastest way to get started. Requires [Docker](https://docs.docker.com/get-docker/) installed.
-
-```bash
-docker compose up
-```
-
-This builds the image, installs all dependencies (including Playwright + Chromium), and starts the web UI at `http://localhost:7823`.
-
-Data is persisted in a Docker volume (`qaclan-data`), so your projects and runs survive restarts.
-
-To run CLI commands inside the container:
-
-```bash
-docker compose exec qaclan python cli.py project create "MyApp"
-docker compose exec qaclan python cli.py web feature create "Login"
-docker compose exec qaclan python cli.py status
-```
-
-To stop:
-
-```bash
-docker compose down
-```
-
 ## Web UI
 
 The web UI provides a browser-based interface for managing projects, features, scripts, suites, environments, and viewing run results.
