@@ -37,6 +37,14 @@ def record_script(project_id, feature_id, name, url=None):
     if shutil.which("playwright") is None:
         raise RuntimeError("Playwright not found. Run: pip install playwright && playwright install chromium")
 
+    # Recording requires a headed browser with a display
+    if os.path.exists("/.dockerenv") or os.environ.get("container"):
+        if not os.environ.get("DISPLAY"):
+            raise RuntimeError(
+                "Recording requires a display (GUI). In Docker, use the CLI on your host machine instead: "
+                "python cli.py web record --feature <id> --name \"name\""
+            )
+
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tmp:
         tmp_path = tmp.name
 

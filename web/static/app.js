@@ -704,17 +704,32 @@ function showRunResults(run, suiteName) {
         : s.status === 'FAILED'
         ? '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
         : '<span class="badge badge-neutral">SKIPPED</span>'
+      const errorId = 'err-' + Math.random().toString(36).slice(2, 8)
+      const errorBlock = s.status === 'FAILED' && s.error_message
+        ? `<div class="script-result-error">
+            <div class="script-result-error-toggle" onclick="document.getElementById('${errorId}').classList.toggle('collapsed')">
+              <span class="script-result-error-label">Error</span>
+              <span class="script-result-error-chevron">&#9662;</span>
+            </div>
+            <div id="${errorId}" class="script-result-error-body collapsed">
+              <pre class="script-result-error-msg">${escHtml(s.error_message)}</pre>
+            </div>
+          </div>`
+        : ''
       return `
       <div class="script-result-card ${cls}">
-        <div>
-          <div class="script-result-name">${escHtml(s.name)}</div>
-          <div class="script-result-meta">
-            <span>Duration: ${s.duration_ms != null ? s.duration_ms + ' ms' : '\u2014'}</span>
-            <span>Console errors: ${s.console_errors || 0}</span>
-            <span>Net: ${s.network_failures || 0}</span>
+        <div class="script-result-card-top">
+          <div>
+            <div class="script-result-name">${escHtml(s.name)}</div>
+            <div class="script-result-meta">
+              <span>Duration: ${s.duration_ms != null ? s.duration_ms + ' ms' : '\u2014'}</span>
+              <span>Console errors: ${s.console_errors || 0}</span>
+              <span>Net: ${s.network_failures || 0}</span>
+            </div>
           </div>
+          ${badge}
         </div>
-        ${badge}
+        ${errorBlock}
       </div>`
     }).join('')}`
 

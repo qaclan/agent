@@ -122,7 +122,23 @@ def web_run(suite_id, env_name, stop_on_fail):
             # Read script and patch headless=False → headless=True for execution
             with open(item["file_path"], "r") as _sf:
                 _script_src = _sf.read()
-            _script_src = re.sub(r'headless\s*=\s*False', 'headless=True', _script_src)
+            # _script_src = re.sub(r'headless\s*=\s*False', 'headless=True', _script_src)
+            # Set default timeout to 30s and wait for full page load after navigations and clicks
+            _script_src = re.sub(
+                r'(page\s*=\s*context\.new_page\(\))',
+                r'\1\n    page.set_default_timeout(30000)',
+                _script_src,
+            )
+            _script_src = re.sub(
+                r'(page\.goto\([^)]+\))',
+                r'\1\n    page.wait_for_load_state("networkidle")',
+                _script_src,
+            )
+            _script_src = re.sub(
+                r'(\.click\(\))',
+                r'\1\n    page.wait_for_load_state("networkidle")',
+                _script_src,
+            )
             _tmp_script = tempfile.NamedTemporaryFile(suffix=".py", delete=False, prefix="qaclan_run_")
             _tmp_script.write(_script_src.encode())
             _tmp_script.close()
@@ -145,7 +161,7 @@ def web_run(suite_id, env_name, stop_on_fail):
             else:
                 status = "FAILED"
                 failed += 1
-                error_msg = result.stderr.strip().split("\n")[-1] if result.stderr.strip() else "Non-zero exit code"
+                error_msg = result.stderr.strip() if result.stderr.strip() else "Non-zero exit code"
                 failed_scripts.append({"name": item["script_name"], "error": error_msg})
                 console.print(f"      [red]✗ FAILED[/red] ({duration_s:.1f}s)")
                 if stop_on_fail:
