@@ -124,6 +124,9 @@ def create_script():
         )
         conn.commit()
 
+        from cli.sync import sync_script_to_cloud
+        sync_script_to_cloud(script_id, name)
+
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

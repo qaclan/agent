@@ -75,6 +75,9 @@ def record_script(project_id, feature_id, name, url=None):
         )
         conn.commit()
 
+        from cli.sync import sync_script_to_cloud
+        sync_script_to_cloud(script_id, name)
+
         return script_id, dest
     finally:
         if os.path.exists(tmp_path):

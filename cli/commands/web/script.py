@@ -114,6 +114,8 @@ def script_import(file_path, name, feature_id):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Script imported: {name} [{script_id}]")
+    from cli.sync import sync_script_to_cloud
+    sync_script_to_cloud(script_id, name)
     console.print(f"  Feature: {feat['name']}")
     console.print(f"  File: {dest}")
 

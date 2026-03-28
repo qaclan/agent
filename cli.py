@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import click
 
 from cli.db import init_db
@@ -7,12 +10,41 @@ from cli.commands.status import status
 from cli.commands.runs import runs_group
 from cli.commands.web import web
 from cli.commands.api import api
+from cli.commands.auth import login, logout, require_auth
 
 
 @click.group()
 def qaclan():
     """QAClan — QA test management and execution CLI."""
     init_db()
+
+
+qaclan.add_command(login, "login")
+qaclan.add_command(logout, "logout")
+
+
+# Wrap existing commands with auth gate
+_original_project_invoke = project.invoke
+_original_env_invoke = env_group.invoke
+_original_status_invoke = status.invoke
+_original_runs_invoke = runs_group.invoke
+_original_web_invoke = web.invoke
+_original_api_invoke = api.invoke
+
+
+def _auth_wrap(original_invoke):
+    def wrapped(ctx):
+        require_auth()
+        return original_invoke(ctx)
+    return wrapped
+
+
+project.invoke = _auth_wrap(_original_project_invoke)
+env_group.invoke = _auth_wrap(_original_env_invoke)
+status.invoke = _auth_wrap(_original_status_invoke)
+runs_group.invoke = _auth_wrap(_original_runs_invoke)
+web.invoke = _auth_wrap(_original_web_invoke)
+api.invoke = _auth_wrap(_original_api_invoke)
 
 
 qaclan.add_command(project, "project")
@@ -32,8 +64,36 @@ def run_group(ctx):
         click.echo(ctx.get_help())
 
 
+_original_run_group_invoke = run_group.invoke
+
+
+def _run_group_auth_wrap(ctx):
+    require_auth()
+    return _original_run_group_invoke(ctx)
+
+
+run_group.invoke = _run_group_auth_wrap
+
 from cli.commands.runs import run_show
 run_group.add_command(run_show, "show")
+
+
+@qaclan.command()
+@click.option("--all", "sync_all_projects", is_flag=True, help="Sync all projects, not just the active one")
+def sync(sync_all_projects):
+    """Push all local data to the cloud server."""
+    require_auth()
+    from cli.config import get_active_project_id
+    from cli.sync import sync_all
+    from rich.console import Console
+    console = Console()
+    if sync_all_projects:
+        sync_all(project_id=None)
+    else:
+        project_id = get_active_project_id()
+        if not project_id:
+            console.print("[yellow]No active project. Syncing all projects...[/yellow]")
+        sync_all(project_id=project_id)
 
 
 @qaclan.command()

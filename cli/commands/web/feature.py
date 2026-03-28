@@ -31,6 +31,8 @@ def feature_create(name):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Feature created: {name} [{fid}]  [bold cyan]\\[WEB][/bold cyan]")
+    from cli.sync import sync_feature_to_cloud
+    sync_feature_to_cloud(fid, name, proj["id"])
 
 
 @feature.command("list")

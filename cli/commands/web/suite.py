@@ -31,6 +31,8 @@ def suite_create(name):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Suite created: {name} [{sid}]  [bold cyan]\\[WEB][/bold cyan]")
+    from cli.sync import sync_suite_to_cloud
+    sync_suite_to_cloud(sid, name, proj["id"])
 
 
 @suite.command("add")

@@ -40,6 +40,9 @@ def create_project():
 
         set_active_project_id(project_id)
 
+        from cli.sync import sync_project_to_cloud
+        sync_project_to_cloud(project_id, name)
+
         return jsonify({"ok": True, "id": project_id, "name": name}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

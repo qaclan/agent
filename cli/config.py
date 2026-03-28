@@ -35,6 +35,37 @@ def set_active_project_id(project_id):
     _write_config(cfg)
 
 
+DEFAULT_SERVER_URL = os.environ.get("QACLAN_SERVER_URL", "https://staging.qaclan.com")
+
+
+def get_auth_key():
+    cfg = _read_config()
+    return cfg.get("auth_key")
+
+
+def set_auth_key(key):
+    cfg = _read_config()
+    cfg["auth_key"] = key
+    _write_config(cfg)
+
+
+def remove_auth_key():
+    cfg = _read_config()
+    cfg.pop("auth_key", None)
+    _write_config(cfg)
+
+
+def get_server_url():
+    cfg = _read_config()
+    return cfg.get("server_url", DEFAULT_SERVER_URL)
+
+
+def set_server_url(url):
+    cfg = _read_config()
+    cfg["server_url"] = url
+    _write_config(cfg)
+
+
 def get_active_project(console):
     """Get the active project row from DB. Prints error and returns None if not set."""
     from cli.db import get_conn

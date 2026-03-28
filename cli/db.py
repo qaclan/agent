@@ -131,7 +131,18 @@ def init_db():
         );
     """)
     conn.commit()
+    _migrate_cloud_id(conn)
     _migrate_cascade(conn)
+
+
+def _migrate_cloud_id(conn):
+    """Add cloud_id column to tables that sync with the cloud server."""
+    for table in ("projects", "features", "suites", "scripts"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
+        except Exception:
+            pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_cascade(conn):

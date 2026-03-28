@@ -1,8 +1,7 @@
 import os
 import re
-import subprocess
 import time
-import tempfile
+import traceback
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
@@ -13,6 +12,54 @@ bp = Blueprint('runs', __name__)
 
 def _require_active_project():
     return get_active_project_id()
+
+
+def _extract_test_actions(script_path):
+    """Extract test action lines from a Playwright codegen script."""
+    with open(script_path, "r") as f:
+        lines = f.readlines()
+
+    actions = []
+    capturing = False
+    base_indent = None
+
+    for line in lines:
+        stripped = line.strip()
+
+        if stripped.startswith("page = context.new_page()"):
+            capturing = True
+            continue
+
+        if capturing and stripped.startswith("page.close()"):
+            break
+
+        if capturing:
+            if not stripped or stripped.startswith("# ---"):
+                continue
+            if "_qc_state" in stripped or "context.storage_state" in stripped:
+                continue
+            if base_indent is None:
+                base_indent = len(line) - len(line.lstrip())
+            current_indent = len(line) - len(line.lstrip())
+            relative_indent = max(0, current_indent - base_indent)
+            actions.append(" " * relative_indent + stripped)
+
+    return "\n".join(actions)
+
+
+def _patch_actions(actions_src):
+    """Apply runtime patches: networkidle waits."""
+    actions_src = re.sub(
+        r'(page\.goto\([^)]+\))',
+        r'\1\npage.wait_for_load_state("networkidle")',
+        actions_src,
+    )
+    actions_src = re.sub(
+        r'(\.click\(\))',
+        r'\1\npage.wait_for_load_state("networkidle")',
+        actions_src,
+    )
+    return actions_src
 
 
 @bp.route('/api/runs', methods=['GET'])
@@ -146,6 +193,10 @@ def execute_run():
             for v in variables:
                 env_vars_dict[v["key"]] = v["value"]
 
+        # Inject env vars into current process
+        for k, v in env_vars_dict.items():
+            os.environ[k] = v
+
         # 4. Create suite_run record
         run_id = generate_id("run")
         now = datetime.now(timezone.utc).isoformat()
@@ -164,133 +215,123 @@ def execute_run():
         script_results = []
         run_start = time.time()
 
-        # 5. Create temp storage state file
-        storage_state_file = tempfile.NamedTemporaryFile(
-            suffix=".json", delete=False, prefix="qaclan_state_"
-        )
-        storage_state_path = storage_state_file.name
-        storage_state_file.close()
-        os.unlink(storage_state_path)
-        env_vars_dict["QACLAN_STORAGE_STATE"] = storage_state_path
+        # Storage state file for session persistence across runs
+        storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
 
-        # 6. Loop through scripts
-        for item in items:
-            srun_id = generate_id("srun")
-            script_now = datetime.now(timezone.utc).isoformat()
+        # 5. Launch ONE shared browser for the entire suite
+        from playwright.sync_api import sync_playwright, expect as pw_expect
 
-            if stopped:
-                # Mark remaining as SKIPPED
-                conn.execute(
-                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
-                    (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
-                )
-                skipped += 1
-                script_results.append({
-                    "script_id": item["script_id"],
-                    "name": item["script_name"],
-                    "status": "SKIPPED",
-                    "duration_ms": 0,
-                    "error_message": None,
-                })
-                continue
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=False)
+            context = browser.new_context(
+                storage_state=storage_state_path if os.path.exists(storage_state_path) else None
+            )
 
-            script_start = time.time()
-            env = os.environ.copy()
-            env.update(env_vars_dict)
+            # 6. Loop through scripts
+            for item in items:
+                srun_id = generate_id("srun")
+                script_now = datetime.now(timezone.utc).isoformat()
 
-            try:
-                # Read script and patch headless=False → headless=True for execution
-                with open(item["file_path"], "r") as _sf:
-                    _script_src = _sf.read()
-                # _script_src = re.sub(r'headless\s*=\s*False', 'headless=True', _script_src)
-                # Set default timeout to 30s and wait for full page load after navigations and clicks
-                _script_src = re.sub(
-                    r'(page\s*=\s*context\.new_page\(\))',
-                    r'\1\n    page.set_default_timeout(30000)',
-                    _script_src,
-                )
-                _script_src = re.sub(
-                    r'(page\.goto\([^)]+\))',
-                    r'\1\n    page.wait_for_load_state("networkidle")',
-                    _script_src,
-                )
-                _script_src = re.sub(
-                    r'(\.click\(\))',
-                    r'\1\n    page.wait_for_load_state("networkidle")',
-                    _script_src,
-                )
-                _tmp_script = tempfile.NamedTemporaryFile(suffix=".py", delete=False, prefix="qaclan_run_")
-                _tmp_script.write(_script_src.encode())
-                _tmp_script.close()
+                if stopped:
+                    conn.execute(
+                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
+                        (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
+                    )
+                    skipped += 1
+                    script_results.append({
+                        "script_id": item["script_id"],
+                        "name": item["script_name"],
+                        "status": "SKIPPED",
+                        "duration_ms": 0,
+                        "error_message": None,
+                    })
+                    continue
 
-                result = subprocess.run(
-                    ["python", _tmp_script.name],
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                )
-                os.unlink(_tmp_script.name)
-                duration_ms = int((time.time() - script_start) * 1000)
-                finished_at = datetime.now(timezone.utc).isoformat()
+                script_start = time.time()
 
-                if result.returncode == 0:
+                try:
+                    # Extract and patch test actions
+                    actions_src = _extract_test_actions(item["file_path"])
+                    actions_src = _patch_actions(actions_src)
+
+                    # Create a new page in the shared context
+                    page = context.new_page()
+                    page.set_default_timeout(30000)
+
+                    # Execute test actions with page, context, and expect in scope
+                    exec(actions_src, {
+                        "page": page,
+                        "context": context,
+                        "expect": pw_expect,
+                        "re": re,
+                        "os": os,
+                    })
+
+                    page.wait_for_timeout(2000)  # Allow JS to persist session to localStorage
+                    page.close()
+
+                    duration_ms = int((time.time() - script_start) * 1000)
+                    finished_at = datetime.now(timezone.utc).isoformat()
+
                     status = "PASSED"
                     passed += 1
                     error_msg = None
-                else:
-                    status = "FAILED"
-                    failed += 1
-                    error_msg = (
-                        result.stderr.strip()
-                        if result.stderr.strip()
-                        else "Non-zero exit code"
+
+                    conn.execute(
+                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                        "duration_ms, error_message, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (srun_id, run_id, item["script_id"], item["order_index"],
+                         status, duration_ms, error_msg, script_now, finished_at),
                     )
+
+                    script_results.append({
+                        "script_id": item["script_id"],
+                        "name": item["script_name"],
+                        "status": status,
+                        "duration_ms": duration_ms,
+                        "error_message": error_msg,
+                    })
+                except Exception as e:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+
+                    duration_ms = int((time.time() - script_start) * 1000)
+                    finished_at = datetime.now(timezone.utc).isoformat()
+                    failed += 1
+                    error_msg = traceback.format_exc()
                     if stop_on_fail:
                         stopped = True
 
-                conn.execute(
-                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                    "duration_ms, error_message, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (srun_id, run_id, item["script_id"], item["order_index"],
-                     status, duration_ms, error_msg, script_now, finished_at),
-                )
+                    conn.execute(
+                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                        "duration_ms, error_message, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
+                        (srun_id, run_id, item["script_id"], item["order_index"],
+                         duration_ms, error_msg, script_now, finished_at),
+                    )
 
-                script_results.append({
-                    "script_id": item["script_id"],
-                    "name": item["script_name"],
-                    "status": status,
-                    "duration_ms": duration_ms,
-                    "error_message": error_msg,
-                })
-            except Exception as e:
-                duration_ms = int((time.time() - script_start) * 1000)
-                finished_at = datetime.now(timezone.utc).isoformat()
-                failed += 1
-                error_msg = str(e)
-                if stop_on_fail:
-                    stopped = True
+                    script_results.append({
+                        "script_id": item["script_id"],
+                        "name": item["script_name"],
+                        "status": "FAILED",
+                        "duration_ms": duration_ms,
+                        "error_message": error_msg,
+                    })
 
-                conn.execute(
-                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                    "duration_ms, error_message, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
-                    (srun_id, run_id, item["script_id"], item["order_index"],
-                     duration_ms, error_msg, script_now, finished_at),
-                )
+            # Save storage state for session persistence
+            context.storage_state(path=storage_state_path)
 
-                script_results.append({
-                    "script_id": item["script_id"],
-                    "name": item["script_name"],
-                    "status": "FAILED",
-                    "duration_ms": duration_ms,
-                    "error_message": error_msg,
-                })
+            # Close shared browser
+            context.close()
+            browser.close()
 
-        # 7. Clean up storage state file
-        if os.path.exists(storage_state_path):
-            os.unlink(storage_state_path)
+        # Clean up injected env vars
+        for k in env_vars_dict:
+            os.environ.pop(k, None)
 
         # 8. Finalize suite_run
         final_status = "PASSED" if failed == 0 and skipped == 0 else "FAILED"
@@ -311,6 +352,30 @@ def execute_run():
             (finished_at, suite_id),
         )
         conn.commit()
+
+        # Sync run to cloud
+        from cli.sync import sync_run_to_cloud
+        total_duration_ms = int((time.time() - run_start) * 1000)
+        sync_run_to_cloud(
+            run_id=run_id,
+            suite_id=suite_id,
+            status=final_status,
+            started_at=now,
+            completed_at=finished_at,
+            duration_ms=total_duration_ms,
+            project_id=project_id,
+            script_results=[
+                {
+                    "script_id": sr["script_id"],
+                    "script_name": sr["name"],
+                    "status": sr["status"].lower(),
+                    "duration_ms": sr.get("duration_ms", 0) or 0,
+                    "error_output": sr.get("error_message"),
+                    "order_index": idx,
+                }
+                for idx, sr in enumerate(script_results)
+            ],
+        )
 
         # 10. Return completed run data
         return jsonify({

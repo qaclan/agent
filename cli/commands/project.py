@@ -29,6 +29,8 @@ def project_create(name):
     set_active_project_id(pid)
     console.print(f"[green]✓[/green] Project created: {name} [{pid}]")
     console.print(f"Active project set to: {name}")
+    from cli.sync import sync_project_to_cloud
+    sync_project_to_cloud(pid, name)
 
 
 @project.command("list")
