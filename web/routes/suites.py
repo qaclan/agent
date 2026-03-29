@@ -88,6 +88,9 @@ def create_suite():
         )
         conn.commit()
 
+        from cli.sync import sync_suite_to_cloud
+        sync_suite_to_cloud(suite_id, name, project_id)
+
         return jsonify({"ok": True, "id": suite_id, "name": name}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -139,6 +142,9 @@ def add_script_to_suite(suite_id):
         )
         conn.commit()
 
+        from cli.sync import sync_suite_items_to_cloud
+        sync_suite_items_to_cloud(suite_id, project_id)
+
         return jsonify({"ok": True, "id": item_id, "order_index": max_order + 1}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -167,6 +173,9 @@ def remove_script_from_suite(suite_id, script_id):
             (suite_id, script_id),
         )
         conn.commit()
+
+        from cli.sync import sync_suite_items_to_cloud
+        sync_suite_items_to_cloud(suite_id, project_id)
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -202,34 +211,11 @@ def reorder_suite_scripts(suite_id):
             )
 
         conn.commit()
+
+        from cli.sync import sync_suite_items_to_cloud
+        sync_suite_items_to_cloud(suite_id, project_id)
+
         return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@bp.route('/api/suites/<suite_id>', methods=['PUT'])
-def update_suite(suite_id):
-    try:
-        project_id = _require_active_project()
-        if not project_id:
-            return jsonify({"ok": False, "error": "No active project"}), 400
-
-        data = request.get_json(force=True)
-        name = data.get("name", "").strip()
-        if not name:
-            return jsonify({"ok": False, "error": "Suite name is required"}), 400
-
-        conn = get_conn()
-        suite = conn.execute(
-            "SELECT * FROM suites WHERE id = ? AND project_id = ?",
-            (suite_id, project_id),
-        ).fetchone()
-        if not suite:
-            return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
-
-        conn.execute("UPDATE suites SET name = ? WHERE id = ?", (name, suite_id))
-        conn.commit()
-        return jsonify({"ok": True, "id": suite_id, "name": name})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -253,6 +239,9 @@ def delete_suite(suite_id):
         conn.execute("DELETE FROM suite_items WHERE suite_id = ?", (suite_id,))
         conn.execute("DELETE FROM suites WHERE id = ?", (suite_id,))
         conn.commit()
+
+        from cli.sync import delete_suite_from_cloud
+        delete_suite_from_cloud(suite_id)
 
         return jsonify({"ok": True})
     except Exception as e:

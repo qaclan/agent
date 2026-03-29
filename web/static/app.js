@@ -2,7 +2,9 @@
 
 const state = {
   activeProject: null,
-  page: 'scripts'
+  page: 'scripts',
+  authenticated: false,
+  user: null,
 }
 
 const routes = {
@@ -11,6 +13,7 @@ const routes = {
   suites:   renderSuitesPage,
   runs:     renderRunsPage,
   envs:     renderEnvsPage,
+  settings: renderSettingsPage,
 }
 
 async function navigate(page) {
@@ -23,6 +26,15 @@ async function navigate(page) {
 }
 
 async function init() {
+  // Check auth status first
+  const authRes = await api('GET', '/auth/status')
+  if (!authRes.authenticated) {
+    renderAuthScreen()
+    return
+  }
+  state.authenticated = true
+  state.user = authRes.user || null
+
   const res = await api('GET', '/projects/active')
   if (res.id) state.activeProject = { id: res.id, name: res.name }
   renderSidebar()
@@ -111,6 +123,11 @@ function renderSidebar() {
       <div class="nav-item sub ${p==='runs'?'active':''}" onclick="navigate('runs')">
         ${iconRun()} Runs
       </div>
+    </div>
+    <div class="nav-section nav-section-bottom">
+      <div class="nav-item ${p==='settings'?'active':''}" onclick="navigate('settings')">
+        ${iconSettings()} Settings
+      </div>
     </div>`
 }
 
@@ -124,6 +141,7 @@ async function renderTopbar() {
     suites:   ['Suites', 'Manage regression suites'],
     runs:     ['Regression Runs', 'View execution history'],
     envs:     ['Environments', 'Manage environment variables'],
+    settings: ['Settings', 'Manage auth key and preferences'],
   }
   const [title, sub] = titles[state.page] || ['QAClan', '']
   const allProjects = await api('GET', '/projects')
@@ -287,6 +305,171 @@ function escHtml(str) {
 function fmtDate(iso) {
   if (!iso) return '\u2014'
   return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+// ── Auth Screen (shown when not logged in) ─────────────────────
+
+function renderAuthScreen() {
+  const app = document.getElementById('app')
+  app.style.display = 'none'
+
+  let screen = document.getElementById('auth-screen')
+  if (!screen) {
+    screen = document.createElement('div')
+    screen.id = 'auth-screen'
+    document.body.appendChild(screen)
+  }
+
+  screen.innerHTML = `
+    <div class="auth-card">
+      <div class="auth-logo">
+        <img src="logo.png" alt="QAClan" style="width:48px;height:48px;border-radius:12px">
+        <h1 style="font-size:22px;font-weight:600;color:var(--text-primary);margin-top:12px">QAClan</h1>
+        <p class="text-muted" style="margin-top:4px;font-size:13px">Enter your auth key to continue</p>
+      </div>
+      <div class="form-group" style="margin-top:24px">
+        <label class="form-label">Auth Key</label>
+        <input type="password" id="auth-key-input" placeholder="qc_..." style="width:100%">
+        <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at staging.qaclan.com</p>
+      </div>
+      <div id="auth-error" style="display:none;color:var(--danger);font-size:13px;margin-top:8px"></div>
+      <button class="btn btn-primary" style="width:100%;margin-top:20px" onclick="submitAuthKey()">Log In</button>
+    </div>`
+
+  setTimeout(() => document.getElementById('auth-key-input')?.focus(), 50)
+
+  document.getElementById('auth-key-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submitAuthKey()
+  })
+}
+
+async function submitAuthKey() {
+  const input = document.getElementById('auth-key-input')
+  const errEl = document.getElementById('auth-error')
+  const key = input.value.trim()
+  if (!key) { errEl.textContent = 'Please enter your auth key'; errEl.style.display = 'block'; return }
+
+  errEl.style.display = 'none'
+  const res = await api('POST', '/auth/save', { auth_key: key })
+  if (!res.ok) {
+    errEl.textContent = res.error || 'Invalid auth key'
+    errEl.style.display = 'block'
+    return
+  }
+
+  state.authenticated = true
+  state.user = res.user || null
+
+  const screen = document.getElementById('auth-screen')
+  if (screen) screen.remove()
+  document.getElementById('app').style.display = ''
+
+  // Continue normal init
+  const projRes = await api('GET', '/projects/active')
+  if (projRes.id) state.activeProject = { id: projRes.id, name: projRes.name }
+  renderSidebar()
+  renderTopbar()
+  await routes[state.page]()
+
+  document.addEventListener('click', (e) => {
+    const wrap = document.getElementById('project-switcher-wrap')
+    if (wrap && !wrap.contains(e.target)) {
+      const dd = document.getElementById('project-dropdown')
+      if (dd) dd.classList.add('hidden')
+    }
+  })
+
+  toast('Logged in as ' + (res.user?.name || 'user'))
+}
+
+// ── Settings Page ──────────────────────────────────────────────
+
+function iconSettings() {
+  return '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7.5" cy="7.5" r="2.2"/><path d="M7.5 1.5v1.5M7.5 12v1.5M1.5 7.5H3M12 7.5h1.5M3.4 3.4l1 1M10.6 10.6l1 1M3.4 11.6l1-1M10.6 4.4l1-1"/></svg>'
+}
+
+async function renderSettingsPage() {
+  const page = document.getElementById('page-content')
+
+  const authRes = await api('GET', '/auth/status')
+  const user = authRes.user
+  const masked = user ? '••••••••••••' : ''
+
+  page.innerHTML = `
+    <div style="max-width:560px">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header">
+          <span>Auth Key</span>
+        </div>
+        <div class="card-body">
+          ${user ? `
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+              ${user.avatar_url ? `<img src="${escHtml(user.avatar_url)}" style="width:36px;height:36px;border-radius:50%">` : ''}
+              <div>
+                <div style="font-weight:500;color:var(--text-primary)">${escHtml(user.name || '')}</div>
+                <div class="text-muted" style="font-size:12px">${escHtml(user.email || '')}</div>
+              </div>
+              <span class="badge badge-success" style="margin-left:auto">Connected</span>
+            </div>
+          ` : `
+            <div style="margin-bottom:16px">
+              <span class="badge badge-danger">Not connected</span>
+            </div>
+          `}
+          <div class="form-group">
+            <label class="form-label">Auth Key</label>
+            <input type="password" id="settings-auth-key" value="${masked}" placeholder="qc_..." style="width:100%">
+            <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at staging.qaclan.com</p>
+          </div>
+          <div id="settings-auth-error" style="display:none;color:var(--danger);font-size:13px;margin-top:8px"></div>
+          <div style="display:flex;gap:8px;margin-top:16px">
+            <button class="btn btn-primary btn-sm" onclick="updateAuthKey()">Update Key</button>
+            ${user ? `<button class="btn btn-outline-danger btn-sm" onclick="logoutFromSettings()">Disconnect</button>` : ''}
+          </div>
+        </div>
+      </div>
+    </div>`
+
+  document.getElementById('settings-auth-key').addEventListener('focus', function() {
+    if (this.value === masked) this.value = ''
+    this.type = 'text'
+  })
+  document.getElementById('settings-auth-key').addEventListener('blur', function() {
+    if (!this.value.trim() && user) { this.value = masked; this.type = 'password' }
+  })
+}
+
+async function updateAuthKey() {
+  const input = document.getElementById('settings-auth-key')
+  const errEl = document.getElementById('settings-auth-error')
+  const key = input.value.trim()
+  if (!key || key === '••••••••••••') { errEl.textContent = 'Please enter a new auth key'; errEl.style.display = 'block'; return }
+
+  errEl.style.display = 'none'
+  const res = await api('POST', '/auth/save', { auth_key: key })
+  if (!res.ok) {
+    errEl.textContent = res.error || 'Invalid auth key'
+    errEl.style.display = 'block'
+    return
+  }
+
+  state.user = res.user || null
+  toast('Auth key updated')
+  await renderSettingsPage()
+}
+
+async function logoutFromSettings() {
+  showModal('Disconnect', `
+    <p>Remove your auth key? You will need to enter it again to use QAClan.</p>`, [
+    { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
+    { label: 'Disconnect', cls: 'btn-danger', action: async () => {
+      await api('POST', '/auth/remove')
+      state.authenticated = false
+      state.user = null
+      closeModal()
+      renderAuthScreen()
+    }}
+  ])
 }
 
 // ── Features Page ───────────────────────────────────────────────
@@ -666,11 +849,12 @@ async function editSuiteModal(id) {
       <div class="form-group">
         <label class="form-label">Scripts</label>
       </div>
-      <div class="suite-script-list">
+      <div class="suite-script-list" id="suite-script-list">
         ${suiteScripts.length === 0
           ? '<p class="text-muted">No scripts in this suite yet.</p>'
           : suiteScripts.map((s, i) => `
-          <div class="suite-script-row">
+          <div class="suite-script-row" draggable="true" data-script-id="${s.script_id}">
+            <span class="suite-script-drag">⠿</span>
             <span class="suite-script-order">${i + 1}</span>
             <span class="suite-script-name">${escHtml(s.name)}</span>
             <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${s.script_id}')">Remove</button>
@@ -690,6 +874,53 @@ async function editSuiteModal(id) {
   window._editSuiteId = id
   window._editSuiteScripts = suiteScripts
   window._editAllScripts = allScripts
+
+  // Drag-and-drop reordering
+  const list = document.getElementById('suite-script-list')
+  if (list) {
+    let dragEl = null
+    list.addEventListener('dragstart', e => {
+      dragEl = e.target.closest('.suite-script-row')
+      if (!dragEl) return
+      dragEl.classList.add('dragging')
+      e.dataTransfer.effectAllowed = 'move'
+    })
+    list.addEventListener('dragover', e => {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+      const target = e.target.closest('.suite-script-row')
+      if (!target || target === dragEl) return
+      const rect = target.getBoundingClientRect()
+      const mid = rect.top + rect.height / 2
+      if (e.clientY < mid) {
+        list.insertBefore(dragEl, target)
+      } else {
+        list.insertBefore(dragEl, target.nextSibling)
+      }
+    })
+    list.addEventListener('dragend', async () => {
+      if (!dragEl) return
+      dragEl.classList.remove('dragging')
+      dragEl = null
+      // Update order numbers
+      const rows = list.querySelectorAll('.suite-script-row')
+      const scriptIds = []
+      rows.forEach((row, i) => {
+        row.querySelector('.suite-script-order').textContent = i + 1
+        scriptIds.push(row.dataset.scriptId)
+      })
+      // Save new order
+      const res = await api('PUT', '/suites/' + id + '/order', { script_ids: scriptIds })
+      if (res.ok === false) toast(res.error, 'error')
+      else {
+        // Update local state so modal re-renders keep the new order
+        window._editSuiteScripts = scriptIds.map((sid, i) => {
+          const s = suiteScripts.find(x => x.script_id === sid)
+          return { ...s, order_index: i }
+        })
+      }
+    })
+  }
 }
 
 async function renameSuite(suiteId) {

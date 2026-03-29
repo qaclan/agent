@@ -58,6 +58,9 @@ def create_feature():
         )
         conn.commit()
 
+        from cli.sync import sync_feature_to_cloud
+        sync_feature_to_cloud(feature_id, name, project_id)
+
         return jsonify({"ok": True, "id": feature_id, "name": name}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -85,6 +88,10 @@ def update_feature(feature_id):
 
         conn.execute("UPDATE features SET name = ? WHERE id = ?", (name, feature_id))
         conn.commit()
+
+        from cli.sync import sync_feature_to_cloud
+        sync_feature_to_cloud(feature_id, name, project_id)
+
         return jsonify({"ok": True, "id": feature_id, "name": name})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -120,6 +127,9 @@ def delete_feature(feature_id):
         # Delete feature
         conn.execute("DELETE FROM features WHERE id = ?", (feature_id,))
         conn.commit()
+
+        from cli.sync import delete_feature_from_cloud
+        delete_feature_from_cloud(feature_id)
 
         return jsonify({"ok": True})
     except Exception as e:

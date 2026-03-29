@@ -835,6 +835,16 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   text-align: center;
   flex-shrink: 0;
 }
+.suite-script-drag {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 14px;
+  flex-shrink: 0;
+  user-select: none;
+}
+.suite-script-drag:active { cursor: grabbing; }
+.suite-script-row.dragging { opacity: 0.4; border-color: var(--accent); }
+.suite-script-row[draggable="true"] { cursor: grab; }
 .suite-script-name { flex: 1; font-size: 13.5px; color: var(--text-primary); }
 
 /* Utilities */
@@ -848,3 +858,39 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
 .text-sm { font-size: 12.5px; }
 .w-full { width: 100%; }
 .divider { height: 1px; background: var(--border-subtle); margin: 16px 0; }
+
+/* Auth Screen */
+#auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: var(--bg-base);
+}
+
+.auth-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 40px 36px;
+  width: 380px;
+  box-shadow: var(--shadow-lg);
+}
+
+.auth-logo {
+  text-align: center;
+}
+
+/* Settings nav pinned to bottom */
+#sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.nav-section-bottom {
+  margin-top: auto;
+  padding-bottom: 12px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 12px;
+}
