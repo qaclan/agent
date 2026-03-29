@@ -9,17 +9,30 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: qaclan-linux-amd64
-          - os: macos-latest
-            artifact: qaclan-macos-arm64
+  build-linux:
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.11-slim-buster
+    steps:
+      - uses: actions/checkout@v4
 
-    runs-on: ${{ matrix.os }}
+      - name: Install build tools
+        run: |
+          apt-get update && apt-get install -y gcc g++ patchelf ccache
+          pip install -r requirements.txt
+          pip install nuitka ordered-set
 
+      - name: Build binary
+        run: bash build.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qaclan-linux-amd64
+          path: dist/qaclan-linux-amd64
+
+  build-macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -38,11 +51,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          name: qaclan-macos-arm64
+          path: dist/qaclan-macos-arm64
 
   release:
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
