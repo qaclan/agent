@@ -18,4 +18,4 @@ COPY . .
 
 EXPOSE 7823
 
-CMD ["python", "cli.py", "serve", "--port", "7823", "--host", "0.0.0.0", "--no-browser"]
+CMD ["python", "qaclan.py", "serve", "--port", "7823", "--host", "0.0.0.0", "--no-browser"]
