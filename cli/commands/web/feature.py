@@ -90,3 +90,5 @@ def feature_delete(feature_id):
     conn.execute("DELETE FROM features WHERE id = ?", (feature_id,))
     conn.commit()
     console.print(f"[green]✓[/green] Feature deleted: {row['name']}")
+    from cli.sync import delete_feature_from_cloud
+    delete_feature_from_cloud(feature_id)

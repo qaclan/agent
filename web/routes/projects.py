@@ -114,6 +114,9 @@ def delete_project(project_id):
         if get_active_project_id() == project_id:
             set_active_project_id(None)
 
+        from cli.sync import delete_project_from_cloud
+        delete_project_from_cloud(project_id)
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

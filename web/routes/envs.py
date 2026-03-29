@@ -95,6 +95,9 @@ def create_env():
         )
         conn.commit()
 
+        from cli.sync import sync_environment_to_cloud
+        sync_environment_to_cloud(env_id, name, project_id)
+
         return jsonify({"ok": True, "id": env_id, "name": name}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -137,6 +140,8 @@ def add_or_update_var(env_name):
                 (value, is_secret, existing["id"]),
             )
             conn.commit()
+            from cli.sync import sync_env_vars_to_cloud
+            sync_env_vars_to_cloud(environment_id)
             return jsonify({"ok": True, "id": existing["id"], "action": "updated"})
         else:
             var_id = generate_id("evar")
@@ -146,6 +151,8 @@ def add_or_update_var(env_name):
                 (var_id, environment_id, key, value, is_secret),
             )
             conn.commit()
+            from cli.sync import sync_env_vars_to_cloud
+            sync_env_vars_to_cloud(environment_id)
             return jsonify({"ok": True, "id": var_id, "action": "created"}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -176,6 +183,9 @@ def delete_var(env_name, key):
         conn.execute("DELETE FROM env_vars WHERE id = ?", (existing["id"],))
         conn.commit()
 
+        from cli.sync import sync_env_vars_to_cloud
+        sync_env_vars_to_cloud(env_row["id"])
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -202,6 +212,9 @@ def delete_env(env_name):
         conn.execute("DELETE FROM env_vars WHERE environment_id = ?", (environment_id,))
         conn.execute("DELETE FROM environments WHERE id = ?", (environment_id,))
         conn.commit()
+
+        from cli.sync import delete_environment_from_cloud
+        delete_environment_from_cloud(environment_id)
 
         return jsonify({"ok": True})
     except Exception as e:

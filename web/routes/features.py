@@ -128,6 +128,9 @@ def delete_feature(feature_id):
         conn.execute("DELETE FROM features WHERE id = ?", (feature_id,))
         conn.commit()
 
+        from cli.sync import delete_feature_from_cloud
+        delete_feature_from_cloud(feature_id)
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

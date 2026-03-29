@@ -104,3 +104,5 @@ def project_delete(project_id):
         set_active_project_id(None)
 
     console.print(f"[green]✓[/green] Project deleted: {row['name']}")
+    from cli.sync import delete_project_from_cloud
+    delete_project_from_cloud(project_id)

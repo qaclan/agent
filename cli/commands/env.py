@@ -31,6 +31,8 @@ def env_create(name):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Environment created: {name} [{eid}]")
+    from cli.sync import sync_environment_to_cloud
+    sync_environment_to_cloud(eid, name, proj["id"])
 
 
 @env_group.command("set")
@@ -69,6 +71,8 @@ def env_set(env_name, key, value, secret):
     conn.commit()
     display_val = "********" if secret else value
     console.print(f"[green]✓[/green] {key} = {display_val}")
+    from cli.sync import sync_env_vars_to_cloud
+    sync_env_vars_to_cloud(env_row["id"])
 
 
 @env_group.command("list")
@@ -130,3 +134,5 @@ def env_delete(env_name):
     conn.execute("DELETE FROM environments WHERE id = ?", (env_row["id"],))
     conn.commit()
     console.print(f"[green]✓[/green] Environment deleted: {env_name}")
+    from cli.sync import delete_environment_from_cloud
+    delete_environment_from_cloud(env_row["id"])

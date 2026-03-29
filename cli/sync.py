@@ -110,8 +110,8 @@ def sync_suite_to_cloud(suite_id, name, project_id):
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None):
-    """Sync a script. suite_id is the LOCAL suite ID (optional)."""
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None):
+    """Sync a script. IDs are LOCAL IDs (optional)."""
     key = get_auth_key()
     if not key:
         return None
@@ -120,7 +120,110 @@ def sync_script_to_cloud(script_id, name, suite_id=None):
         cloud_suite_id = _get_cloud_id("suites", suite_id)
         if cloud_suite_id:
             payload["suite_id"] = cloud_suite_id
+    if feature_id:
+        cloud_feature_id = _get_cloud_id("features", feature_id)
+        if cloud_feature_id:
+            payload["feature_id"] = cloud_feature_id
+    if project_id:
+        cloud_project_id = _get_cloud_id("projects", project_id)
+        if cloud_project_id:
+            payload["project_id"] = cloud_project_id
+    if file_content is not None:
+        payload["file_content"] = file_content
     return _try_sync("script", lambda: api.sync_script(key, payload))
+
+
+# --- Delete operations ---
+
+def delete_project_from_cloud(project_id):
+    """Delete a project from cloud by CLI project ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete project", lambda: api.delete_project(key, project_id))
+
+
+def delete_feature_from_cloud(feature_id):
+    """Delete a feature from cloud by CLI feature ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete feature", lambda: api.delete_feature(key, feature_id))
+
+
+def delete_suite_from_cloud(suite_id):
+    """Delete a suite from cloud by CLI suite ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete suite", lambda: api.delete_suite(key, suite_id))
+
+
+def delete_script_from_cloud(script_id):
+    """Delete a script from cloud by CLI script ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete script", lambda: api.delete_script(key, script_id))
+
+
+def delete_environment_from_cloud(env_id):
+    """Delete an environment from cloud by CLI environment ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete environment", lambda: api.delete_environment(key, env_id))
+
+
+# --- Suite items sync ---
+
+def sync_suite_items_to_cloud(suite_id, project_id):
+    """Read suite items from local DB and push full list to cloud."""
+    key = get_auth_key()
+    if not key:
+        return None
+    _ensure_suite_synced(suite_id, project_id)
+    from cli.db import get_conn
+    items = get_conn().execute(
+        "SELECT script_id, order_index FROM suite_items WHERE suite_id = ? ORDER BY order_index",
+        (suite_id,)
+    ).fetchall()
+    return _try_sync("suite items", lambda: api.sync_suite_items(key, {
+        "cli_suite_id": str(suite_id),
+        "items": [{"cli_script_id": str(r["script_id"]), "order_index": r["order_index"]} for r in items],
+    }))
+
+
+# --- Environment sync ---
+
+def sync_environment_to_cloud(env_id, name, project_id):
+    """Sync an environment to cloud."""
+    key = get_auth_key()
+    if not key:
+        return None
+    cloud_project_id = _ensure_project_synced(project_id)
+    if not cloud_project_id:
+        return None
+    return _try_sync("environment", lambda: api.sync_environment(key, {
+        "cli_environment_id": str(env_id),
+        "name": name,
+        "project_id": cloud_project_id,
+    }))
+
+
+def sync_env_vars_to_cloud(env_id):
+    """Read env vars from local DB and push full list to cloud."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    rows = get_conn().execute(
+        "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?", (env_id,)
+    ).fetchall()
+    return _try_sync("env vars", lambda: api.sync_env_vars(key, {
+        "cli_environment_id": str(env_id),
+        "vars": [{"key": r["key"], "value": r["value"], "is_secret": bool(r["is_secret"])} for r in rows],
+    }))
 
 
 def sync_all(project_id=None):
@@ -143,7 +246,7 @@ def sync_all(project_id=None):
         console.print("[yellow]No projects to sync.[/yellow]")
         return
 
-    total_synced = {"projects": 0, "features": 0, "suites": 0, "scripts": 0, "runs": 0}
+    total_synced = {"projects": 0, "features": 0, "suites": 0, "scripts": 0, "environments": 0, "runs": 0}
 
     for proj in projects:
         pid = proj["id"]
@@ -180,17 +283,49 @@ def sync_all(project_id=None):
             else:
                 console.print(f"  [yellow]⚠[/yellow] Suite: {s['name']}")
 
-        # Scripts
+        # Scripts (with feature_id, project_id, and file content)
         scripts = conn.execute(
-            "SELECT id, name FROM scripts WHERE project_id = ?", (pid,)
+            "SELECT id, name, feature_id, project_id, file_path FROM scripts WHERE project_id = ?", (pid,)
         ).fetchall()
         for sc in scripts:
-            result = sync_script_to_cloud(sc["id"], sc["name"])
+            file_content = None
+            if sc["file_path"]:
+                try:
+                    with open(sc["file_path"], "r") as f:
+                        file_content = f.read()
+                except Exception:
+                    pass
+            result = sync_script_to_cloud(
+                sc["id"], sc["name"],
+                feature_id=sc["feature_id"],
+                project_id=sc["project_id"],
+                file_content=file_content,
+            )
             if result:
                 total_synced["scripts"] += 1
                 console.print(f"  [green]✓[/green] Script: {sc['name']}")
             else:
                 console.print(f"  [yellow]⚠[/yellow] Script: {sc['name']}")
+
+        # Suite items
+        for s in suites:
+            result = sync_suite_items_to_cloud(s["id"], pid)
+            if result:
+                console.print(f"  [green]✓[/green] Suite items: {s['name']}")
+
+        # Environments
+        envs = conn.execute(
+            "SELECT id, name FROM environments WHERE project_id = ?", (pid,)
+        ).fetchall()
+        for env in envs:
+            result = sync_environment_to_cloud(env["id"], env["name"], pid)
+            if result:
+                total_synced["environments"] += 1
+                console.print(f"  [green]✓[/green] Environment: {env['name']}")
+                # Sync env vars
+                sync_env_vars_to_cloud(env["id"])
+            else:
+                console.print(f"  [yellow]⚠[/yellow] Environment: {env['name']}")
 
         # Past runs
         runs = conn.execute(
@@ -239,6 +374,7 @@ def sync_all(project_id=None):
                   f"{total_synced['features']} features, "
                   f"{total_synced['suites']} suites, "
                   f"{total_synced['scripts']} scripts, "
+                  f"{total_synced['environments']} environments, "
                   f"{total_synced['runs']} runs")
 
 

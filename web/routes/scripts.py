@@ -125,7 +125,7 @@ def create_script():
         conn.commit()
 
         from cli.sync import sync_script_to_cloud
-        sync_script_to_cloud(script_id, name)
+        sync_script_to_cloud(script_id, name, feature_id=feature_id, project_id=project_id, file_content=content)
 
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except Exception as e:
@@ -166,6 +166,27 @@ def update_script(script_id):
                     f.write(content)
 
         conn.commit()
+
+        # Sync updated script to cloud
+        from cli.sync import sync_script_to_cloud
+        updated_name = name if name is not None else conn.execute(
+            "SELECT name FROM scripts WHERE id = ?", (script_id,)
+        ).fetchone()["name"]
+        file_content = None
+        file_path = row["file_path"]
+        if file_path and os.path.exists(file_path):
+            with open(file_path, "r") as f:
+                file_content = f.read()
+        script_row = conn.execute(
+            "SELECT feature_id, project_id FROM scripts WHERE id = ?", (script_id,)
+        ).fetchone()
+        sync_script_to_cloud(
+            script_id, updated_name,
+            feature_id=script_row["feature_id"],
+            project_id=script_row["project_id"],
+            file_content=file_content,
+        )
+
         return jsonify({"ok": True, "id": script_id})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -220,6 +241,9 @@ def delete_script(script_id):
         # Delete DB row
         conn.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
         conn.commit()
+
+        from cli.sync import delete_script_from_cloud
+        delete_script_from_cloud(script_id)
 
         return jsonify({"ok": True})
     except Exception as e:
