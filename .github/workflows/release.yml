@@ -18,9 +18,9 @@ jobs:
 
       - name: Install build tools
         run: |
-          apt-get update && apt-get install -y gcc g++ patchelf ccache
+          apt-get update && apt-get install -y gcc g++ ccache
           pip install -r requirements.txt
-          pip install nuitka ordered-set
+          pip install nuitka ordered-set patchelf
 
       - name: Build binary
         run: bash build.sh
