@@ -2,34 +2,59 @@
   <img src="logo.png" alt="QAClan" width="500">
 </p>
 
-A standalone CLI and Web tool for QA test management and execution. Manage projects, features, scripts, suites, environments, and test runs — all stored locally in SQLite.
+<p align="center">
+  <em>Your Playwright tests. Organized locally. Analyzed intelligently.</em>
+</p>
 
-Built with Python, Click, and Rich. Harnessing the power of Playwright for browser test recording and execution.
+<p align="center">
+  Local-first Playwright test management agent with cloud-powered regression intelligence.
+</p>
 
-## Getting Started
+---
 
-### 1. Install dependencies
+## Install
+
+### Binary (recommended)
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/qaclan/agent/master/install.sh | sh
+```
+
+Supports Linux (amd64) and macOS (arm64).
+
+### From source (Python)
+
+```bash
+git clone https://github.com/qaclan/agent.git
+cd agent
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. Start the web UI
+Run with:
 
 ```bash
-qaclan serve
+python qaclan.py [command]
 ```
 
-Open `http://localhost:7823` in your browser.
-
-Options:
+## Quick Start
 
 ```bash
-qaclan serve --port 9000       # Custom port
+qaclan login              # Authenticate with your API key
+qaclan serve              # Launch the web UI at http://localhost:7823
 ```
+
+## Features
+
+- **Record tests** via Playwright codegen — no manual scripting needed
+- **Organize** scripts into projects, features, and suites
+- **Deterministic execution** — AI analyzes results, never touches test steps
+- **Web UI** dashboard at `localhost:7823` for managing everything visually
+- **Cloud sync** — best-effort sync to QAClan cloud for team insights
+- **Environment management** — inject variables into test runs
+- **Offline-capable** — everything works locally, cloud is optional
 
 ## Data Storage
 
@@ -41,6 +66,10 @@ All data is stored locally at `~/.qaclan/`:
 ├── scripts/       <- Recorded/imported script files
 └── config.json    <- Active project setting
 ```
+
+## Learn More
+
+Visit [staging.qaclan.com](https://staging.qaclan.com) for cloud features and team plans.
 
 ## License
 
