@@ -20,7 +20,7 @@ playwright install chromium
 ### 2. Start the web UI
 
 ```bash
-python cli.py serve
+qaclan serve
 ```
 
 Open `http://localhost:7823` in your browser.
@@ -28,7 +28,7 @@ Open `http://localhost:7823` in your browser.
 Options:
 
 ```bash
-python cli.py serve --port 9000       # Custom port
+qaclan serve --port 9000       # Custom port
 ```
 
 ## Data Storage

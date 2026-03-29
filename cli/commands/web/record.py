@@ -42,7 +42,7 @@ def record_script(project_id, feature_id, name, url=None):
         if not os.environ.get("DISPLAY"):
             raise RuntimeError(
                 "Recording requires a display (GUI). In Docker, use the CLI on your host machine instead: "
-                "python cli.py web record --feature <id> --name \"name\""
+                "qaclan web record --feature <id> --name \"name\""
             )
 
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tmp:
