@@ -35,7 +35,7 @@ def set_active_project_id(project_id):
     _write_config(cfg)
 
 
-DEFAULT_SERVER_URL = os.environ.get("QACLAN_SERVER_URL", "https://staging.qaclan.com")
+DEFAULT_SERVER_URL = os.environ.get("QACLAN_SERVER_URL", "https://qaclan.com")
 
 
 def get_auth_key():

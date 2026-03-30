@@ -330,7 +330,7 @@ function renderAuthScreen() {
       <div class="form-group" style="margin-top:24px">
         <label class="form-label">Auth Key</label>
         <input type="password" id="auth-key-input" placeholder="qc_..." style="width:100%">
-        <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at staging.qaclan.com</p>
+        <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at qaclan.com</p>
       </div>
       <div id="auth-error" style="display:none;color:var(--danger);font-size:13px;margin-top:8px"></div>
       <button class="btn btn-primary" style="width:100%;margin-top:20px" onclick="submitAuthKey()">Log In</button>
@@ -419,7 +419,7 @@ async function renderSettingsPage() {
           <div class="form-group">
             <label class="form-label">Auth Key</label>
             <input type="password" id="settings-auth-key" value="${masked}" placeholder="qc_..." style="width:100%">
-            <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at staging.qaclan.com</p>
+            <p class="text-muted" style="margin-top:6px;font-size:11px">Find your auth key in Settings &gt; Auth Key at qaclan.com</p>
           </div>
           <div id="settings-auth-error" style="display:none;color:var(--danger);font-size:13px;margin-top:8px"></div>
           <div style="display:flex;gap:8px;margin-top:16px">

@@ -69,7 +69,7 @@ All data is stored locally at `~/.qaclan/`:
 
 ## Learn More
 
-Visit [staging.qaclan.com](https://staging.qaclan.com) for cloud features and team plans.
+Visit [qaclan.com](https://qaclan.com) for cloud features and team plans.
 
 ## License
 

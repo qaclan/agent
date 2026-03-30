@@ -17,7 +17,7 @@ def login(key, server):
     server_url = get_server_url()
 
     if not key:
-        key = click.prompt("Enter your auth key (from Settings > Auth Key at staging.qaclan.com)")
+        key = click.prompt("Enter your auth key (from Settings > Auth Key at qaclan.com)")
 
     try:
         user = validate_auth_key(server_url, key)
