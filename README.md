@@ -12,9 +12,13 @@
 
 ---
 
-## Install
+## Getting Started
 
-### Binary (recommended)
+### 1. Sign up and get your auth key
+
+Create an account at [qaclan.com](https://qaclan.com) and copy your auth key from **Settings > Auth Key**.
+
+### 2. Install the agent
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qaclan/agent/master/install.sh | sh
@@ -22,29 +26,15 @@ curl -fsSL https://raw.githubusercontent.com/qaclan/agent/master/install.sh | sh
 
 Supports Linux (amd64) and macOS (arm64).
 
-### From source (Python)
+### 3. Launch the web UI
 
 ```bash
-git clone https://github.com/qaclan/agent.git
-cd agent
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-playwright install chromium
+qaclan serve
 ```
 
-Run with:
+### 4. Enter your auth key
 
-```bash
-python qaclan.py [command]
-```
-
-## Quick Start
-
-```bash
-qaclan login              # Authenticate with your API key
-qaclan serve              # Launch the web UI at http://localhost:7823
-```
+When the browser opens at `http://localhost:7823`, enter your auth key and start managing your Playwright tests locally.
 
 ## Features
 
