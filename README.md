@@ -59,7 +59,8 @@ All data is stored locally at `~/.qaclan/`:
 
 ## Learn More
 
-Visit [qaclan.com](https://qaclan.com) for cloud features and team plans.
+- **Documentation:** [qaclan.com/docs](https://qaclan.com/docs)
+- **Cloud & Team Plans:** [qaclan.com](https://qaclan.com)
 
 ## License
 
