@@ -34,9 +34,12 @@ def record_script(project_id, feature_id, name, url=None):
     if feat["channel"] != "web":
         raise ValueError(f"Feature {feature_id} is not a web feature")
 
-    # Point Playwright to bundled browsers if they exist
+    # Point Playwright to bundled browsers only when no system browsers exist
     bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
-    if os.path.isdir(bundled_browsers) and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
+    if (os.path.isdir(bundled_browsers)
+            and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+            and not os.path.isdir(default_browsers)):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
 
     try:

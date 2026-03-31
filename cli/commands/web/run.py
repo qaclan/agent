@@ -151,9 +151,12 @@ def web_run(suite_id, env_name, stop_on_fail):
     # Storage state file for session persistence across runs
     storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
 
-    # Point Playwright to bundled browsers if they exist
+    # Point Playwright to bundled browsers only when no system browsers exist
     bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
-    if os.path.isdir(bundled_browsers) and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
+    if (os.path.isdir(bundled_browsers)
+            and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+            and not os.path.isdir(default_browsers)):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
 
     # Launch ONE shared browser for the entire suite
