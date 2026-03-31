@@ -21,14 +21,11 @@ OUTPUT_NAME="qaclan-${OS_NAME}-${ARCH_NAME}"
 
 echo "Building ${OUTPUT_NAME}..."
 
-PLAYWRIGHT_DIR=$(python -c "import playwright, os; print(os.path.dirname(playwright.__file__))")
-
 python -m nuitka --standalone --onefile \
   --output-filename="$OUTPUT_NAME" \
   --output-dir=dist \
   --include-package=rich._unicode_data \
   --include-data-dir=web/static=web/static \
-  --include-data-dir="${PLAYWRIGHT_DIR}/driver"=playwright/driver \
   qaclan.py
 
 echo "Built: dist/${OUTPUT_NAME}"
