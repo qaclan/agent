@@ -34,7 +34,17 @@ def record_script(project_id, feature_id, name, url=None):
     if feat["channel"] != "web":
         raise ValueError(f"Feature {feature_id} is not a web feature")
 
-    if shutil.which("playwright") is None:
+    # Point Playwright to bundled browsers if they exist
+    bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
+    if os.path.isdir(bundled_browsers) and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
+
+    try:
+        from playwright._impl._driver import compute_driver_executable, get_driver_env
+        driver_executable, driver_cli = compute_driver_executable()
+        if not os.path.exists(driver_executable):
+            raise FileNotFoundError()
+    except Exception:
         raise RuntimeError("Playwright not found. Run: pip install playwright && playwright install chromium")
 
     # Recording requires a headed browser with a display
@@ -49,10 +59,10 @@ def record_script(project_id, feature_id, name, url=None):
         tmp_path = tmp.name
 
     try:
-        cmd = ["playwright", "codegen", "--output", tmp_path, "--target", "python"]
+        cmd = [driver_executable, driver_cli, "codegen", "--output", tmp_path, "--target", "python"]
         if url:
             cmd.append(url)
-        subprocess.run(cmd)
+        subprocess.run(cmd, env=get_driver_env())
 
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             raise RuntimeError("Nothing was recorded. Close the browser only after interacting with the app.")

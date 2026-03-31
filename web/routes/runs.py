@@ -218,6 +218,11 @@ def execute_run():
         # Storage state file for session persistence across runs
         storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
 
+        # Point Playwright to bundled browsers if they exist
+        bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
+        if os.path.isdir(bundled_browsers) and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
+
         # 5. Launch ONE shared browser for the entire suite
         from playwright.sync_api import sync_playwright, expect as pw_expect
 

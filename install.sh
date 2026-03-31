@@ -77,6 +77,31 @@ else
     sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 fi
 
+# Install Playwright browsers (needed for recording and running web tests)
+info "Installing Playwright browsers..."
+if command -v qaclan >/dev/null 2>&1; then
+    # The binary bundles the Playwright driver — use it to install browsers
+    PLAYWRIGHT_BROWSERS_PATH="${HOME}/.qaclan/browsers" "${INSTALL_DIR}/${BINARY_NAME}" _pw-install 2>/dev/null || true
+fi
+
+# If the binary doesn't support _pw-install yet, try using the npx/pip fallback
+if [ ! -d "${HOME}/.qaclan/browsers" ] || [ -z "$(ls -A "${HOME}/.qaclan/browsers" 2>/dev/null)" ]; then
+    if command -v npx >/dev/null 2>&1; then
+        PLAYWRIGHT_BROWSERS_PATH="${HOME}/.qaclan/browsers" npx playwright install chromium 2>/dev/null || true
+    elif command -v pip3 >/dev/null 2>&1; then
+        pip3 install playwright -q 2>/dev/null && PLAYWRIGHT_BROWSERS_PATH="${HOME}/.qaclan/browsers" playwright install chromium 2>/dev/null || true
+    fi
+fi
+
+if [ -d "${HOME}/.qaclan/browsers" ] && [ -n "$(ls -A "${HOME}/.qaclan/browsers" 2>/dev/null)" ]; then
+    info "Playwright browsers installed."
+else
+    warn "Could not auto-install Playwright browsers."
+    warn "Recording/running web tests requires Chromium. Install manually:"
+    warn "  npx playwright install chromium"
+    warn "  OR: pip3 install playwright && playwright install chromium"
+fi
+
 # Verify
 if command -v qaclan >/dev/null 2>&1; then
     info "qaclan installed successfully!"

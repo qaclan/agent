@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import click
+import os
 
 from cli.db import init_db
 from cli.commands.project import project
@@ -21,6 +22,34 @@ def qaclan():
 
 qaclan.add_command(login, "login")
 qaclan.add_command(logout, "logout")
+
+
+@qaclan.command()
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def uninstall(yes):
+    """Remove all QAClan local data (~/.qaclan/)."""
+    import shutil
+    from rich.console import Console
+    from cli.config import QACLAN_DIR
+
+    console = Console()
+
+    if not os.path.exists(QACLAN_DIR):
+        console.print("[yellow]Nothing to remove — ~/.qaclan/ does not exist.[/yellow]")
+        return
+
+    if not yes:
+        console.print(f"[bold red]This will permanently delete all local QAClan data:[/bold red]")
+        console.print(f"  • Database (projects, features, suites, runs)")
+        console.print(f"  • Recorded scripts")
+        console.print(f"  • Config and auth credentials")
+        console.print(f"  • Path: {QACLAN_DIR}")
+        if not click.confirm("\nAre you sure?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    shutil.rmtree(QACLAN_DIR)
+    console.print("[green]✓ All QAClan local data removed.[/green]")
 
 
 # Wrap existing commands with auth gate
@@ -114,6 +143,18 @@ def serve(port, host, no_browser):
     if not no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host=host, port=port, debug=False)
+
+
+@qaclan.command("_pw-install", hidden=True)
+def pw_install():
+    """Install Playwright browsers (used by install script)."""
+    import subprocess
+    from playwright._impl._driver import compute_driver_executable, get_driver_env
+    driver_executable, driver_cli = compute_driver_executable()
+    subprocess.run(
+        [driver_executable, driver_cli, "install", "chromium"],
+        env=get_driver_env(),
+    )
 
 
 if __name__ == "__main__":
