@@ -2,6 +2,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 
 import click
@@ -50,8 +51,12 @@ def record_script(project_id, feature_id, name, url=None):
         logger.info("Set PLAYWRIGHT_BROWSERS_PATH=%s", bundled_browsers)
 
     # Resolve Playwright driver: prefer Python package, fall back to npx
+    # In Nuitka binary builds, the bundled Node driver segfaults — skip it.
     use_npx = False
+    is_frozen = getattr(sys, 'frozen', False)
     try:
+        if is_frozen:
+            raise RuntimeError("Skipping bundled driver in binary build")
         from playwright._impl._driver import compute_driver_executable, get_driver_env
         driver_executable, driver_cli = compute_driver_executable()
         logger.info("Python driver resolved: executable=%s (exists=%s), cli=%s",
@@ -70,8 +75,13 @@ def record_script(project_id, feature_id, name, url=None):
         else:
             # Also check for global playwright CLI
             pw_path = shutil.which("playwright")
-            logger.error("No Playwright driver found. npx=%s, playwright=%s", npx_path, pw_path)
-            raise RuntimeError("Playwright not found. Install via: npm i -g playwright OR pip install playwright && playwright install chromium")
+            if pw_path:
+                use_npx = "playwright_cli"
+                run_env = os.environ.copy()
+                logger.info("Using global playwright CLI: %s", pw_path)
+            else:
+                logger.error("No Playwright driver found. npx=%s, playwright=%s", npx_path, pw_path)
+                raise RuntimeError("Playwright not found. Install via: npm i -g playwright OR pip install playwright && playwright install chromium")
 
     # Recording requires a headed browser with a display
     is_docker = os.path.exists("/.dockerenv") or os.environ.get("container")
@@ -87,7 +97,9 @@ def record_script(project_id, feature_id, name, url=None):
         tmp_path = tmp.name
 
     try:
-        if use_npx:
+        if use_npx == "playwright_cli":
+            cmd = [shutil.which("playwright"), "codegen", "--output", tmp_path, "--target", "python"]
+        elif use_npx:
             cmd = [npx_path, "playwright", "codegen", "--output", tmp_path, "--target", "python"]
         else:
             cmd = [driver_executable, driver_cli, "codegen", "--output", tmp_path, "--target", "python"]
