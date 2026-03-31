@@ -3,6 +3,7 @@ load_dotenv()
 
 import click
 import os
+import sys
 
 from cli.db import init_db
 from cli.commands.project import project
@@ -156,8 +157,22 @@ def serve(port, host, no_browser):
 def pw_install():
     """Install Playwright browsers (used by install script)."""
     import subprocess
+    import shutil
+    # In Nuitka binary builds, the bundled Node driver segfaults — use system playwright
+    if getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or ""):
+        pw_path = shutil.which("playwright")
+        if pw_path:
+            subprocess.run([pw_path, "install", "chromium"])
+            return
+        npx_path = shutil.which("npx")
+        if npx_path:
+            subprocess.run([npx_path, "playwright", "install", "chromium"])
+            return
     from playwright._impl._driver import compute_driver_executable, get_driver_env
     driver_executable, driver_cli = compute_driver_executable()
+    if "/tmp/onefile_" in driver_executable:
+        click.echo("Error: Cannot use bundled Playwright driver. Install playwright globally: npm i -g playwright", err=True)
+        return
     subprocess.run(
         [driver_executable, driver_cli, "install", "chromium"],
         env=get_driver_env(),

@@ -53,7 +53,7 @@ def record_script(project_id, feature_id, name, url=None):
     # Resolve Playwright driver: prefer Python package, fall back to npx
     # In Nuitka binary builds, the bundled Node driver segfaults — skip it.
     use_npx = False
-    is_frozen = getattr(sys, 'frozen', False)
+    is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
     try:
         if is_frozen:
             raise RuntimeError("Skipping bundled driver in binary build")
@@ -61,6 +61,9 @@ def record_script(project_id, feature_id, name, url=None):
         driver_executable, driver_cli = compute_driver_executable()
         logger.info("Python driver resolved: executable=%s (exists=%s), cli=%s",
                      driver_executable, os.path.exists(driver_executable), driver_cli)
+        # Double-check: if the resolved driver is inside a Nuitka temp dir, skip it
+        if "/tmp/onefile_" in driver_executable:
+            raise RuntimeError("Skipping bundled driver extracted to Nuitka temp dir")
         if not os.path.exists(driver_executable):
             raise FileNotFoundError(f"Driver executable not found at {driver_executable}")
         run_env = get_driver_env()
