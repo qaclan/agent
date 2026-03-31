@@ -42,13 +42,22 @@ def record_script(project_id, feature_id, name, url=None):
             and not os.path.isdir(default_browsers)):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
 
+    # Resolve Playwright driver: prefer Python package, fall back to npx
+    use_npx = False
     try:
         from playwright._impl._driver import compute_driver_executable, get_driver_env
         driver_executable, driver_cli = compute_driver_executable()
         if not os.path.exists(driver_executable):
             raise FileNotFoundError()
+        run_env = get_driver_env()
     except Exception:
-        raise RuntimeError("Playwright not found. Run: pip install playwright && playwright install chromium")
+        # Binary build: Python driver not available, try npx
+        npx_path = shutil.which("npx")
+        if npx_path:
+            use_npx = True
+            run_env = os.environ.copy()
+        else:
+            raise RuntimeError("Playwright not found. Install via: npm i -g playwright OR pip install playwright && playwright install chromium")
 
     # Recording requires a headed browser with a display
     if os.path.exists("/.dockerenv") or os.environ.get("container"):
@@ -62,10 +71,13 @@ def record_script(project_id, feature_id, name, url=None):
         tmp_path = tmp.name
 
     try:
-        cmd = [driver_executable, driver_cli, "codegen", "--output", tmp_path, "--target", "python"]
+        if use_npx:
+            cmd = [npx_path, "playwright", "codegen", "--output", tmp_path, "--target", "python"]
+        else:
+            cmd = [driver_executable, driver_cli, "codegen", "--output", tmp_path, "--target", "python"]
         if url:
             cmd.append(url)
-        subprocess.run(cmd, env=get_driver_env())
+        subprocess.run(cmd, env=run_env)
 
         if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
             raise RuntimeError("Nothing was recorded. Close the browser only after interacting with the app.")
