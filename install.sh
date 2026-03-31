@@ -77,20 +77,11 @@ else
     sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 fi
 
-# Install Playwright and browsers (needed for recording and running web tests)
-info "Installing Playwright and Chromium browser..."
+# ── Install Playwright ────────────────────────────────────────────────
+info "Installing Playwright..."
 
-BROWSERS_DIR="${HOME}/.qaclan/browsers"
-
-browsers_ready() {
-    [ -d "$BROWSERS_DIR" ] && [ -n "$(ls -A "$BROWSERS_DIR" 2>/dev/null)" ]
-}
-
-install_node_if_missing() {
-    if command -v npx >/dev/null 2>&1; then
-        return 0
-    fi
-
+# Step 1: Ensure Node.js + npm are available
+if ! command -v npm >/dev/null 2>&1; then
     info "Node.js not found. Installing Node.js..."
     case "$OS" in
         macos)
@@ -117,44 +108,51 @@ install_node_if_missing() {
             ;;
     esac
 
-    if ! command -v npx >/dev/null 2>&1; then
+    if ! command -v npm >/dev/null 2>&1; then
         error "Node.js installation failed. Install Node.js manually and re-run this script."
     fi
     info "Node.js installed."
-}
-
-# Method 1: Use the qaclan binary's bundled Playwright driver
-if ! browsers_ready && command -v "${INSTALL_DIR}/${BINARY_NAME}" >/dev/null 2>&1; then
-    info "Trying bundled Playwright driver..."
-    PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" "${INSTALL_DIR}/${BINARY_NAME}" _pw-install 2>/dev/null || true
 fi
 
-# Method 2: Use npx (if already available)
-if ! browsers_ready && command -v npx >/dev/null 2>&1; then
-    info "Trying npx playwright..."
-    PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" npx playwright install chromium 2>/dev/null || true
-fi
+# Step 2: Install Playwright globally via npm
+info "Installing Playwright via npm..."
+npm install -g playwright || error "Failed to install Playwright. Run manually: npm install -g playwright"
 
-# Method 3: Use pip3 (if already available)
-if ! browsers_ready && command -v pip3 >/dev/null 2>&1; then
-    info "Trying pip3 playwright..."
-    pip3 install playwright -q 2>/dev/null && \
-        PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" playwright install --with-deps chromium 2>/dev/null || true
+if ! command -v playwright >/dev/null 2>&1; then
+    error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
 fi
+info "Playwright installed."
 
-# Method 4: Install Node.js via system package manager, then use npx
-if ! browsers_ready; then
-    install_node_if_missing
-    info "Installing Playwright via npx..."
-    PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" npx playwright install --with-deps chromium || true
-fi
+# Step 3: Install Chromium system dependencies + browser
+info "Installing Chromium browser..."
 
-# Final check — hard fail if browsers are still not installed
-if browsers_ready; then
-    info "Playwright browsers installed at ${BROWSERS_DIR}"
-else
-    error "Failed to install Playwright browsers. Install manually: npx playwright install chromium"
-fi
+# Install system deps separately (--with-deps can fail due to apt issues)
+case "$OS" in
+    linux)
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get install -y -qq libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+                libcups2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
+                libpango-1.0-0 libcairo2 libasound2 libxshmfence1 2>/dev/null || true
+        elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y nss atk at-spi2-atk cups-libs libXcomposite \
+                libXdamage libXrandr mesa-libgbm pango cairo alsa-lib 2>/dev/null || true
+        elif command -v yum >/dev/null 2>&1; then
+            sudo yum install -y nss atk at-spi2-atk cups-libs libXcomposite \
+                libXdamage libXrandr mesa-libgbm pango cairo alsa-lib 2>/dev/null || true
+        elif command -v apk >/dev/null 2>&1; then
+            sudo apk add --quiet nss cups-libs libxcomposite libxdamage \
+                libxrandr mesa-gbm pango cairo alsa-lib 2>/dev/null || true
+        elif command -v pacman >/dev/null 2>&1; then
+            sudo pacman -Sy --noconfirm nss cups libxcomposite libxdamage \
+                libxrandr mesa pango cairo alsa-lib 2>/dev/null || true
+        fi
+        ;;
+esac
+
+# Download the browser (without --with-deps to avoid apt-get update failures)
+PLAYWRIGHT_BROWSERS_PATH="${HOME}/.qaclan/browsers" playwright install chromium || \
+    error "Failed to install Chromium. Run manually: playwright install chromium"
+info "Chromium browser installed."
 
 # Verify
 if command -v qaclan >/dev/null 2>&1; then

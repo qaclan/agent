@@ -1,3 +1,4 @@
+import logging
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from cli.script_processor import inject_storage_state
 from datetime import datetime, timezone
 
 console = Console()
+logger = logging.getLogger("qaclan.record")
 
 SEPARATOR = "─" * 45
 
@@ -37,35 +39,49 @@ def record_script(project_id, feature_id, name, url=None):
     # Point Playwright to bundled browsers only when no system browsers exist
     bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
     default_browsers = os.path.expanduser("~/.cache/ms-playwright")
+    logger.info("Browser paths: bundled=%s (exists=%s), default=%s (exists=%s), env=%s",
+                bundled_browsers, os.path.isdir(bundled_browsers),
+                default_browsers, os.path.isdir(default_browsers),
+                os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
     if (os.path.isdir(bundled_browsers)
             and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
             and not os.path.isdir(default_browsers)):
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
+        logger.info("Set PLAYWRIGHT_BROWSERS_PATH=%s", bundled_browsers)
 
     # Resolve Playwright driver: prefer Python package, fall back to npx
     use_npx = False
     try:
         from playwright._impl._driver import compute_driver_executable, get_driver_env
         driver_executable, driver_cli = compute_driver_executable()
+        logger.info("Python driver resolved: executable=%s (exists=%s), cli=%s",
+                     driver_executable, os.path.exists(driver_executable), driver_cli)
         if not os.path.exists(driver_executable):
-            raise FileNotFoundError()
+            raise FileNotFoundError(f"Driver executable not found at {driver_executable}")
         run_env = get_driver_env()
-    except Exception:
+    except Exception as e:
+        logger.warning("Python Playwright driver not available: %s", e)
         # Binary build: Python driver not available, try npx
         npx_path = shutil.which("npx")
+        logger.info("npx lookup: %s", npx_path or "NOT FOUND")
         if npx_path:
             use_npx = True
             run_env = os.environ.copy()
         else:
+            # Also check for global playwright CLI
+            pw_path = shutil.which("playwright")
+            logger.error("No Playwright driver found. npx=%s, playwright=%s", npx_path, pw_path)
             raise RuntimeError("Playwright not found. Install via: npm i -g playwright OR pip install playwright && playwright install chromium")
 
     # Recording requires a headed browser with a display
-    if os.path.exists("/.dockerenv") or os.environ.get("container"):
-        if not os.environ.get("DISPLAY"):
-            raise RuntimeError(
-                "Recording requires a display (GUI). In Docker, use the CLI on your host machine instead: "
-                "qaclan web record --feature <id> --name \"name\""
-            )
+    is_docker = os.path.exists("/.dockerenv") or os.environ.get("container")
+    display = os.environ.get("DISPLAY")
+    logger.info("Environment: docker=%s, DISPLAY=%s", is_docker, display or "<not set>")
+    if is_docker and not display:
+        raise RuntimeError(
+            "Recording requires a display (GUI). In Docker, use the CLI on your host machine instead: "
+            "qaclan web record --feature <id> --name \"name\""
+        )
 
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as tmp:
         tmp_path = tmp.name
@@ -77,10 +93,33 @@ def record_script(project_id, feature_id, name, url=None):
             cmd = [driver_executable, driver_cli, "codegen", "--output", tmp_path, "--target", "python"]
         if url:
             cmd.append(url)
-        subprocess.run(cmd, env=run_env)
 
-        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
-            raise RuntimeError("Nothing was recorded. Close the browser only after interacting with the app.")
+        logger.info("Launching codegen: cmd=%s", cmd)
+        logger.info("Codegen env: PLAYWRIGHT_BROWSERS_PATH=%s, PATH=%s",
+                     run_env.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"),
+                     run_env.get("PATH", "<not set>"))
+
+        result = subprocess.run(cmd, env=run_env, capture_output=True, text=True)
+
+        logger.info("Codegen exited: code=%d", result.returncode)
+        if result.stdout:
+            logger.info("Codegen stdout: %s", result.stdout[:2000])
+        if result.stderr:
+            logger.warning("Codegen stderr: %s", result.stderr[:2000])
+
+        if result.returncode != 0:
+            logger.error("Codegen failed with exit code %d. stderr: %s", result.returncode, result.stderr[:2000])
+
+        output_exists = os.path.exists(tmp_path)
+        output_size = os.path.getsize(tmp_path) if output_exists else 0
+        logger.info("Output file: path=%s, exists=%s, size=%d", tmp_path, output_exists, output_size)
+
+        if not output_exists or output_size == 0:
+            detail = f"exit_code={result.returncode}"
+            if result.stderr:
+                detail += f", stderr={result.stderr[:500]}"
+            raise RuntimeError(f"Nothing was recorded. Codegen did not produce output ({detail}). "
+                               "Close the browser only after interacting with the app.")
 
         with open(tmp_path, "r") as f:
             raw_script = f.read()

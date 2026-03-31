@@ -131,10 +131,17 @@ def sync(sync_all_projects):
 @click.option('--no-browser', is_flag=True, help='Do not open browser automatically')
 def serve(port, host, no_browser):
     """Start the QAClan web UI."""
+    import logging
     import webbrowser
     import threading
     from rich.console import Console
     from web.server import create_app
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     console = Console()
     app = create_app()

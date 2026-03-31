@@ -1,9 +1,12 @@
+import logging
 import os
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, SCRIPTS_DIR
+
+logger = logging.getLogger("qaclan.record")
 
 bp = Blueprint('scripts', __name__)
 
@@ -209,12 +212,18 @@ def record_script_route():
         if not feature_id:
             return jsonify({"ok": False, "error": "Feature ID is required"}), 400
 
+        logger.info("POST /api/scripts/record: project=%s, feature=%s, name=%s, url=%s",
+                     project_id, feature_id, name, url)
+
         from cli.commands.web.record import record_script
         script_id, dest = record_script(project_id, feature_id, name, url)
+        logger.info("Recording succeeded: script_id=%s, dest=%s", script_id, dest)
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except (ValueError, RuntimeError) as e:
+        logger.error("Recording failed (expected): %s", e)
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
+        logger.exception("Recording failed (unexpected): %s", e)
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
