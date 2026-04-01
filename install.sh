@@ -149,8 +149,8 @@ case "$OS" in
         ;;
 esac
 
-# Download the browser (without --with-deps to avoid apt-get update failures)
-PLAYWRIGHT_BROWSERS_PATH="${HOME}/.qaclan/browsers" playwright install chromium || \
+# Download the browser to default system location (~/.cache/ms-playwright)
+playwright install chromium || \
     error "Failed to install Chromium. Run manually: playwright install chromium"
 info "Chromium browser installed."
 

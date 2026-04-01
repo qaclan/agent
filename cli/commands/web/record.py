@@ -37,18 +37,11 @@ def record_script(project_id, feature_id, name, url=None):
     if feat["channel"] != "web":
         raise ValueError(f"Feature {feature_id} is not a web feature")
 
-    # Point Playwright to bundled browsers only when no system browsers exist
-    bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
+    # Log browser path config
     default_browsers = os.path.expanduser("~/.cache/ms-playwright")
-    logger.info("Browser paths: bundled=%s (exists=%s), default=%s (exists=%s), env=%s",
-                bundled_browsers, os.path.isdir(bundled_browsers),
+    logger.info("Browser paths: default=%s (exists=%s), env=%s",
                 default_browsers, os.path.isdir(default_browsers),
                 os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
-    if (os.path.isdir(bundled_browsers)
-            and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-            and not os.path.isdir(default_browsers)):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
-        logger.info("Set PLAYWRIGHT_BROWSERS_PATH=%s", bundled_browsers)
 
     # Resolve Playwright driver: prefer Python package, fall back to npx
     # In Nuitka binary builds, the bundled Node driver segfaults — skip it.

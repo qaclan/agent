@@ -153,24 +153,14 @@ def web_run(suite_id, env_name, stop_on_fail):
     # Storage state file for session persistence across runs
     storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
 
-    # Point Playwright to real browser location
-    bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
-    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
-
     # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
+    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
     is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
 
     if is_frozen and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-        # Binary mode: always force browser path — the bundled driver looks in its
-        # own temp-dir .local-browsers which doesn't contain real browsers.
+        # Binary mode: force browser path to system location
         if os.path.isdir(default_browsers):
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_browsers
-        elif os.path.isdir(bundled_browsers):
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
-    elif (os.path.isdir(bundled_browsers)
-            and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-            and not os.path.isdir(default_browsers)):
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
     if is_frozen:
         node_path = shutil.which("node")
         if not node_path:

@@ -53,7 +53,7 @@ fi
 
 # ── Remove Playwright browsers ───────────────────────────────────────
 PW_CACHE="${HOME}/.cache/ms-playwright"
-if [ -d "${PW_CACHE}" ]; then
+if [ -d "${PW_CACHE}" ]; then   
     info "Removing Playwright browsers (${PW_CACHE})..."
     rm -rf "${PW_CACHE}"
     info "Playwright browsers removed."

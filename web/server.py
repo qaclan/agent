@@ -1,5 +1,6 @@
 import os
 import sys
+import logging
 
 from flask import Flask
 
@@ -21,6 +22,13 @@ def _get_base_dir():
 
 
 def create_app():
+    # Configure logging for run diagnostics
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     static_dir = os.path.join(_get_base_dir(), 'static')
     app = Flask(__name__, static_folder=static_dir, static_url_path='')
 

@@ -19,11 +19,30 @@ esac
 
 OUTPUT_NAME="qaclan-${OS_NAME}-${ARCH_NAME}"
 
-echo "Building ${OUTPUT_NAME}..."
+# Suggest ccache for faster rebuilds
+if ! command -v ccache &>/dev/null; then
+    echo "Tip: install ccache for much faster rebuilds (sudo apt install ccache)"
+fi
 
-python -m nuitka --standalone --onefile \
+# Dev mode: --standalone (fast, produces a directory)
+# Release mode (default): --onefile (slower, produces single binary)
+ONEFILE_FLAG="--onefile"
+if [[ "$1" == "--dev" ]]; then
+    ONEFILE_FLAG="--standalone"
+    echo "Building ${OUTPUT_NAME} (dev — standalone dir)..."
+else
+    echo "Building ${OUTPUT_NAME} (release — onefile)..."
+fi
+
+JOBS="$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+python -m nuitka $ONEFILE_FLAG \
   --output-filename="$OUTPUT_NAME" \
   --output-dir=dist \
+  --jobs="$JOBS" \
+  --lto=no \
+  --assume-yes-for-downloads \
+  --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle \
   --include-package=rich._unicode_data \
   --include-data-dir=web/static=web/static \
   qaclan.py

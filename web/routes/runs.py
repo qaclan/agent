@@ -3,11 +3,14 @@ import re
 import sys
 import shutil
 import time
+import logging
 import traceback
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
+
+logger = logging.getLogger("qaclan.runs")
 
 bp = Blueprint('runs', __name__)
 
@@ -141,12 +144,14 @@ def execute_run():
     try:
         project_id = _require_active_project()
         if not project_id:
+            logger.warning("execute_run: no active project")
             return jsonify({"ok": False, "error": "No active project"}), 400
 
         data = request.get_json(force=True)
         suite_id = data.get("suite_id", "").strip()
         env_name = data.get("env_name")
         stop_on_fail = data.get("stop_on_fail", False)
+        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s", suite_id, env_name, stop_on_fail)
 
         if not suite_id:
             return jsonify({"ok": False, "error": "suite_id is required"}), 400
@@ -159,6 +164,7 @@ def execute_run():
             (suite_id, project_id),
         ).fetchone()
         if not suite:
+            logger.error("execute_run: suite %s not found in project %s", suite_id, project_id)
             return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
         if suite["channel"] != "web":
             return jsonify({
@@ -174,7 +180,12 @@ def execute_run():
             (suite_id,),
         ).fetchall()
         if not items:
+            logger.warning("execute_run: suite %s has no scripts", suite_id)
             return jsonify({"ok": False, "error": "Suite has no scripts"}), 400
+
+        logger.info("execute_run: loaded %d scripts for suite %s (%s)", len(items), suite_id, suite["name"])
+        for item in items:
+            logger.debug("  script: %s (%s) -> %s", item["script_id"], item["script_name"], item["file_path"])
 
         # 3. Load env vars if env_name provided
         env_vars_dict = {}
@@ -194,6 +205,7 @@ def execute_run():
             ).fetchall()
             for v in variables:
                 env_vars_dict[v["key"]] = v["value"]
+            logger.info("execute_run: loaded %d env vars from environment '%s'", len(env_vars_dict), env_name)
 
         # Inject env vars into current process
         for k, v in env_vars_dict.items():
@@ -208,6 +220,7 @@ def execute_run():
             (run_id, suite_id, project_id, environment_id, len(items), now),
         )
         conn.commit()
+        logger.info("execute_run: created run %s at %s", run_id, now)
 
         total = len(items)
         passed = 0
@@ -219,53 +232,60 @@ def execute_run():
 
         # Storage state file for session persistence across runs
         storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
-
-        # Point Playwright to real browser location
-        bundled_browsers = os.path.expanduser("~/.qaclan/browsers")
-        default_browsers = os.path.expanduser("~/.cache/ms-playwright")
+        logger.debug("execute_run: storage_state_path=%s exists=%s", storage_state_path, os.path.exists(storage_state_path))
 
         # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
+        default_browsers = os.path.expanduser("~/.cache/ms-playwright")
         is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
+        logger.info("execute_run: is_frozen=%s sys.executable=%s", is_frozen, sys.executable)
 
         if is_frozen and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-            # Binary mode: always force browser path — the bundled driver looks in its
-            # own temp-dir .local-browsers which doesn't contain real browsers.
+            # Binary mode: force browser path to system location
             if os.path.isdir(default_browsers):
                 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_browsers
-            elif os.path.isdir(bundled_browsers):
-                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
-        elif (os.path.isdir(bundled_browsers)
-                and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-                and not os.path.isdir(default_browsers)):
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
+                logger.info("execute_run: set PLAYWRIGHT_BROWSERS_PATH=%s", default_browsers)
+            else:
+                logger.warning("execute_run: no browser dir found at %s", default_browsers)
+
+        logger.info("execute_run: PLAYWRIGHT_BROWSERS_PATH=%s", os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
+
         if is_frozen:
             node_path = shutil.which("node")
+            logger.info("execute_run: binary mode — node_path=%s", node_path)
             if not node_path:
+                logger.error("execute_run: Node.js not found in PATH")
                 return jsonify({"error": "Node.js is required to run tests in binary mode. Install Node.js and try again."}), 500
             try:
                 import playwright._impl._driver as _drv
                 _orig_compute = _drv.compute_driver_executable
                 def _patched_compute():
-                    _, cli = _orig_compute()
+                    _node, cli = _orig_compute()
+                    logger.debug("execute_run: patched driver — node=%s cli=%s (original node=%s)", node_path, cli, _node)
                     return node_path, cli
                 _drv.compute_driver_executable = _patched_compute
-            except Exception:
-                pass
+                logger.info("execute_run: patched Playwright driver to use system node")
+            except Exception as e:
+                logger.error("execute_run: failed to patch Playwright driver: %s", e, exc_info=True)
 
         from playwright.sync_api import sync_playwright, expect as pw_expect
+        logger.info("execute_run: starting Playwright...")
 
         with sync_playwright() as playwright:
+            logger.info("execute_run: Playwright started, launching chromium (headless=False)...")
             browser = playwright.chromium.launch(headless=False)
+            logger.info("execute_run: browser launched, creating context...")
             context = browser.new_context(
                 storage_state=storage_state_path if os.path.exists(storage_state_path) else None
             )
+            logger.info("execute_run: browser context created (storage_state=%s)", "loaded" if os.path.exists(storage_state_path) else "none")
 
             # 6. Loop through scripts
-            for item in items:
+            for idx, item in enumerate(items):
                 srun_id = generate_id("srun")
                 script_now = datetime.now(timezone.utc).isoformat()
 
                 if stopped:
+                    logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item["script_name"])
                     conn.execute(
                         "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
                         "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
@@ -281,16 +301,30 @@ def execute_run():
                     })
                     continue
 
+                logger.info("execute_run: [%d/%d] running '%s' (%s)...", idx + 1, total, item["script_name"], item["script_id"])
                 script_start = time.time()
 
                 try:
                     # Extract and patch test actions
-                    actions_src = _extract_test_actions(item["file_path"])
+                    script_path = item["file_path"]
+                    if not os.path.exists(script_path):
+                        raise FileNotFoundError(f"Script file not found: {script_path}")
+                    logger.debug("execute_run: reading script from %s", script_path)
+
+                    actions_src = _extract_test_actions(script_path)
+                    if not actions_src.strip():
+                        logger.warning("execute_run: extracted empty actions from %s", script_path)
+                    else:
+                        logger.debug("execute_run: extracted %d chars of actions:\n%s", len(actions_src), actions_src[:500])
+
                     actions_src = _patch_actions(actions_src)
+                    logger.debug("execute_run: patched actions (%d chars)", len(actions_src))
 
                     # Create a new page in the shared context
+                    logger.debug("execute_run: creating new page...")
                     page = context.new_page()
                     page.set_default_timeout(30000)
+                    logger.debug("execute_run: page created, executing actions...")
 
                     # Execute test actions with page, context, and expect in scope
                     exec(actions_src, {
@@ -301,6 +335,7 @@ def execute_run():
                         "os": os,
                     })
 
+                    logger.debug("execute_run: actions executed, waiting 2s for JS persistence...")
                     page.wait_for_timeout(2000)  # Allow JS to persist session to localStorage
                     page.close()
 
@@ -310,6 +345,7 @@ def execute_run():
                     status = "PASSED"
                     passed += 1
                     error_msg = None
+                    logger.info("execute_run: [%d/%d] %s — PASSED (%dms)", idx + 1, total, item["script_name"], duration_ms)
 
                     conn.execute(
                         "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
@@ -336,8 +372,11 @@ def execute_run():
                     finished_at = datetime.now(timezone.utc).isoformat()
                     failed += 1
                     error_msg = traceback.format_exc()
+                    logger.error("execute_run: [%d/%d] %s — FAILED (%dms): %s", idx + 1, total, item["script_name"], duration_ms, e)
+                    logger.debug("execute_run: full traceback:\n%s", error_msg)
                     if stop_on_fail:
                         stopped = True
+                        logger.info("execute_run: stop-on-fail triggered, remaining scripts will be skipped")
 
                     conn.execute(
                         "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
@@ -356,9 +395,11 @@ def execute_run():
                     })
 
             # Save storage state for session persistence
+            logger.debug("execute_run: saving storage state to %s", storage_state_path)
             context.storage_state(path=storage_state_path)
 
             # Close shared browser
+            logger.info("execute_run: closing browser...")
             context.close()
             browser.close()
 
@@ -369,6 +410,9 @@ def execute_run():
         # 8. Finalize suite_run
         final_status = "PASSED" if failed == 0 and skipped == 0 else "FAILED"
         finished_at = datetime.now(timezone.utc).isoformat()
+        total_duration_ms = int((time.time() - run_start) * 1000)
+        logger.info("execute_run: run %s finished — %s (passed=%d failed=%d skipped=%d duration=%dms)",
+                     run_id, final_status, passed, failed, skipped, total_duration_ms)
         conn.execute(
             "UPDATE suite_runs SET status = ?, passed = ?, failed = ?, skipped = ?, finished_at = ? "
             "WHERE id = ?",
@@ -387,8 +431,8 @@ def execute_run():
         conn.commit()
 
         # Sync run to cloud
+        logger.debug("execute_run: syncing run %s to cloud...", run_id)
         from cli.sync import sync_run_to_cloud
-        total_duration_ms = int((time.time() - run_start) * 1000)
         sync_run_to_cloud(
             run_id=run_id,
             suite_id=suite_id,
@@ -428,4 +472,5 @@ def execute_run():
             },
         })
     except Exception as e:
+        logger.error("execute_run: top-level exception: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
