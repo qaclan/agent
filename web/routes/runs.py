@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+import shutil
 import time
 import traceback
 from flask import Blueprint, request, jsonify
@@ -227,6 +229,22 @@ def execute_run():
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = bundled_browsers
 
         # 5. Launch ONE shared browser for the entire suite
+        # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
+        is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
+        if is_frozen:
+            node_path = shutil.which("node")
+            if not node_path:
+                return jsonify({"error": "Node.js is required to run tests in binary mode. Install Node.js and try again."}), 500
+            try:
+                import playwright._impl._driver as _drv
+                _orig_compute = _drv.compute_driver_executable
+                def _patched_compute():
+                    _, cli = _orig_compute()
+                    return node_path, cli
+                _drv.compute_driver_executable = _patched_compute
+            except Exception:
+                pass
+
         from playwright.sync_api import sync_playwright, expect as pw_expect
 
         with sync_playwright() as playwright:
