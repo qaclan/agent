@@ -5,3 +5,48 @@ __pycache__/
 .claude/
 CLAUDE.md
 openspec/
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python
+api/venv/
+api/__pycache__/
+api/app/__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Node / Next.js
+web/node_modules/
+web/.next/
+web/out/
+
+# IDE & editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker (optional local overrides)
+docker-compose.override.yml
+
+# Claude Code
+.claude/
+openspec/
+.venv/
+venv/
