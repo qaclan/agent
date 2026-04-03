@@ -22,6 +22,10 @@ def project():
 def project_create(name):
     """Create a new project and set it as active."""
     conn = get_conn()
+    existing = conn.execute("SELECT id FROM projects WHERE name = ?", (name,)).fetchone()
+    if existing:
+        console.print(f'[red]✗ Project "{name}" already exists. Run: qaclan project list[/red]')
+        return
     pid = generate_id("proj")
     now = datetime.now(timezone.utc).isoformat()
     conn.execute("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)", (pid, name, now))

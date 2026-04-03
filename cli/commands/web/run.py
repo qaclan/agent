@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -7,6 +8,7 @@ import traceback
 
 import click
 from datetime import datetime, timezone
+from pathlib import Path
 from rich.console import Console
 
 from cli.config import get_active_project
@@ -203,6 +205,9 @@ def web_run(suite_id, env_name, stop_on_fail):
             script_start = time.time()
             script_now = datetime.now(timezone.utc).isoformat()
 
+            console_errors = []
+            network_failures = []
+
             try:
                 # Extract and patch test actions
                 actions_src = _extract_test_actions(item["file_path"])
@@ -211,6 +216,17 @@ def web_run(suite_id, env_name, stop_on_fail):
                 # Create a new page in the shared context
                 page = context.new_page()
                 page.set_default_timeout(30000)
+
+                # Hook console and network error listeners
+                page.on("console", lambda msg: console_errors.append(
+                    {"type": msg.type, "text": msg.text}
+                ) if msg.type in ("error", "warning") else None)
+                page.on("pageerror", lambda err: console_errors.append(
+                    {"type": "pageerror", "text": str(err)}
+                ))
+                page.on("requestfailed", lambda req: network_failures.append(
+                    {"url": req.url, "method": req.method, "failure": req.failure}
+                ))
 
                 # Execute test actions with page, context, and expect in scope
                 exec(actions_src, {
@@ -230,15 +246,37 @@ def web_run(suite_id, env_name, stop_on_fail):
 
                 status = "PASSED"
                 passed += 1
-                console.print(f"      [green]✓ PASSED[/green] ({duration_s:.1f}s)")
+
+                # Show warnings for console/network errors even on pass
+                warn_parts = []
+                if console_errors:
+                    warn_parts.append(f"{len(console_errors)} console error(s)")
+                if network_failures:
+                    warn_parts.append(f"{len(network_failures)} network failure(s)")
+                warn_suffix = f"  [yellow]⚠ {', '.join(warn_parts)}[/yellow]" if warn_parts else ""
+                console.print(f"      [green]✓ PASSED[/green] ({duration_s:.1f}s){warn_suffix}")
 
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, duration_ms, "
-                    "error_message, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "error_message, console_errors, network_failures, console_log, network_log, "
+                    "started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"], status, duration_ms,
-                     None, script_now, finished_at),
+                     None, len(console_errors), len(network_failures),
+                     json.dumps(console_errors) if console_errors else None,
+                     json.dumps(network_failures) if network_failures else None,
+                     script_now, finished_at),
                 )
             except Exception as e:
+                # Capture screenshot before closing page
+                screenshot_path = None
+                try:
+                    screenshots_dir = Path(os.path.expanduser("~/.qaclan/screenshots"))
+                    screenshots_dir.mkdir(parents=True, exist_ok=True)
+                    screenshot_path = str(screenshots_dir / f"{srun_id}.png")
+                    page.screenshot(path=screenshot_path)
+                except Exception:
+                    screenshot_path = None
+
                 # Close page if it was opened
                 try:
                     page.close()
@@ -250,14 +288,22 @@ def web_run(suite_id, env_name, stop_on_fail):
                 finished_at = datetime.now(timezone.utc).isoformat()
                 failed += 1
                 error_msg = traceback.format_exc()
-                failed_scripts.append({"name": item["script_name"], "error": str(e)})
+
+                # Extract friendly error from traceback
+                error_lines = error_msg.strip().split('\n')
+                friendly_error = error_lines[-1] if error_lines else str(e)
+                failed_scripts.append({"name": item["script_name"], "error": friendly_error, "screenshot": screenshot_path})
                 console.print(f"      [red]✗ FAILED[/red] ({duration_s:.1f}s)")
 
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, duration_ms, "
-                    "error_message, started_at, finished_at) VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
+                    "error_message, console_errors, network_failures, console_log, network_log, "
+                    "screenshot_path, started_at, finished_at) VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"], duration_ms,
-                     error_msg, script_now, finished_at),
+                     error_msg, len(console_errors), len(network_failures),
+                     json.dumps(console_errors) if console_errors else None,
+                     json.dumps(network_failures) if network_failures else None,
+                     screenshot_path, script_now, finished_at),
                 )
                 if stop_on_fail:
                     stopped = True
@@ -294,13 +340,16 @@ def web_run(suite_id, env_name, stop_on_fail):
     conn.commit()
 
     # Sync run to cloud
-    from cli.sync import sync_run_to_cloud
+    from cli.sync import sync_run_to_cloud, _read_screenshot_b64
     script_run_rows = conn.execute(
-        "SELECT sr.script_id, s.name as script_name, sr.status, sr.duration_ms, sr.error_message, sr.order_index "
+        "SELECT sr.script_id, s.name as script_name, sr.status, sr.duration_ms, sr.error_message, "
+        "sr.order_index, sr.console_errors, sr.network_failures, sr.console_log, sr.network_log, "
+        "sr.screenshot_path "
         "FROM script_runs sr JOIN scripts s ON sr.script_id = s.id "
         "WHERE sr.suite_run_id = ? ORDER BY sr.order_index",
         (run_id,),
     ).fetchall()
+
     sync_run_to_cloud(
         run_id=run_id,
         suite_id=suite_id,
@@ -317,6 +366,11 @@ def web_run(suite_id, env_name, stop_on_fail):
                 "duration_ms": r["duration_ms"] or 0,
                 "error_output": r["error_message"],
                 "order_index": r["order_index"],
+                "console_errors": r["console_errors"] or 0,
+                "network_failures": r["network_failures"] or 0,
+                "console_log": r["console_log"],
+                "network_log": r["network_log"],
+                "screenshot_b64": _read_screenshot_b64(r["screenshot_path"]),
             }
             for r in script_run_rows
         ],
@@ -335,5 +389,7 @@ def web_run(suite_id, env_name, stop_on_fail):
         for fs in failed_scripts:
             console.print(f"  [red]✗[/red] {fs['name']}")
             console.print(f"    Error: {fs['error']}")
+            if fs.get("screenshot"):
+                console.print(f"    Screenshot: {fs['screenshot']}")
 
     console.print(f"\nRun ID: {run_id}")

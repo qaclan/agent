@@ -685,6 +685,65 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   max-height: 200px;
   overflow-y: auto;
 }
+.script-result-friendly-error {
+  font-size: 13px;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--danger);
+  padding: 6px 0 4px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.script-result-screenshot {
+  margin: 6px 0;
+}
+.script-result-screenshot img {
+  max-width: 100%;
+  max-height: 260px;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-subtle);
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.script-result-screenshot img:hover {
+  opacity: 0.85;
+}
+.script-result-diagnostics {
+  width: 100%;
+  margin-top: 4px;
+}
+.diag-details {
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  background: var(--bg-sunken, rgba(0,0,0,0.15));
+  border-radius: var(--radius-sm, 6px);
+  padding: 8px 10px;
+  margin: 4px 0 0;
+  border: 1px solid var(--border-subtle);
+  max-height: 180px;
+  overflow-y: auto;
+}
+.diag-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin: 4px 0 2px;
+}
+.diag-section-label:first-child { margin-top: 0; }
+.diag-entry {
+  color: var(--text-secondary);
+  padding: 1px 0;
+  line-height: 1.4;
+  word-break: break-all;
+}
+.diag-type {
+  font-weight: 600;
+  margin-right: 4px;
+}
+.diag-console .diag-type { color: var(--danger, #e55); }
+.diag-network .diag-type { color: var(--text-warning, #e6a700); }
+.meta-warn { color: var(--text-warning, #e6a700) !important; }
 
 /* Environment Cards */
 .env-card {

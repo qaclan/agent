@@ -133,11 +133,12 @@ def init_db():
     conn.commit()
     _migrate_cloud_id(conn)
     _migrate_cascade(conn)
+    _migrate_run_diagnostics(conn)
 
 
 def _migrate_cloud_id(conn):
     """Add cloud_id column to tables that sync with the cloud server."""
-    for table in ("projects", "features", "suites", "scripts"):
+    for table in ("projects", "features", "suites", "scripts", "environments"):
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
         except Exception:
@@ -292,4 +293,18 @@ def _migrate_cascade(conn):
         COMMIT;
     """)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.commit()
+
+
+def _migrate_run_diagnostics(conn):
+    """Add screenshot_path, console_log, and network_log columns to script_runs."""
+    for col, coltype in [
+        ("screenshot_path", "TEXT"),
+        ("console_log", "TEXT"),
+        ("network_log", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE script_runs ADD COLUMN {col} {coltype}")
+        except Exception:
+            pass  # Column already exists
     conn.commit()

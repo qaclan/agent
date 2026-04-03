@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -7,6 +8,7 @@ import logging
 import traceback
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
+from pathlib import Path
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
 
@@ -127,6 +129,7 @@ def get_run(run_id):
         script_rows = conn.execute(
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
             "scr.console_errors, scr.network_failures, scr.error_message, "
+            "scr.console_log, scr.network_log, scr.screenshot_path, "
             "scr.order_index, scr.started_at, scr.finished_at "
             "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
             "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
@@ -303,6 +306,8 @@ def execute_run():
 
                 logger.info("execute_run: [%d/%d] running '%s' (%s)...", idx + 1, total, item["script_name"], item["script_id"])
                 script_start = time.time()
+                console_errors = []
+                network_failures = []
 
                 try:
                     # Extract and patch test actions
@@ -324,6 +329,18 @@ def execute_run():
                     logger.debug("execute_run: creating new page...")
                     page = context.new_page()
                     page.set_default_timeout(30000)
+
+                    # Hook console and network error listeners
+                    page.on("console", lambda msg: console_errors.append(
+                        {"type": msg.type, "text": msg.text}
+                    ) if msg.type in ("error", "warning") else None)
+                    page.on("pageerror", lambda err: console_errors.append(
+                        {"type": "pageerror", "text": str(err)}
+                    ))
+                    page.on("requestfailed", lambda req: network_failures.append(
+                        {"url": req.url, "method": req.method, "failure": req.failure}
+                    ))
+
                     logger.debug("execute_run: page created, executing actions...")
 
                     # Execute test actions with page, context, and expect in scope
@@ -345,14 +362,21 @@ def execute_run():
                     status = "PASSED"
                     passed += 1
                     error_msg = None
-                    logger.info("execute_run: [%d/%d] %s — PASSED (%dms)", idx + 1, total, item["script_name"], duration_ms)
+                    logger.info("execute_run: [%d/%d] %s — PASSED (%dms) console_errors=%d network_failures=%d",
+                                idx + 1, total, item["script_name"], duration_ms,
+                                len(console_errors), len(network_failures))
 
                     conn.execute(
                         "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                        "duration_ms, error_message, started_at, finished_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
+                        "started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (srun_id, run_id, item["script_id"], item["order_index"],
-                         status, duration_ms, error_msg, script_now, finished_at),
+                         status, duration_ms, error_msg,
+                         len(console_errors), len(network_failures),
+                         json.dumps(console_errors) if console_errors else None,
+                         json.dumps(network_failures) if network_failures else None,
+                         script_now, finished_at),
                     )
 
                     script_results.append({
@@ -361,8 +385,22 @@ def execute_run():
                         "status": status,
                         "duration_ms": duration_ms,
                         "error_message": error_msg,
+                        "console_errors": len(console_errors),
+                        "network_failures": len(network_failures),
+                        "console_log": json.dumps(console_errors) if console_errors else None,
+                        "network_log": json.dumps(network_failures) if network_failures else None,
                     })
                 except Exception as e:
+                    # Capture screenshot before closing page
+                    screenshot_path = None
+                    try:
+                        screenshots_dir = Path(os.path.expanduser("~/.qaclan/screenshots"))
+                        screenshots_dir.mkdir(parents=True, exist_ok=True)
+                        screenshot_path = str(screenshots_dir / f"{srun_id}.png")
+                        page.screenshot(path=screenshot_path)
+                    except Exception:
+                        screenshot_path = None
+
                     try:
                         page.close()
                     except Exception:
@@ -380,10 +418,15 @@ def execute_run():
 
                     conn.execute(
                         "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                        "duration_ms, error_message, started_at, finished_at) "
-                        "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
+                        "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
+                        "screenshot_path, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (srun_id, run_id, item["script_id"], item["order_index"],
-                         duration_ms, error_msg, script_now, finished_at),
+                         duration_ms, error_msg,
+                         len(console_errors), len(network_failures),
+                         json.dumps(console_errors) if console_errors else None,
+                         json.dumps(network_failures) if network_failures else None,
+                         screenshot_path, script_now, finished_at),
                     )
 
                     script_results.append({
@@ -392,6 +435,11 @@ def execute_run():
                         "status": "FAILED",
                         "duration_ms": duration_ms,
                         "error_message": error_msg,
+                        "screenshot_path": screenshot_path,
+                        "console_errors": len(console_errors),
+                        "network_failures": len(network_failures),
+                        "console_log": json.dumps(console_errors) if console_errors else None,
+                        "network_log": json.dumps(network_failures) if network_failures else None,
                     })
 
             # Save storage state for session persistence
@@ -432,7 +480,7 @@ def execute_run():
 
         # Sync run to cloud
         logger.debug("execute_run: syncing run %s to cloud...", run_id)
-        from cli.sync import sync_run_to_cloud
+        from cli.sync import sync_run_to_cloud, _read_screenshot_b64
         sync_run_to_cloud(
             run_id=run_id,
             suite_id=suite_id,
@@ -449,6 +497,11 @@ def execute_run():
                     "duration_ms": sr.get("duration_ms", 0) or 0,
                     "error_output": sr.get("error_message"),
                     "order_index": idx,
+                    "console_errors": sr.get("console_errors", 0),
+                    "network_failures": sr.get("network_failures", 0),
+                    "console_log": sr.get("console_log"),
+                    "network_log": sr.get("network_log"),
+                    "screenshot_b64": _read_screenshot_b64(sr.get("screenshot_path")),
                 }
                 for idx, sr in enumerate(script_results)
             ],
