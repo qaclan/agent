@@ -3,7 +3,6 @@ env/
 dist/
 __pycache__/
 .claude/
-CLAUDE.md
 openspec/
 # Environment variables & secrets
 .env
@@ -40,7 +39,7 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
+npm-debug.log*script_content
 
 # Docker (optional local overrides)
 docker-compose.override.yml
@@ -49,4 +48,11 @@ docker-compose.override.yml
 .claude/
 openspec/
 .venv/
-venv/
+venv/l overrides)
+docker-compose.override.yml
+
+# Claude Code
+.claude/
+openspec/
+.venv/
+venv/ 
