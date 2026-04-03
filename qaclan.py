@@ -13,6 +13,7 @@ from cli.commands.runs import runs_group
 from cli.commands.web import web
 from cli.commands.api import api
 from cli.commands.auth import login, logout, require_auth
+from cli.commands.pull import pull
 
 
 @click.group()
@@ -69,12 +70,15 @@ def _auth_wrap(original_invoke):
     return wrapped
 
 
+_original_pull_invoke = pull.invoke
+
 project.invoke = _auth_wrap(_original_project_invoke)
 env_group.invoke = _auth_wrap(_original_env_invoke)
 status.invoke = _auth_wrap(_original_status_invoke)
 runs_group.invoke = _auth_wrap(_original_runs_invoke)
 web.invoke = _auth_wrap(_original_web_invoke)
 api.invoke = _auth_wrap(_original_api_invoke)
+pull.invoke = _auth_wrap(_original_pull_invoke)
 
 
 qaclan.add_command(project, "project")
@@ -83,6 +87,7 @@ qaclan.add_command(status, "status")
 qaclan.add_command(runs_group, "runs")
 qaclan.add_command(web, "web")
 qaclan.add_command(api, "api")
+qaclan.add_command(pull, "pull")
 
 
 # Also register `run show` at top level as `qaclan run show`
@@ -145,6 +150,17 @@ def serve(port, host, no_browser):
     )
 
     console = Console()
+
+    # Run a full sync on startup (best-effort)
+    from cli.config import get_auth_key
+    if get_auth_key():
+        console.print('[dim]Syncing to cloud...[/dim]')
+        try:
+            from cli.sync import sync_all
+            sync_all()
+        except Exception as e:
+            console.print(f'[yellow]⚠ Startup sync failed: {e}[/yellow]')
+
     app = create_app()
     url = f'http://localhost:{port}'
     console.print(f'[green]QAClan UI running at {url}[/green] — Press Ctrl+C to stop')

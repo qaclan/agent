@@ -2,7 +2,7 @@ import os
 import sys
 import logging
 
-from flask import Flask
+from flask import Flask, send_from_directory, abort
 
 from .routes.projects import bp as projects_bp
 from .routes.features import bp as features_bp
@@ -38,5 +38,16 @@ def create_app():
     @app.route('/')
     def index():
         return app.send_static_file('index.html')
+
+    @app.route('/api/screenshots/<filename>')
+    def serve_screenshot(filename):
+        """Serve failure screenshots from ~/.qaclan/screenshots/."""
+        screenshots_dir = os.path.expanduser('~/.qaclan/screenshots')
+        if not os.path.isdir(screenshots_dir):
+            abort(404)
+        # Only allow .png files to prevent path traversal
+        if not filename.endswith('.png') or '/' in filename or '\\' in filename:
+            abort(404)
+        return send_from_directory(screenshots_dir, filename)
 
     return app

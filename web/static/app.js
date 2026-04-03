@@ -1006,14 +1006,69 @@ function showRunResults(run, suiteName) {
         ? '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
         : '<span class="badge badge-neutral">SKIPPED</span>'
       const errorId = 'err-' + Math.random().toString(36).slice(2, 8)
-      const errorBlock = s.status === 'FAILED' && s.error_message
+      const traceId = 'trace-' + Math.random().toString(36).slice(2, 8)
+
+      // Extract friendly error (last line of traceback)
+      let friendlyError = ''
+      let fullTrace = ''
+      if (s.status === 'FAILED' && s.error_message) {
+        const lines = s.error_message.trim().split('\n')
+        friendlyError = lines[lines.length - 1] || ''
+        fullTrace = s.error_message
+      }
+
+      // Screenshot block
+      let screenshotBlock = ''
+      if (s.screenshot_path) {
+        const filename = s.screenshot_path.split('/').pop()
+        screenshotBlock = `<div class="script-result-screenshot">
+          <img src="/api/screenshots/${encodeURIComponent(filename)}" alt="Failure screenshot"
+               onclick="window.open(this.src, '_blank')" />
+        </div>`
+      }
+
+      // Console/network detail blocks
+      let diagnosticsBlock = ''
+      const consoleLogs = s.console_log ? (() => { try { return JSON.parse(s.console_log) } catch { return [] } })() : []
+      const networkLogs = s.network_log ? (() => { try { return JSON.parse(s.network_log) } catch { return [] } })() : []
+
+      if (consoleLogs.length > 0 || networkLogs.length > 0) {
+        const diagId = 'diag-' + Math.random().toString(36).slice(2, 8)
+        let details = ''
+        if (consoleLogs.length > 0) {
+          details += '<div class="diag-section-label">Console</div>'
+          details += consoleLogs.map(c =>
+            `<div class="diag-entry diag-console"><span class="diag-type">${escHtml(c.type)}</span> ${escHtml(c.text)}</div>`
+          ).join('')
+        }
+        if (networkLogs.length > 0) {
+          details += '<div class="diag-section-label">Network Failures</div>'
+          details += networkLogs.map(n =>
+            `<div class="diag-entry diag-network"><span class="diag-type">${escHtml(n.method)}</span> ${escHtml(n.url)}${n.failure ? ' — ' + escHtml(n.failure) : ''}</div>`
+          ).join('')
+        }
+        diagnosticsBlock = `<div class="script-result-diagnostics">
+          <div class="script-result-error-toggle" onclick="document.getElementById('${diagId}').classList.toggle('collapsed')">
+            <span class="script-result-error-label" style="color: var(--text-warning, #e6a700)">Diagnostics</span>
+            <span class="script-result-error-chevron">&#9662;</span>
+          </div>
+          <div id="${diagId}" class="script-result-error-body collapsed">
+            <div class="diag-details">${details}</div>
+          </div>
+        </div>`
+      }
+
+      // Error block with friendly message + collapsible full traceback
+      const errorBlock = s.status === 'FAILED' && friendlyError
         ? `<div class="script-result-error">
-            <div class="script-result-error-toggle" onclick="document.getElementById('${errorId}').classList.toggle('collapsed')">
-              <span class="script-result-error-label">Error</span>
+            <div class="script-result-friendly-error">${escHtml(friendlyError)}</div>
+            ${screenshotBlock}
+            <div class="script-result-error-toggle" onclick="document.getElementById('${traceId}').classList.toggle('collapsed')">
+              <span class="script-result-error-label">Full Traceback</span>
               <span class="script-result-error-chevron">&#9662;</span>
             </div>
-            <div id="${errorId}" class="script-result-error-body collapsed">
-              <pre class="script-result-error-msg">${escHtml(s.error_message)}</pre>
+            <div id="${traceId}" class="script-result-error-body collapsed">
+              <pre class="script-result-error-msg">${escHtml(fullTrace)}</pre>
             </div>
           </div>`
         : ''
@@ -1024,13 +1079,14 @@ function showRunResults(run, suiteName) {
             <div class="script-result-name">${escHtml(s.name)}</div>
             <div class="script-result-meta">
               <span>Duration: ${s.duration_ms != null ? s.duration_ms + ' ms' : '\u2014'}</span>
-              <span>Console errors: ${s.console_errors || 0}</span>
-              <span>Net: ${s.network_failures || 0}</span>
+              ${(s.console_errors || 0) > 0 ? '<span class="meta-warn">Console errors: ' + (s.console_errors || 0) + '</span>' : '<span>Console errors: 0</span>'}
+              ${(s.network_failures || 0) > 0 ? '<span class="meta-warn">Net failures: ' + (s.network_failures || 0) + '</span>' : '<span>Net: 0</span>'}
             </div>
           </div>
           ${badge}
         </div>
         ${errorBlock}
+        ${diagnosticsBlock}
       </div>`
     }).join('')}`
 

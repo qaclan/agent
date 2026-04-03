@@ -96,6 +96,37 @@ def create_suite():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route('/api/suites/<suite_id>', methods=['PUT'])
+def rename_suite(suite_id):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        data = request.get_json(force=True)
+        name = data.get("name", "").strip()
+        if not name:
+            return jsonify({"ok": False, "error": "Suite name is required"}), 400
+
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT id FROM suites WHERE id = ? AND project_id = ?",
+            (suite_id, project_id),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
+
+        conn.execute("UPDATE suites SET name = ? WHERE id = ?", (name, suite_id))
+        conn.commit()
+
+        from cli.sync import sync_suite_to_cloud
+        sync_suite_to_cloud(suite_id, name, project_id)
+
+        return jsonify({"ok": True, "id": suite_id, "name": name})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/suites/<suite_id>/scripts', methods=['POST'])
 def add_script_to_suite(suite_id):
     try:

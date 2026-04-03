@@ -1,11 +1,25 @@
 """Cloud sync helper. Wraps cli/api.py calls with error handling.
 Sync is best-effort — failures print a warning but never block the CLI."""
 
+import base64
+import os
+
 from rich.console import Console
 from cli.config import get_auth_key
 from cli import api
 
 console = Console()
+
+
+def _read_screenshot_b64(path):
+    """Read a screenshot file and return base64-encoded content, or None."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except Exception:
+        return None
 
 
 def _try_sync(label, fn):
@@ -74,7 +88,7 @@ def _ensure_suite_synced(suite_id, project_id):
     return None
 
 
-def sync_feature_to_cloud(feature_id, name, project_id):
+def sync_feature_to_cloud(feature_id, name, project_id, channel=None):
     """Sync a feature. Requires cloud_project_id."""
     key = get_auth_key()
     if not key:
@@ -82,17 +96,22 @@ def sync_feature_to_cloud(feature_id, name, project_id):
     cloud_project_id = _ensure_project_synced(project_id)
     if not cloud_project_id:
         return None
+    if not channel:
+        from cli.db import get_conn
+        row = get_conn().execute("SELECT channel FROM features WHERE id = ?", (feature_id,)).fetchone()
+        channel = row["channel"] if row else "web"
     result = _try_sync("feature", lambda: api.sync_feature(key, {
         "cli_feature_id": feature_id,
         "name": name,
         "project_id": cloud_project_id,
+        "channel": channel,
     }))
     if result:
         _save_cloud_id("features", feature_id, result["id"])
     return result
 
 
-def sync_suite_to_cloud(suite_id, name, project_id):
+def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
     """Sync a suite. Requires cloud_project_id."""
     key = get_auth_key()
     if not key:
@@ -100,22 +119,31 @@ def sync_suite_to_cloud(suite_id, name, project_id):
     cloud_project_id = _ensure_project_synced(project_id)
     if not cloud_project_id:
         return None
+    if not channel:
+        from cli.db import get_conn
+        row = get_conn().execute("SELECT channel FROM suites WHERE id = ?", (suite_id,)).fetchone()
+        channel = row["channel"] if row else "web"
     result = _try_sync("suite", lambda: api.sync_suite(key, {
         "cli_suite_id": suite_id,
         "name": name,
         "project_id": cloud_project_id,
+        "channel": channel,
     }))
     if result:
         _save_cloud_id("suites", suite_id, result["id"])
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None):
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None):
     """Sync a script. IDs are LOCAL IDs (optional)."""
     key = get_auth_key()
     if not key:
         return None
-    payload = {"cli_script_id": script_id, "name": name}
+    if not channel:
+        from cli.db import get_conn
+        row = get_conn().execute("SELECT channel FROM scripts WHERE id = ?", (script_id,)).fetchone()
+        channel = row["channel"] if row else "web"
+    payload = {"cli_script_id": script_id, "name": name, "channel": channel}
     if suite_id:
         cloud_suite_id = _get_cloud_id("suites", suite_id)
         if cloud_suite_id:
@@ -336,7 +364,8 @@ def sync_all(project_id=None):
         for run in runs:
             script_run_rows = conn.execute(
                 "SELECT scr.script_id, s.name as script_name, scr.status, scr.duration_ms, "
-                "scr.error_message, scr.order_index "
+                "scr.error_message, scr.order_index, scr.console_errors, scr.network_failures, "
+                "scr.console_log, scr.network_log, scr.screenshot_path "
                 "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
                 "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
                 (run["id"],)
@@ -359,6 +388,11 @@ def sync_all(project_id=None):
                         "duration_ms": r["duration_ms"] or 0,
                         "error_output": r["error_message"],
                         "order_index": r["order_index"],
+                        "console_errors": r["console_errors"] or 0,
+                        "network_failures": r["network_failures"] or 0,
+                        "console_log": r["console_log"],
+                        "network_log": r["network_log"],
+                        "screenshot_b64": _read_screenshot_b64(r["screenshot_path"]),
                     }
                     for r in script_run_rows
                 ],

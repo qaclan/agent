@@ -29,6 +29,11 @@ def create_project():
             return jsonify({"ok": False, "error": "Project name is required"}), 400
 
         conn = get_conn()
+
+        existing = conn.execute("SELECT id FROM projects WHERE name = ?", (name,)).fetchone()
+        if existing:
+            return jsonify({"ok": False, "error": f'Project "{name}" already exists'}), 409
+
         project_id = generate_id("proj")
         now = datetime.now(timezone.utc).isoformat()
 
