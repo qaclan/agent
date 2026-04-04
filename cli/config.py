@@ -55,6 +55,17 @@ def remove_auth_key():
     _write_config(cfg)
 
 
+def get_user_name():
+    cfg = _read_config()
+    return cfg.get("user_name")
+
+
+def set_user_name(name):
+    cfg = _read_config()
+    cfg["user_name"] = name
+    _write_config(cfg)
+
+
 def get_server_url():
     cfg = _read_config()
     return cfg.get("server_url", DEFAULT_SERVER_URL)

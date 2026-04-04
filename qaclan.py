@@ -114,20 +114,20 @@ run_group.add_command(run_show, "show")
 
 
 @qaclan.command()
-@click.option("--all", "sync_all_projects", is_flag=True, help="Sync all projects, not just the active one")
-def sync(sync_all_projects):
+@click.option("--all", "push_all_projects", is_flag=True, help="Push all projects, not just the active one")
+def push(push_all_projects):
     """Push all local data to the cloud server."""
     require_auth()
     from cli.config import get_active_project_id
     from cli.sync import sync_all
     from rich.console import Console
     console = Console()
-    if sync_all_projects:
+    if push_all_projects:
         sync_all(project_id=None)
     else:
         project_id = get_active_project_id()
         if not project_id:
-            console.print("[yellow]No active project. Syncing all projects...[/yellow]")
+            console.print("[yellow]No active project. Pushing all projects...[/yellow]")
         sync_all(project_id=project_id)
 
 

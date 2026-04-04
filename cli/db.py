@@ -134,6 +134,7 @@ def init_db():
     _migrate_cloud_id(conn)
     _migrate_cascade(conn)
     _migrate_run_diagnostics(conn)
+    _migrate_created_by(conn)
 
 
 def _migrate_cloud_id(conn):
@@ -293,6 +294,15 @@ def _migrate_cascade(conn):
         COMMIT;
     """)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.commit()
+
+
+def _migrate_created_by(conn):
+    """Add created_by column to scripts table."""
+    try:
+        conn.execute("ALTER TABLE scripts ADD COLUMN created_by TEXT")
+    except Exception:
+        pass  # Column already exists
     conn.commit()
 
 

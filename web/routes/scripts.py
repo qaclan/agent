@@ -28,7 +28,7 @@ def list_scripts():
         if feature_id:
             rows = conn.execute(
                 "SELECT s.id, s.name, s.feature_id, f.name AS feature_name, "
-                "s.channel, s.source, s.created_at "
+                "s.channel, s.source, s.created_at, s.created_by "
                 "FROM scripts s JOIN features f ON s.feature_id = f.id "
                 "WHERE s.project_id = ? AND s.feature_id = ? "
                 "ORDER BY s.created_at DESC",
@@ -37,7 +37,7 @@ def list_scripts():
         else:
             rows = conn.execute(
                 "SELECT s.id, s.name, s.feature_id, f.name AS feature_name, "
-                "s.channel, s.source, s.created_at "
+                "s.channel, s.source, s.created_at, s.created_by "
                 "FROM scripts s JOIN features f ON s.feature_id = f.id "
                 "WHERE s.project_id = ? "
                 "ORDER BY s.created_at DESC",
@@ -60,7 +60,7 @@ def get_script(script_id):
         conn = get_conn()
         row = conn.execute(
             "SELECT s.id, s.name, s.feature_id, f.name AS feature_name, "
-            "s.channel, s.source, s.file_path, s.created_at "
+            "s.channel, s.source, s.file_path, s.created_at, s.created_by "
             "FROM scripts s JOIN features f ON s.feature_id = f.id "
             "WHERE s.id = ? AND s.project_id = ?",
             (script_id, project_id),
@@ -120,10 +120,12 @@ def create_script():
         with open(file_path, "w") as f:
             f.write(content)
 
+        from cli.config import get_user_name
+        created_by = get_user_name()
         conn.execute(
-            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'WEB_CREATED', ?)",
-            (script_id, feature_id, project_id, name, file_path, now),
+            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
+            "VALUES (?, ?, ?, 'web', ?, ?, 'WEB_CREATED', ?, ?)",
+            (script_id, feature_id, project_id, name, file_path, now, created_by),
         )
         conn.commit()
 

@@ -29,7 +29,7 @@ def script_list(feature_id):
     conn = get_conn()
     if feature_id:
         rows = conn.execute(
-            "SELECT s.id, s.name, f.name as feature_name, s.source "
+            "SELECT s.id, s.name, f.name as feature_name, s.source, s.created_by "
             "FROM scripts s JOIN features f ON s.feature_id = f.id "
             "WHERE s.project_id = ? AND s.channel = 'web' AND s.feature_id = ? "
             "ORDER BY f.name, s.name",
@@ -37,7 +37,7 @@ def script_list(feature_id):
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT s.id, s.name, f.name as feature_name, s.source "
+            "SELECT s.id, s.name, f.name as feature_name, s.source, s.created_by "
             "FROM scripts s JOIN features f ON s.feature_id = f.id "
             "WHERE s.project_id = ? AND s.channel = 'web' "
             "ORDER BY f.name, s.name",
@@ -51,8 +51,9 @@ def script_list(feature_id):
     table.add_column("Name")
     table.add_column("Feature")
     table.add_column("Source")
+    table.add_column("Created By")
     for r in rows:
-        table.add_row(r["id"], r["name"], r["feature_name"], r["source"])
+        table.add_row(r["id"], r["name"], r["feature_name"], r["source"], r["created_by"] or "")
     console.print(table)
 
 
@@ -107,10 +108,12 @@ def script_import(file_path, name, feature_id):
         f.write(inject_storage_state(raw_script))
 
     now = datetime.now(timezone.utc).isoformat()
+    from cli.config import get_user_name
+    created_by = get_user_name()
     conn.execute(
-        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at) "
-        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?)",
-        (script_id, feature_id, proj["id"], name, dest, now),
+        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
+        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?, ?)",
+        (script_id, feature_id, proj["id"], name, dest, now, created_by),
     )
     conn.commit()
     console.print(f"[green]✓[/green] Script imported: {name} [{script_id}]")

@@ -42,85 +42,94 @@ def pull():
         cloud_id = p["id"]
         existing = conn.execute("SELECT id FROM projects WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
+            conn.execute("UPDATE projects SET name = ? WHERE id = ?", (p["name"], existing["id"]))
             project_map[cloud_id] = existing["id"]
-            continue
-        local_id = generate_id("proj")
-        conn.execute(
-            "INSERT INTO projects (id, name, created_at, cloud_id) VALUES (?, ?, ?, ?)",
-            (local_id, p["name"], now, cloud_id),
-        )
-        project_map[cloud_id] = local_id
-        counts["projects"] += 1
-        console.print(f"  [green]✓[/green] Project: {p['name']}")
+        else:
+            local_id = generate_id("proj")
+            conn.execute(
+                "INSERT INTO projects (id, name, created_at, cloud_id) VALUES (?, ?, ?, ?)",
+                (local_id, p["name"], now, cloud_id),
+            )
+            project_map[cloud_id] = local_id
+            counts["projects"] += 1
+            console.print(f"  [green]✓[/green] Project: {p['name']}")
 
     # 2. Features
     for f in data.get("features", []):
         cloud_id = f["id"]
         existing = conn.execute("SELECT id FROM features WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
+            conn.execute("UPDATE features SET name = ? WHERE id = ?", (f["name"], existing["id"]))
             feature_map[cloud_id] = existing["id"]
-            continue
-        local_project_id = project_map.get(f["project_id"])
-        if not local_project_id:
-            continue
-        local_id = generate_id("feat")
-        conn.execute(
-            "INSERT INTO features (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
-            (local_id, local_project_id, f["name"], now, cloud_id),
-        )
-        feature_map[cloud_id] = local_id
-        counts["features"] += 1
-        console.print(f"  [green]✓[/green] Feature: {f['name']}")
+        else:
+            local_project_id = project_map.get(f["project_id"])
+            if not local_project_id:
+                continue
+            local_id = generate_id("feat")
+            conn.execute(
+                "INSERT INTO features (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
+                (local_id, local_project_id, f["name"], now, cloud_id),
+            )
+            feature_map[cloud_id] = local_id
+            counts["features"] += 1
+            console.print(f"  [green]✓[/green] Feature: {f['name']}")
 
     # 3. Scripts (need feature_id and project_id resolved)
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
     for s in data.get("scripts", []):
         cloud_id = s["id"]
-        existing = conn.execute("SELECT id FROM scripts WHERE cloud_id = ?", (cloud_id,)).fetchone()
+        existing = conn.execute("SELECT id, file_path FROM scripts WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
+            # Update name and file content
+            conn.execute("UPDATE scripts SET name = ? WHERE id = ?", (s["name"], existing["id"]))
+            file_content = s.get("file_content")
+            if file_content and existing["file_path"]:
+                with open(existing["file_path"], "w") as fp:
+                    fp.write(file_content)
             script_map[s.get("cli_script_id", cloud_id)] = existing["id"]
-            continue
-        local_feature_id = feature_map.get(s.get("feature_id"))
-        local_project_id = project_map.get(s.get("project_id"))
-        if not local_feature_id or not local_project_id:
-            console.print(f"  [yellow]⚠[/yellow] Script skipped (missing parent): {s['name']}")
-            continue
-        # Write script file
-        local_id = generate_id("script")
-        file_content = s.get("file_content")
-        if not file_content:
-            console.print(f"  [yellow]⚠[/yellow] Script skipped (no content): {s['name']}")
-            continue
-        file_path = os.path.join(SCRIPTS_DIR, f"{local_id}.py")
-        with open(file_path, "w") as fp:
-            fp.write(file_content)
-        conn.execute(
-            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, cloud_id) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'PULLED', ?, ?)",
-            (local_id, local_feature_id, local_project_id, s["name"], file_path, now, cloud_id),
-        )
-        script_map[s.get("cli_script_id", cloud_id)] = local_id
-        counts["scripts"] += 1
-        console.print(f"  [green]✓[/green] Script: {s['name']}")
+        else:
+            local_feature_id = feature_map.get(s.get("feature_id"))
+            local_project_id = project_map.get(s.get("project_id"))
+            if not local_feature_id or not local_project_id:
+                console.print(f"  [yellow]⚠[/yellow] Script skipped (missing parent): {s['name']}")
+                continue
+            file_content = s.get("file_content")
+            if not file_content:
+                console.print(f"  [yellow]⚠[/yellow] Script skipped (no content): {s['name']}")
+                continue
+            local_id = generate_id("script")
+            file_path = os.path.join(SCRIPTS_DIR, f"{local_id}.py")
+            with open(file_path, "w") as fp:
+                fp.write(file_content)
+            created_by = s.get("created_by")
+            conn.execute(
+                "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, cloud_id, created_by) "
+                "VALUES (?, ?, ?, 'web', ?, ?, 'PULLED', ?, ?, ?)",
+                (local_id, local_feature_id, local_project_id, s["name"], file_path, now, cloud_id, created_by),
+            )
+            script_map[s.get("cli_script_id", cloud_id)] = local_id
+            counts["scripts"] += 1
+            console.print(f"  [green]✓[/green] Script: {s['name']}")
 
     # 4. Environments
     for e in data.get("environments", []):
         cloud_id = e["id"]
         existing = conn.execute("SELECT id FROM environments WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
+            conn.execute("UPDATE environments SET name = ? WHERE id = ?", (e["name"], existing["id"]))
             env_map[cloud_id] = existing["id"]
-            continue
-        local_project_id = project_map.get(e["project_id"])
-        if not local_project_id:
-            continue
-        local_id = generate_id("env")
-        conn.execute(
-            "INSERT INTO environments (id, project_id, name, created_at, cloud_id) VALUES (?, ?, ?, ?, ?)",
-            (local_id, local_project_id, e["name"], now, cloud_id),
-        )
-        env_map[cloud_id] = local_id
-        counts["environments"] += 1
-        console.print(f"  [green]✓[/green] Environment: {e['name']}")
+        else:
+            local_project_id = project_map.get(e["project_id"])
+            if not local_project_id:
+                continue
+            local_id = generate_id("env")
+            conn.execute(
+                "INSERT INTO environments (id, project_id, name, created_at, cloud_id) VALUES (?, ?, ?, ?, ?)",
+                (local_id, local_project_id, e["name"], now, cloud_id),
+            )
+            env_map[cloud_id] = local_id
+            counts["environments"] += 1
+            console.print(f"  [green]✓[/green] Environment: {e['name']}")
 
     # 5. Environment variables
     for v in data.get("env_vars", []):
@@ -132,32 +141,37 @@ def pull():
             (local_env_id, v["key"]),
         ).fetchone()
         if existing:
-            continue
-        local_id = generate_id("evar")
-        conn.execute(
-            "INSERT INTO env_vars (id, environment_id, key, value, is_secret) VALUES (?, ?, ?, ?, ?)",
-            (local_id, local_env_id, v["key"], v["value"], 1 if v.get("is_secret") else 0),
-        )
-        counts["env_vars"] += 1
+            conn.execute(
+                "UPDATE env_vars SET value = ?, is_secret = ? WHERE id = ?",
+                (v["value"], 1 if v.get("is_secret") else 0, existing["id"]),
+            )
+        else:
+            local_id = generate_id("evar")
+            conn.execute(
+                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) VALUES (?, ?, ?, ?, ?)",
+                (local_id, local_env_id, v["key"], v["value"], 1 if v.get("is_secret") else 0),
+            )
+            counts["env_vars"] += 1
 
     # 6. Suites
     for s in data.get("suites", []):
         cloud_id = s["id"]
         existing = conn.execute("SELECT id FROM suites WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
+            conn.execute("UPDATE suites SET name = ? WHERE id = ?", (s["name"], existing["id"]))
             suite_map[cloud_id] = existing["id"]
-            continue
-        local_project_id = project_map.get(s["project_id"])
-        if not local_project_id:
-            continue
-        local_id = generate_id("suite")
-        conn.execute(
-            "INSERT INTO suites (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
-            (local_id, local_project_id, s["name"], now, cloud_id),
-        )
-        suite_map[cloud_id] = local_id
-        counts["suites"] += 1
-        console.print(f"  [green]✓[/green] Suite: {s['name']}")
+        else:
+            local_project_id = project_map.get(s["project_id"])
+            if not local_project_id:
+                continue
+            local_id = generate_id("suite")
+            conn.execute(
+                "INSERT INTO suites (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
+                (local_id, local_project_id, s["name"], now, cloud_id),
+            )
+            suite_map[cloud_id] = local_id
+            counts["suites"] += 1
+            console.print(f"  [green]✓[/green] Suite: {s['name']}")
 
     # 7. Suite items
     for si in data.get("suite_items", []):
@@ -170,12 +184,16 @@ def pull():
             (local_suite_id, local_script_id),
         ).fetchone()
         if existing:
-            continue
-        local_id = generate_id("si")
-        conn.execute(
-            "INSERT INTO suite_items (id, suite_id, script_id, order_index, created_at) VALUES (?, ?, ?, ?, ?)",
-            (local_id, local_suite_id, local_script_id, si["order_index"], now),
-        )
+            conn.execute(
+                "UPDATE suite_items SET order_index = ? WHERE id = ?",
+                (si["order_index"], existing["id"]),
+            )
+        else:
+            local_id = generate_id("si")
+            conn.execute(
+                "INSERT INTO suite_items (id, suite_id, script_id, order_index, created_at) VALUES (?, ?, ?, ?, ?)",
+                (local_id, local_suite_id, local_script_id, si["order_index"], now),
+            )
 
     conn.commit()
 

@@ -1,6 +1,6 @@
 import click
 from rich.console import Console
-from cli.config import get_auth_key, set_auth_key, remove_auth_key, get_server_url, set_server_url
+from cli.config import get_auth_key, set_auth_key, remove_auth_key, get_server_url, set_server_url, set_user_name
 from cli.api import validate_auth_key
 
 console = Console()
@@ -30,6 +30,7 @@ def login(key, server):
         raise SystemExit(1)
 
     set_auth_key(key)
+    set_user_name(user.get('name', ''))
     console.print(f"[green]✓ Logged in as {user['name']} ({user['email']})[/green]")
 
 

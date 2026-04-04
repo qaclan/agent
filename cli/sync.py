@@ -141,9 +141,14 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
         return None
     if not channel:
         from cli.db import get_conn
-        row = get_conn().execute("SELECT channel FROM scripts WHERE id = ?", (script_id,)).fetchone()
+        row = get_conn().execute("SELECT channel, created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
         channel = row["channel"] if row else "web"
+    else:
+        from cli.db import get_conn
+        row = get_conn().execute("SELECT created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
     payload = {"cli_script_id": script_id, "name": name, "channel": channel}
+    if row and row["created_by"]:
+        payload["created_by"] = row["created_by"]
     if suite_id:
         cloud_suite_id = _get_cloud_id("suites", suite_id)
         if cloud_suite_id:
@@ -158,7 +163,10 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
             payload["project_id"] = cloud_project_id
     if file_content is not None:
         payload["file_content"] = file_content
-    return _try_sync("script", lambda: api.sync_script(key, payload))
+    result = _try_sync("script", lambda: api.sync_script(key, payload))
+    if result and result.get("id"):
+        _save_cloud_id("scripts", script_id, result["id"])
+    return result
 
 
 # --- Delete operations ---
@@ -232,11 +240,14 @@ def sync_environment_to_cloud(env_id, name, project_id):
     cloud_project_id = _ensure_project_synced(project_id)
     if not cloud_project_id:
         return None
-    return _try_sync("environment", lambda: api.sync_environment(key, {
+    result = _try_sync("environment", lambda: api.sync_environment(key, {
         "cli_environment_id": str(env_id),
         "name": name,
         "project_id": cloud_project_id,
     }))
+    if result and result.get("id"):
+        _save_cloud_id("environments", env_id, result["id"])
+    return result
 
 
 def sync_env_vars_to_cloud(env_id):

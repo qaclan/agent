@@ -140,10 +140,12 @@ def record_script(project_id, feature_id, name, url=None):
             f.write(processed_script)
 
         now = datetime.now(timezone.utc).isoformat()
+        from cli.config import get_user_name
+        created_by = get_user_name()
         conn.execute(
-            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'CLI_RECORDED', ?)",
-            (script_id, feature_id, project_id, name, dest, now),
+            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
+            "VALUES (?, ?, ?, 'web', ?, ?, 'CLI_RECORDED', ?, ?)",
+            (script_id, feature_id, project_id, name, dest, now, created_by),
         )
         conn.commit()
 
