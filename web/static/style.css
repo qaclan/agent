@@ -777,6 +777,12 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   justify-content: space-between;
 }
 
+.env-footer > div {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .create-env-form {
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
