@@ -3,7 +3,7 @@ from rich.console import Console
 
 console = Console()
 
-COMING_SOON = "[yellow]⚠[/yellow] API testing is coming soon."
+COMING_SOON = "[yellow]-[/yellow] API testing is coming soon."
 
 
 @click.group()

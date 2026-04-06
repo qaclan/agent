@@ -158,6 +158,108 @@ def add_or_update_var(env_name):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route('/api/envs/<env_name>/vars/bulk', methods=['POST'])
+def bulk_update_vars(env_name):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        conn = get_conn()
+        env_row = conn.execute(
+            "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+            (project_id, env_name),
+        ).fetchone()
+        if not env_row:
+            return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
+
+        data = request.get_json(force=True)
+        vars_list = data.get("vars", [])
+
+        environment_id = env_row["id"]
+
+        # Replace all vars: delete existing, insert new
+        conn.execute("DELETE FROM env_vars WHERE environment_id = ?", (environment_id,))
+        for v in vars_list:
+            key = v.get("key", "").strip()
+            if not key:
+                continue
+            value = v.get("value", "")
+            is_secret = int(v.get("is_secret", 0))
+            var_id = generate_id("evar")
+            conn.execute(
+                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (var_id, environment_id, key, value, is_secret),
+            )
+        conn.commit()
+
+        from cli.sync import sync_env_vars_to_cloud
+        sync_env_vars_to_cloud(environment_id)
+
+        return jsonify({"ok": True, "count": len([v for v in vars_list if v.get("key", "").strip()])})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/envs/<env_name>/copy', methods=['POST'])
+def copy_env(env_name):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        conn = get_conn()
+        src_env = conn.execute(
+            "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+            (project_id, env_name),
+        ).fetchone()
+        if not src_env:
+            return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
+
+        data = request.get_json(force=True)
+        new_name = data.get("new_name", "").strip()
+        if not new_name:
+            return jsonify({"ok": False, "error": "New environment name is required"}), 400
+
+        existing = conn.execute(
+            "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+            (project_id, new_name),
+        ).fetchone()
+        if existing:
+            return jsonify({"ok": False, "error": f"Environment \"{new_name}\" already exists"}), 409
+
+        # Create new environment
+        new_env_id = generate_id("env")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO environments (id, project_id, name, created_at) VALUES (?, ?, ?, ?)",
+            (new_env_id, project_id, new_name, now),
+        )
+
+        # Copy all vars from source
+        src_vars = conn.execute(
+            "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
+            (src_env["id"],),
+        ).fetchall()
+        for v in src_vars:
+            var_id = generate_id("evar")
+            conn.execute(
+                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (var_id, new_env_id, v["key"], v["value"], v["is_secret"]),
+            )
+        conn.commit()
+
+        from cli.sync import sync_environment_to_cloud, sync_env_vars_to_cloud
+        sync_environment_to_cloud(new_env_id, new_name, project_id)
+        sync_env_vars_to_cloud(new_env_id)
+
+        return jsonify({"ok": True, "id": new_env_id, "name": new_name}), 201
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/envs/<env_name>/vars/<key>', methods=['DELETE'])
 def delete_var(env_name, key):
     try:
