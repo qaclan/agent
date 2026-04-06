@@ -135,6 +135,7 @@ def init_db():
     _migrate_cascade(conn)
     _migrate_run_diagnostics(conn)
     _migrate_created_by(conn)
+    _migrate_run_options(conn)
 
 
 def _migrate_cloud_id(conn):
@@ -303,6 +304,16 @@ def _migrate_created_by(conn):
         conn.execute("ALTER TABLE scripts ADD COLUMN created_by TEXT")
     except Exception:
         pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_run_options(conn):
+    """Add browser, resolution, headless columns to suite_runs."""
+    for col, coltype in [("browser", "TEXT"), ("resolution", "TEXT"), ("headless", "INTEGER")]:
+        try:
+            conn.execute(f"ALTER TABLE suite_runs ADD COLUMN {col} {coltype}")
+        except Exception:
+            pass
     conn.commit()
 
 

@@ -50,14 +50,16 @@ def sync_project_to_cloud(project_id, name):
     key = get_auth_key()
     if not key:
         return None
+    cloud_id = _get_cloud_id("projects", project_id)
     result = _try_sync("project", lambda: api.sync_project(key, {
         "cli_project_id": project_id,
+        "cloud_id": cloud_id,
         "name": name,
     }))
     if result:
         _save_cloud_id("projects", project_id, result["id"])
         return result["id"]
-    return None
+    return cloud_id
 
 
 def _ensure_project_synced(project_id):
@@ -100,8 +102,10 @@ def sync_feature_to_cloud(feature_id, name, project_id, channel=None):
         from cli.db import get_conn
         row = get_conn().execute("SELECT channel FROM features WHERE id = ?", (feature_id,)).fetchone()
         channel = row["channel"] if row else "web"
+    cloud_id = _get_cloud_id("features", feature_id)
     result = _try_sync("feature", lambda: api.sync_feature(key, {
         "cli_feature_id": feature_id,
+        "cloud_id": cloud_id,
         "name": name,
         "project_id": cloud_project_id,
         "channel": channel,
@@ -123,8 +127,10 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
         from cli.db import get_conn
         row = get_conn().execute("SELECT channel FROM suites WHERE id = ?", (suite_id,)).fetchone()
         channel = row["channel"] if row else "web"
+    cloud_id = _get_cloud_id("suites", suite_id)
     result = _try_sync("suite", lambda: api.sync_suite(key, {
         "cli_suite_id": suite_id,
+        "cloud_id": cloud_id,
         "name": name,
         "project_id": cloud_project_id,
         "channel": channel,
@@ -146,7 +152,8 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
     else:
         from cli.db import get_conn
         row = get_conn().execute("SELECT created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
-    payload = {"cli_script_id": script_id, "name": name, "channel": channel}
+    cloud_id = _get_cloud_id("scripts", script_id)
+    payload = {"cli_script_id": script_id, "cloud_id": cloud_id, "name": name, "channel": channel}
     if row and row["created_by"]:
         payload["created_by"] = row["created_by"]
     if suite_id:
@@ -224,9 +231,18 @@ def sync_suite_items_to_cloud(suite_id, project_id):
         "SELECT script_id, order_index FROM suite_items WHERE suite_id = ? ORDER BY order_index",
         (suite_id,)
     ).fetchall()
+    cloud_suite_id = _get_cloud_id("suites", suite_id)
     return _try_sync("suite items", lambda: api.sync_suite_items(key, {
         "cli_suite_id": str(suite_id),
-        "items": [{"cli_script_id": str(r["script_id"]), "order_index": r["order_index"]} for r in items],
+        "cloud_suite_id": cloud_suite_id,
+        "items": [
+            {
+                "cli_script_id": str(r["script_id"]),
+                "cloud_script_id": _get_cloud_id("scripts", r["script_id"]),
+                "order_index": r["order_index"],
+            }
+            for r in items
+        ],
     }))
 
 
@@ -240,8 +256,10 @@ def sync_environment_to_cloud(env_id, name, project_id):
     cloud_project_id = _ensure_project_synced(project_id)
     if not cloud_project_id:
         return None
+    cloud_id = _get_cloud_id("environments", env_id)
     result = _try_sync("environment", lambda: api.sync_environment(key, {
         "cli_environment_id": str(env_id),
+        "cloud_id": cloud_id,
         "name": name,
         "project_id": cloud_project_id,
     }))
@@ -259,8 +277,10 @@ def sync_env_vars_to_cloud(env_id):
     rows = get_conn().execute(
         "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?", (env_id,)
     ).fetchall()
+    cloud_env_id = _get_cloud_id("environments", env_id)
     return _try_sync("env vars", lambda: api.sync_env_vars(key, {
         "cli_environment_id": str(env_id),
+        "cloud_environment_id": cloud_env_id,
         "vars": [{"key": r["key"], "value": r["value"], "is_secret": bool(r["is_secret"])} for r in rows],
     }))
 
@@ -368,7 +388,8 @@ def sync_all(project_id=None):
 
         # Past runs
         runs = conn.execute(
-            "SELECT sr.id, sr.suite_id, sr.status, sr.started_at, sr.finished_at "
+            "SELECT sr.id, sr.suite_id, sr.status, sr.started_at, sr.finished_at, "
+            "sr.browser, sr.resolution, sr.headless "
             "FROM suite_runs sr WHERE sr.project_id = ? ORDER BY sr.started_at",
             (pid,)
         ).fetchall()
@@ -391,6 +412,9 @@ def sync_all(project_id=None):
                 completed_at=finished,
                 duration_ms=0,
                 project_id=pid,
+                browser=run["browser"],
+                resolution=run["resolution"],
+                headless=bool(run["headless"]) if run["headless"] is not None else None,
                 script_results=[
                     {
                         "script_id": r["script_id"],
@@ -423,7 +447,8 @@ def sync_all(project_id=None):
                   f"{total_synced['runs']} runs")
 
 
-def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, duration_ms, script_results, project_id=None):
+def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, duration_ms, script_results,
+                      project_id=None, browser=None, resolution=None, headless=None):
     """Sync a completed test run with all script results.
     Ensures the parent suite (and its project) are synced first."""
     key = get_auth_key()
@@ -431,7 +456,7 @@ def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, durati
         return None
     if project_id and suite_id:
         _ensure_suite_synced(suite_id, project_id)
-    return _try_sync("run", lambda: api.sync_run(key, {
+    payload = {
         "run_id": run_id,
         "suite_id": suite_id,
         "status": status.lower(),
@@ -439,4 +464,11 @@ def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, durati
         "completed_at": completed_at,
         "duration_ms": duration_ms,
         "script_results": script_results,
-    }))
+    }
+    if browser:
+        payload["browser"] = browser
+    if resolution:
+        payload["resolution"] = resolution
+    if headless is not None:
+        payload["headless"] = headless
+    return _try_sync("run", lambda: api.sync_run(key, payload))

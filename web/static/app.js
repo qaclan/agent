@@ -958,14 +958,43 @@ async function runSuiteModal(id, name) {
         ${envs.map(e => `<option value="${e.name}">${escHtml(e.name)}</option>`).join('')}
       </select>
     </div>
-    <label class="checkbox-wrap">
-      <input type="checkbox" id="run-stop-on-fail">
-      Stop on first failure
-    </label>`, [
+    <div style="display:flex;gap:12px">
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Browser</label>
+        <select id="run-browser">
+          <option value="chromium" selected>Chromium</option>
+          <option value="firefox">Firefox</option>
+          <option value="webkit">WebKit</option>
+        </select>
+      </div>
+      <div class="form-group" style="flex:1">
+        <label class="form-label">Resolution</label>
+        <select id="run-resolution">
+          <option value="">Default</option>
+          <option value="1920x1080">1920x1080</option>
+          <option value="1366x768">1366x768</option>
+          <option value="1280x720">1280x720</option>
+          <option value="390x844">390x844 (Mobile)</option>
+        </select>
+      </div>
+    </div>
+    <div style="display:flex;gap:16px">
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="run-headless">
+        Headless
+      </label>
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="run-stop-on-fail">
+        Stop on first failure
+      </label>
+    </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Run Suite', cls: 'btn-primary', action: async () => {
       const env_name = document.getElementById('run-env').value || undefined
       const stop_on_fail = document.getElementById('run-stop-on-fail').checked
+      const browser = document.getElementById('run-browser').value
+      const resolution = document.getElementById('run-resolution').value || undefined
+      const headless = document.getElementById('run-headless').checked
       // Show spinner
       document.querySelector('.modal-body').innerHTML = `
         <div class="loading-state">
@@ -974,7 +1003,7 @@ async function runSuiteModal(id, name) {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail })
+      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless })
       if (res.ok === false) {
         document.querySelector('.modal-body').innerHTML = `<p style="color:var(--danger)">${escHtml(res.error)}</p>`
         return

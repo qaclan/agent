@@ -115,7 +115,7 @@ def get_run(run_id):
         row = conn.execute(
             "SELECT sr.id, sr.suite_id, su.name AS suite_name, sr.environment_id, "
             "sr.channel, sr.status, sr.total, sr.passed, sr.failed, sr.skipped, "
-            "sr.started_at, sr.finished_at "
+            "sr.started_at, sr.finished_at, sr.browser, sr.resolution, sr.headless "
             "FROM suite_runs sr JOIN suites su ON sr.suite_id = su.id "
             "WHERE sr.id = ? AND sr.project_id = ?",
             (run_id, project_id),
@@ -154,7 +154,11 @@ def execute_run():
         suite_id = data.get("suite_id", "").strip()
         env_name = data.get("env_name")
         stop_on_fail = data.get("stop_on_fail", False)
-        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s", suite_id, env_name, stop_on_fail)
+        browser_type = data.get("browser", "chromium")
+        resolution = data.get("resolution") or None
+        headless = data.get("headless", False)
+        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s",
+                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless)
 
         if not suite_id:
             return jsonify({"ok": False, "error": "suite_id is required"}), 400
@@ -218,9 +222,9 @@ def execute_run():
         run_id = generate_id("run")
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at) "
-            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?)",
-            (run_id, suite_id, project_id, environment_id, len(items), now),
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless) "
+            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?)",
+            (run_id, suite_id, project_id, environment_id, len(items), now, browser_type, resolution, 1 if headless else 0),
         )
         conn.commit()
         logger.info("execute_run: created run %s at %s", run_id, now)
@@ -274,13 +278,19 @@ def execute_run():
         logger.info("execute_run: starting Playwright...")
 
         with sync_playwright() as playwright:
-            logger.info("execute_run: Playwright started, launching chromium (headless=False)...")
-            browser = playwright.chromium.launch(headless=False)
+            browser_engine = getattr(playwright, browser_type)
+            logger.info("execute_run: Playwright started, launching %s (headless=%s)...", browser_type, headless)
+            browser_inst = browser_engine.launch(headless=headless)
             logger.info("execute_run: browser launched, creating context...")
-            context = browser.new_context(
-                storage_state=storage_state_path if os.path.exists(storage_state_path) else None
-            )
-            logger.info("execute_run: browser context created (storage_state=%s)", "loaded" if os.path.exists(storage_state_path) else "none")
+            context_opts = {}
+            if os.path.exists(storage_state_path):
+                context_opts["storage_state"] = storage_state_path
+            if resolution:
+                w, h = resolution.split("x")
+                context_opts["viewport"] = {"width": int(w), "height": int(h)}
+            context = browser_inst.new_context(**context_opts)
+            logger.info("execute_run: browser context created (storage_state=%s, resolution=%s)",
+                        "loaded" if os.path.exists(storage_state_path) else "none", resolution or "default")
 
             # 6. Loop through scripts
             for idx, item in enumerate(items):
@@ -449,7 +459,7 @@ def execute_run():
             # Close shared browser
             logger.info("execute_run: closing browser...")
             context.close()
-            browser.close()
+            browser_inst.close()
 
         # Clean up injected env vars
         for k in env_vars_dict:
@@ -489,6 +499,9 @@ def execute_run():
             completed_at=finished_at,
             duration_ms=total_duration_ms,
             project_id=project_id,
+            browser=browser_type,
+            resolution=resolution,
+            headless=headless,
             script_results=[
                 {
                     "script_id": sr["script_id"],

@@ -81,7 +81,10 @@ def _patch_actions(actions_src):
 @click.option("--suite", "suite_id", required=True, help="Suite ID to run")
 @click.option("--env", "env_name", default=None, help="Environment name")
 @click.option("--stop-on-fail", is_flag=True, help="Stop on first failure")
-def web_run(suite_id, env_name, stop_on_fail):
+@click.option("--browser", type=click.Choice(["chromium", "firefox", "webkit"]), default="chromium", help="Browser engine")
+@click.option("--resolution", default=None, help="Viewport WxH, e.g. 1920x1080")
+@click.option("--headless", is_flag=True, default=False, help="Run in headless mode")
+def web_run(suite_id, env_name, stop_on_fail, browser, resolution, headless):
     """Execute a web test suite."""
     proj = get_active_project(console)
     if not proj:
@@ -138,9 +141,9 @@ def web_run(suite_id, env_name, stop_on_fail):
     run_id = generate_id("run")
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at) "
-        "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?)",
-        (run_id, suite_id, proj["id"], environment_id, len(items), now),
+        "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless) "
+        "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?)",
+        (run_id, suite_id, proj["id"], environment_id, len(items), now, browser, resolution, 1 if headless else 0),
     )
     conn.commit()
 
@@ -181,10 +184,15 @@ def web_run(suite_id, env_name, stop_on_fail):
     from playwright.sync_api import sync_playwright, expect as pw_expect
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=False)
-        context = browser.new_context(
-            storage_state=storage_state_path if os.path.exists(storage_state_path) else None
-        )
+        browser_engine = getattr(playwright, browser)
+        browser_inst = browser_engine.launch(headless=headless)
+        context_opts = {}
+        if os.path.exists(storage_state_path):
+            context_opts["storage_state"] = storage_state_path
+        if resolution:
+            w, h = resolution.split("x")
+            context_opts["viewport"] = {"width": int(w), "height": int(h)}
+        context = browser_inst.new_context(**context_opts)
 
         for i, item in enumerate(items):
             if stopped:
@@ -313,7 +321,7 @@ def web_run(suite_id, env_name, stop_on_fail):
 
         # Close shared browser
         context.close()
-        browser.close()
+        browser_inst.close()
 
     # Clean up injected env vars
     for k in env_vars_dict:
@@ -358,6 +366,9 @@ def web_run(suite_id, env_name, stop_on_fail):
         completed_at=finished_at,
         duration_ms=int(total_duration * 1000),
         project_id=proj["id"],
+        browser=browser,
+        resolution=resolution,
+        headless=headless,
         script_results=[
             {
                 "script_id": r["script_id"],
