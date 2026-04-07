@@ -116,7 +116,7 @@ fi
 
 # Step 2: Install Playwright globally via npm
 info "Installing Playwright via npm..."
-npm install -g playwright || error "Failed to install Playwright. Run manually: npm install -g playwright"
+npm install -g playwright@1.58.0 || error "Failed to install Playwright. Run manually: npm install -g playwright@1.58.0"
 
 if ! command -v playwright >/dev/null 2>&1; then
     error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
