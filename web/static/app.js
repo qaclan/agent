@@ -1316,7 +1316,7 @@ function createEnvModal() {
       if (res.ok === false) { toast(res.error, 'error'); return }
       const vars = _collectVarsFromTable(tableId)
       if (vars.length > 0) {
-        const bulkRes = await api('POST', '/envs/' + encodeURIComponent(name) + '/vars/bulk', { vars })
+        const bulkRes = await api('POST', '/envs/' + encodeURIComponent(name) + '/vars', { vars })
         if (bulkRes.ok === false) { toast(bulkRes.error, 'error'); return }
       }
       closeModal(); toast('Environment "' + name + '" created')
@@ -1327,7 +1327,7 @@ function createEnvModal() {
 
 async function saveEnvVarsBulk(envName, tableId) {
   const vars = _collectVarsFromTable(tableId)
-  const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/vars/bulk', { vars })
+  const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/vars', { vars })
   if (res.ok === false) { toast(res.error, 'error'); return }
   toast('Variables saved')
   renderEnvsPage()

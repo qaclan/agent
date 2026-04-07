@@ -103,63 +103,63 @@ def create_env():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# @bp.route('/api/envs/<env_name>/vars', methods=['POST'])
+# def add_or_update_var(env_name):
+#     """Add or update a single env var. Kept for reference / future CLI use."""
+#     try:
+#         project_id = _require_active_project()
+#         if not project_id:
+#             return jsonify({"ok": False, "error": "No active project"}), 400
+#
+#         conn = get_conn()
+#         env_row = conn.execute(
+#             "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+#             (project_id, env_name),
+#         ).fetchone()
+#         if not env_row:
+#             return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
+#
+#         data = request.get_json(force=True)
+#         key = data.get("key", "").strip()
+#         value = data.get("value", "")
+#         is_secret = int(data.get("is_secret", 0))
+#
+#         if not key:
+#             return jsonify({"ok": False, "error": "Variable key is required"}), 400
+#
+#         environment_id = env_row["id"]
+#
+#         existing = conn.execute(
+#             "SELECT id FROM env_vars WHERE environment_id = ? AND key = ?",
+#             (environment_id, key),
+#         ).fetchone()
+#
+#         if existing:
+#             conn.execute(
+#                 "UPDATE env_vars SET value = ?, is_secret = ? WHERE id = ?",
+#                 (value, is_secret, existing["id"]),
+#             )
+#             conn.commit()
+#             from cli.sync import sync_env_vars_to_cloud
+#             sync_env_vars_to_cloud(environment_id)
+#             return jsonify({"ok": True, "id": existing["id"], "action": "updated"})
+#         else:
+#             var_id = generate_id("evar")
+#             conn.execute(
+#                 "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+#                 "VALUES (?, ?, ?, ?, ?)",
+#                 (var_id, environment_id, key, value, is_secret),
+#             )
+#             conn.commit()
+#             from cli.sync import sync_env_vars_to_cloud
+#             sync_env_vars_to_cloud(environment_id)
+#             return jsonify({"ok": True, "id": var_id, "action": "created"}), 201
+#     except Exception as e:
+#         return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/envs/<env_name>/vars', methods=['POST'])
-def add_or_update_var(env_name):
-    try:
-        project_id = _require_active_project()
-        if not project_id:
-            return jsonify({"ok": False, "error": "No active project"}), 400
-
-        conn = get_conn()
-        env_row = conn.execute(
-            "SELECT id FROM environments WHERE project_id = ? AND name = ?",
-            (project_id, env_name),
-        ).fetchone()
-        if not env_row:
-            return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
-
-        data = request.get_json(force=True)
-        key = data.get("key", "").strip()
-        value = data.get("value", "")
-        is_secret = int(data.get("is_secret", 0))
-
-        if not key:
-            return jsonify({"ok": False, "error": "Variable key is required"}), 400
-
-        environment_id = env_row["id"]
-
-        # Check if variable with same key already exists
-        existing = conn.execute(
-            "SELECT id FROM env_vars WHERE environment_id = ? AND key = ?",
-            (environment_id, key),
-        ).fetchone()
-
-        if existing:
-            conn.execute(
-                "UPDATE env_vars SET value = ?, is_secret = ? WHERE id = ?",
-                (value, is_secret, existing["id"]),
-            )
-            conn.commit()
-            from cli.sync import sync_env_vars_to_cloud
-            sync_env_vars_to_cloud(environment_id)
-            return jsonify({"ok": True, "id": existing["id"], "action": "updated"})
-        else:
-            var_id = generate_id("evar")
-            conn.execute(
-                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (var_id, environment_id, key, value, is_secret),
-            )
-            conn.commit()
-            from cli.sync import sync_env_vars_to_cloud
-            sync_env_vars_to_cloud(environment_id)
-            return jsonify({"ok": True, "id": var_id, "action": "created"}), 201
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@bp.route('/api/envs/<env_name>/vars/bulk', methods=['POST'])
-def bulk_update_vars(env_name):
+def update_vars(env_name):
     try:
         project_id = _require_active_project()
         if not project_id:
@@ -180,18 +180,15 @@ def bulk_update_vars(env_name):
 
         # Replace all vars: delete existing, insert new
         conn.execute("DELETE FROM env_vars WHERE environment_id = ?", (environment_id,))
-        for v in vars_list:
-            key = v.get("key", "").strip()
-            if not key:
-                continue
-            value = v.get("value", "")
-            is_secret = int(v.get("is_secret", 0))
-            var_id = generate_id("evar")
-            conn.execute(
-                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (var_id, environment_id, key, value, is_secret),
-            )
+        rows = [
+            (generate_id("evar"), environment_id, v.get("key", "").strip(), v.get("value", ""), int(v.get("is_secret", 0)))
+            for v in vars_list if v.get("key", "").strip()
+        ]
+        conn.executemany(
+            "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
         conn.commit()
 
         from cli.sync import sync_env_vars_to_cloud
@@ -242,13 +239,15 @@ def copy_env(env_name):
             "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
             (src_env["id"],),
         ).fetchall()
-        for v in src_vars:
-            var_id = generate_id("evar")
-            conn.execute(
-                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (var_id, new_env_id, v["key"], v["value"], v["is_secret"]),
-            )
+        rows = [
+            (generate_id("evar"), new_env_id, v["key"], v["value"], v["is_secret"])
+            for v in src_vars
+        ]
+        conn.executemany(
+            "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+            "VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
         conn.commit()
 
         from cli.sync import sync_environment_to_cloud, sync_env_vars_to_cloud
