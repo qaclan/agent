@@ -31,7 +31,7 @@ def project_create(name):
     conn.execute("INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)", (pid, name, now))
     conn.commit()
     set_active_project_id(pid)
-    console.print(f"[green]✓[/green] Project created: {name} [{pid}]")
+    console.print(f"[green]-[/green] Project created: {name} [{pid}]")
     console.print(f"Active project set to: {name}")
     from cli.sync import sync_project_to_cloud
     sync_project_to_cloud(pid, name)

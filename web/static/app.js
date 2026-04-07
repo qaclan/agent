@@ -1204,13 +1204,7 @@ async function renderEnvsPage() {
         <h2>Environments</h2>
         <p>Manage environment variables</p>
       </div>
-    </div>
-    <div class="create-env-form">
-      <div class="form-group" style="margin-bottom:0;flex:1">
-        <label class="form-label">New Environment</label>
-        <input type="text" id="new-env-name" placeholder="e.g. staging">
-      </div>
-      <button class="btn btn-primary" onclick="createEnv()">Create</button>
+      <button class="btn btn-primary" onclick="createEnvModal()">+ New Environment</button>
     </div>
     <div id="env-cards">
       ${envs.length === 0
@@ -1223,83 +1217,139 @@ async function renderEnvsPage() {
   }
 }
 
+function _envVarRowHTML(key, value, isSecret) {
+  return `
+    <tr>
+      <td style="width:30%"><input type="text" class="env-row-key" value="${escHtml(key)}" placeholder="KEY"></td>
+      <td><input type="${isSecret ? 'password' : 'text'}" class="env-row-value" value="${escHtml(value)}" placeholder="value"></td>
+      <td style="width:60px">
+        <label class="checkbox-wrap" style="margin:0" title="Secret"><input type="checkbox" class="env-row-secret" ${isSecret ? 'checked' : ''}> \uD83D\uDD12</label>
+      </td>
+      <td style="width:40px"><button class="btn btn-xs btn-outline-danger" onclick="this.closest('tr').remove()">\u2715</button></td>
+    </tr>`
+}
+
+function _addEnvVarRow(tableId) {
+  const table = document.getElementById(tableId)
+  if (!table) return
+  table.insertAdjacentHTML('beforeend', _envVarRowHTML('', '', false))
+  const rows = table.querySelectorAll('tr')
+  rows[rows.length - 1].querySelector('.env-row-key')?.focus()
+}
+
+function _collectVarsFromTable(tableId) {
+  const table = document.getElementById(tableId)
+  if (!table) return []
+  const vars = []
+  table.querySelectorAll('tr').forEach(tr => {
+    const key = tr.querySelector('.env-row-key')?.value.trim()
+    const value = tr.querySelector('.env-row-value')?.value || ''
+    const is_secret = tr.querySelector('.env-row-secret')?.checked ? 1 : 0
+    if (key) vars.push({ key, value, is_secret })
+  })
+  return vars
+}
+
+function toggleEnvCard(name) {
+  const body = document.getElementById('env-body-' + name)
+  const chevron = document.getElementById('env-chevron-' + name)
+  if (!body) return
+  const collapsed = body.classList.toggle('hidden')
+  if (chevron) chevron.textContent = collapsed ? '\u25B6' : '\u25BC'
+}
+
 async function renderEnvCard(name) {
   const container = document.getElementById('env-card-' + name)
   if (!container) return
 
   const vars = await api('GET', '/envs/' + encodeURIComponent(name))
   const varList = vars.variables || []
+  const tableId = 'env-table-' + name
 
   container.innerHTML = `
-    <div class="env-card-header">
-      <span class="env-name">${escHtml(name)}</span>
-      <span class="badge badge-neutral">${varList.length} vars</span>
+    <div class="env-card-header" style="cursor:pointer" onclick="toggleEnvCard('${escHtml(name)}')">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="env-chevron-${escHtml(name)}" style="font-size:10px;color:var(--text-secondary)">\u25B6</span>
+        <span class="env-name">${escHtml(name)}</span>
+        <span class="badge badge-neutral">${varList.length} vars</span>
+      </div>
+      <button class="btn btn-sm btn-outline-danger" onclick="event.stopPropagation(); deleteEnv('${escHtml(name)}')">Delete</button>
     </div>
-    <div style="padding:12px 20px">
-      <table class="env-vars-table">
-        ${varList.map(v => `
-        <tr data-key="${escHtml(v.key)}">
-          <td style="width:30%"><input type="text" value="${escHtml(v.key)}" readonly style="cursor:default;opacity:0.7"></td>
-          <td><input type="${v.is_secret ? 'password' : 'text'}" value="${escHtml(v.value)}" data-env="${escHtml(name)}" data-var-key="${escHtml(v.key)}" onchange="saveEnvVar(this,'${escHtml(name)}','${escHtml(v.key)}')"></td>
-          <td style="width:40px"><button class="btn btn-xs btn-outline-danger" onclick="deleteEnvVar('${escHtml(name)}','${escHtml(v.key)}')">\u2715</button></td>
-        </tr>`).join('')}
-      </table>
-    </div>
-    <div class="env-footer">
-      <button class="btn btn-sm btn-ghost" onclick="addEnvVarModal('${escHtml(name)}')">+ Add Variable</button>
-      <button class="btn btn-sm btn-outline-danger" onclick="deleteEnv('${escHtml(name)}')">Delete Environment</button>
+    <div id="env-body-${escHtml(name)}" class="hidden">
+      <div style="padding:12px 20px">
+        <table class="env-vars-table" id="${escHtml(tableId)}">
+          ${varList.map(v => _envVarRowHTML(v.key, v.value, v.is_secret)).join('')}
+        </table>
+      </div>
+      <div class="env-footer">
+        <div>
+          <button class="btn btn-sm btn-ghost" onclick="_addEnvVarRow('${escHtml(tableId)}')">+ Add Row</button>
+          <button class="btn btn-sm btn-ghost" onclick="copyEnvModal('${escHtml(name)}')">Copy Env</button>
+        </div>
+        <div>
+          <button class="btn btn-sm btn-primary" onclick="saveEnvVarsBulk('${escHtml(name)}', '${escHtml(tableId)}')">Save</button>
+        </div>
+      </div>
     </div>`
 }
 
-async function createEnv() {
-  const name = document.getElementById('new-env-name').value.trim()
-  if (!name) return
-  const res = await api('POST', '/envs', { name })
-  if (res.ok === false) { toast(res.error, 'error'); return }
-  toast('Environment "' + name + '" created')
-  renderEnvsPage()
-}
-
-function addEnvVarModal(envName) {
-  showModal('Add Variable', `
+function createEnvModal() {
+  const tableId = 'new-env-vars-table'
+  const rows = _envVarRowHTML('', '', false).repeat(4)
+  showModal('Create Environment', `
     <div class="form-group">
-      <label class="form-label">Key</label>
-      <input type="text" id="var-key" placeholder="e.g. BASE_URL" autofocus>
+      <label class="form-label">Environment Name</label>
+      <input type="text" id="new-env-name" placeholder="e.g. staging" autofocus>
     </div>
     <div class="form-group">
-      <label class="form-label">Value</label>
-      <input type="text" id="var-value" placeholder="e.g. https://staging.example.com">
-    </div>
-    <label class="checkbox-wrap">
-      <input type="checkbox" id="var-secret">
-      Secret (masked in UI)
-    </label>`, [
+      <label class="form-label">Variables</label>
+      <table class="env-vars-table" id="${tableId}">
+        ${rows}
+      </table>
+      <button class="btn btn-sm btn-ghost" style="margin-top:8px" onclick="_addEnvVarRow('${tableId}')">+ Add Row</button>
+    </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
-    { label: 'Add Variable', cls: 'btn-primary', action: async () => {
-      const key = document.getElementById('var-key').value.trim()
-      const value = document.getElementById('var-value').value
-      const is_secret = document.getElementById('var-secret').checked
-      if (!key) return
-      const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/vars', { key, value, is_secret })
+    { label: 'Create', cls: 'btn-primary', action: async () => {
+      const name = document.getElementById('new-env-name').value.trim()
+      if (!name) { toast('Environment name is required', 'error'); return }
+      const res = await api('POST', '/envs', { name })
       if (res.ok === false) { toast(res.error, 'error'); return }
-      closeModal(); toast('Variable added')
+      const vars = _collectVarsFromTable(tableId)
+      if (vars.length > 0) {
+        const bulkRes = await api('POST', '/envs/' + encodeURIComponent(name) + '/vars', { vars })
+        if (bulkRes.ok === false) { toast(bulkRes.error, 'error'); return }
+      }
+      closeModal(); toast('Environment "' + name + '" created')
       renderEnvsPage()
     }}
-  ], envName)
+  ])
 }
 
-async function saveEnvVar(input, envName, key) {
-  const value = input.value
-  const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/vars', { key, value })
+async function saveEnvVarsBulk(envName, tableId) {
+  const vars = _collectVarsFromTable(tableId)
+  const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/vars', { vars })
   if (res.ok === false) { toast(res.error, 'error'); return }
-  toast('Variable updated')
-}
-
-async function deleteEnvVar(envName, key) {
-  const res = await api('DELETE', '/envs/' + encodeURIComponent(envName) + '/vars/' + encodeURIComponent(key))
-  if (res.ok === false) { toast(res.error, 'error'); return }
-  toast('Variable deleted')
+  toast('Variables saved')
   renderEnvsPage()
+}
+
+function copyEnvModal(envName) {
+  showModal('Copy Environment', `
+    <p>Copy all variables from <strong>"${escHtml(envName)}"</strong> to a new environment.</p>
+    <div class="form-group" style="margin-top:12px">
+      <label class="form-label">New Environment Name</label>
+      <input type="text" id="copy-env-name" placeholder="e.g. production" autofocus>
+    </div>`, [
+    { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
+    { label: 'Copy', cls: 'btn-primary', action: async () => {
+      const newName = document.getElementById('copy-env-name').value.trim()
+      if (!newName) { toast('Environment name is required', 'error'); return }
+      const res = await api('POST', '/envs/' + encodeURIComponent(envName) + '/copy', { new_name: newName })
+      if (res.ok === false) { toast(res.error, 'error'); return }
+      closeModal(); toast('Environment copied as "' + newName + '"')
+      renderEnvsPage()
+    }}
+  ])
 }
 
 async function deleteEnv(name) {
