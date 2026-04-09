@@ -10,6 +10,7 @@ from rich.console import Console
 
 from cli.config import get_active_project, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
+from cli.runtime import is_frozen_binary, is_path_in_temp, get_default_playwright_browsers_path
 from cli.script_processor import inject_storage_state
 from datetime import datetime, timezone
 
@@ -38,7 +39,7 @@ def record_script(project_id, feature_id, name, url=None):
         raise ValueError(f"Feature {feature_id} is not a web feature")
 
     # Log browser path config
-    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
+    default_browsers = get_default_playwright_browsers_path()
     logger.info("Browser paths: default=%s (exists=%s), env=%s",
                 default_browsers, os.path.isdir(default_browsers),
                 os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
@@ -46,7 +47,7 @@ def record_script(project_id, feature_id, name, url=None):
     # Resolve Playwright driver: prefer Python package, fall back to npx
     # In Nuitka binary builds, the bundled Node driver segfaults — skip it.
     use_npx = False
-    is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
+    is_frozen = is_frozen_binary()
     try:
         if is_frozen:
             raise RuntimeError("Skipping bundled driver in binary build")
@@ -55,7 +56,7 @@ def record_script(project_id, feature_id, name, url=None):
         logger.info("Python driver resolved: executable=%s (exists=%s), cli=%s",
                      driver_executable, os.path.exists(driver_executable), driver_cli)
         # Double-check: if the resolved driver is inside a Nuitka temp dir, skip it
-        if "/tmp/onefile_" in driver_executable:
+        if is_path_in_temp(driver_executable):
             raise RuntimeError("Skipping bundled driver extracted to Nuitka temp dir")
         if not os.path.exists(driver_executable):
             raise FileNotFoundError(f"Driver executable not found at {driver_executable}")

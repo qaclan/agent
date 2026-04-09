@@ -174,8 +174,9 @@ def pw_install():
     """Install Playwright browsers (used by install script)."""
     import subprocess
     import shutil
+    from cli.runtime import is_frozen_binary, is_path_in_temp
     # In Nuitka binary builds, the bundled Node driver segfaults — use system playwright
-    if getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or ""):
+    if is_frozen_binary():
         pw_path = shutil.which("playwright")
         if pw_path:
             subprocess.run([pw_path, "install", "chromium"])
@@ -186,7 +187,7 @@ def pw_install():
             return
     from playwright._impl._driver import compute_driver_executable, get_driver_env
     driver_executable, driver_cli = compute_driver_executable()
-    if "/tmp/onefile_" in driver_executable:
+    if is_path_in_temp(driver_executable):
         click.echo("Error: Cannot use bundled Playwright driver. Install playwright globally: npm i -g playwright", err=True)
         return
     subprocess.run(

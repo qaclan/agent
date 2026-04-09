@@ -13,6 +13,7 @@ from rich.console import Console
 
 from cli.config import get_active_project
 from cli.db import get_conn, generate_id
+from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
 
 console = Console()
 
@@ -159,8 +160,8 @@ def web_run(suite_id, env_name, stop_on_fail, browser, resolution, headless):
     storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
 
     # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
-    default_browsers = os.path.expanduser("~/.cache/ms-playwright")
-    is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
+    default_browsers = get_default_playwright_browsers_path()
+    is_frozen = is_frozen_binary()
 
     if is_frozen and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
         # Binary mode: force browser path to system location
