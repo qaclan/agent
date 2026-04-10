@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
+from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
 
 logger = logging.getLogger("qaclan.runs")
 
@@ -269,8 +270,8 @@ def execute_run():
         logger.debug("execute_run: storage_state_path=%s exists=%s", storage_state_path, os.path.exists(storage_state_path))
 
         # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
-        default_browsers = os.path.expanduser("~/.cache/ms-playwright")
-        is_frozen = getattr(sys, 'frozen', False) or "/tmp/onefile_" in (sys.executable or "")
+        default_browsers = get_default_playwright_browsers_path()
+        is_frozen = is_frozen_binary()
         logger.info("execute_run: is_frozen=%s sys.executable=%s", is_frozen, sys.executable)
 
         if is_frozen and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):

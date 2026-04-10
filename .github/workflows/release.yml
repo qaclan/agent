@@ -72,8 +72,98 @@ jobs:
           name: qaclan-macos-arm64
           path: dist/qaclan-macos-arm64
 
+  build-windows-amd64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: x64
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install nuitka ordered-set zstandard
+
+      - name: Cache Nuitka
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-windows-amd64-${{ hashFiles('qaclan.py', 'cli/**', 'web/**') }}
+          restore-keys: nuitka-windows-amd64-
+
+      - name: Build binary
+        run: |
+          python -m nuitka --onefile `
+            --output-filename=qaclan-windows-amd64.exe `
+            --output-dir=dist `
+            --jobs=$env:NUMBER_OF_PROCESSORS `
+            --lto=no `
+            --assume-yes-for-downloads `
+            --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle `
+            --include-package=rich._unicode_data `
+            --include-data-dir=web/static=web/static `
+            --windows-console-mode=force `
+            qaclan.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qaclan-windows-amd64
+          path: dist/qaclan-windows-amd64.exe
+
+  build-windows-arm64:
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: arm64
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install nuitka ordered-set zstandard
+
+      - name: Cache Nuitka
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\Nuitka\Nuitka\Cache
+          key: nuitka-windows-arm64-${{ hashFiles('qaclan.py', 'cli/**', 'web/**') }}
+          restore-keys: nuitka-windows-arm64-
+
+      - name: Build binary
+        run: |
+          python -m nuitka --onefile `
+            --output-filename=qaclan-windows-arm64.exe `
+            --output-dir=dist `
+            --jobs=$env:NUMBER_OF_PROCESSORS `
+            --lto=no `
+            --assume-yes-for-downloads `
+            --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle `
+            --include-package=rich._unicode_data `
+            --include-data-dir=web/static=web/static `
+            --windows-console-mode=force `
+            qaclan.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qaclan-windows-arm64
+          path: dist/qaclan-windows-arm64.exe
+
   release:
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows-amd64, build-windows-arm64]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
