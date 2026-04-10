@@ -1,10 +1,26 @@
+import json
 import logging
 import os
+import re
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, SCRIPTS_DIR
+
+_VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
+
+
+def _scan_var_keys(content):
+    """Extract unique {{KEY}} placeholders from a script body."""
+    if not content:
+        return []
+    seen = []
+    for m in _VAR_PLACEHOLDER_RE.finditer(content):
+        key = m.group(1)
+        if key not in seen:
+            seen.append(key)
+    return seen
 
 logger = logging.getLogger("qaclan.record")
 
@@ -60,7 +76,8 @@ def get_script(script_id):
         conn = get_conn()
         row = conn.execute(
             "SELECT s.id, s.name, s.feature_id, f.name AS feature_name, "
-            "s.channel, s.source, s.file_path, s.created_at, s.created_by "
+            "s.channel, s.source, s.file_path, s.created_at, s.created_by, "
+            "s.start_url_key, s.start_url_value, s.var_keys "
             "FROM scripts s JOIN features f ON s.feature_id = f.id "
             "WHERE s.id = ? AND s.project_id = ?",
             (script_id, project_id),
@@ -69,6 +86,12 @@ def get_script(script_id):
             return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
 
         script = dict(row)
+
+        # Parse var_keys JSON for the client
+        try:
+            script["var_keys"] = json.loads(script.get("var_keys") or "[]")
+        except (TypeError, ValueError):
+            script["var_keys"] = []
 
         # Read file content from disk
         content = ""
@@ -169,6 +192,12 @@ def update_script(script_id):
             if file_path:
                 with open(file_path, "w") as f:
                     f.write(content)
+            # Re-scan {{KEY}} placeholders so var_keys stays in sync with the body
+            new_var_keys = _scan_var_keys(content)
+            conn.execute(
+                "UPDATE scripts SET var_keys = ? WHERE id = ?",
+                (json.dumps(new_var_keys), script_id),
+            )
 
         conn.commit()
 
@@ -183,13 +212,21 @@ def update_script(script_id):
             with open(file_path, "r") as f:
                 file_content = f.read()
         script_row = conn.execute(
-            "SELECT feature_id, project_id FROM scripts WHERE id = ?", (script_id,)
+            "SELECT feature_id, project_id, start_url_key, start_url_value, var_keys "
+            "FROM scripts WHERE id = ?", (script_id,)
         ).fetchone()
+        try:
+            var_keys_list = json.loads(script_row["var_keys"] or "[]")
+        except (TypeError, ValueError):
+            var_keys_list = []
         sync_script_to_cloud(
             script_id, updated_name,
             feature_id=script_row["feature_id"],
             project_id=script_row["project_id"],
             file_content=file_content,
+            start_url_key=script_row["start_url_key"],
+            start_url_value=script_row["start_url_value"],
+            var_keys=var_keys_list,
         )
 
         return jsonify({"ok": True, "id": script_id})
@@ -208,17 +245,46 @@ def record_script_route():
         name = data.get("name", "").strip()
         feature_id = data.get("feature_id", "").strip()
         url = data.get("url", "").strip() or None
+        env_name = data.get("env_name", "").strip() or None
+        url_key = data.get("url_key", "").strip() or None
+        path_suffix = data.get("path_suffix", "").strip() or ""
 
         if not name:
             return jsonify({"ok": False, "error": "Script name is required"}), 400
         if not feature_id:
             return jsonify({"ok": False, "error": "Feature ID is required"}), 400
 
-        logger.info("POST /api/scripts/record: project=%s, feature=%s, name=%s, url=%s",
-                     project_id, feature_id, name, url)
+        # If env+key provided, resolve the actual URL from the env var
+        resolved_url_key = None
+        resolved_url_key_value = None
+        if env_name and url_key:
+            conn = get_conn()
+            env_row = conn.execute(
+                "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+                (project_id, env_name),
+            ).fetchone()
+            if not env_row:
+                return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
+            var_row = conn.execute(
+                "SELECT value FROM env_vars WHERE environment_id = ? AND key = ?",
+                (env_row["id"], url_key),
+            ).fetchone()
+            if not var_row:
+                return jsonify({"ok": False, "error": f"Variable \"{url_key}\" not found in env \"{env_name}\""}), 404
+            base_value = var_row["value"].rstrip("/")
+            url = base_value + path_suffix
+            resolved_url_key = url_key
+            resolved_url_key_value = base_value
+
+        logger.info("POST /api/scripts/record: project=%s, feature=%s, name=%s, url=%s, url_key=%s",
+                     project_id, feature_id, name, url, resolved_url_key)
 
         from cli.commands.web.record import record_script
-        script_id, dest = record_script(project_id, feature_id, name, url)
+        script_id, dest = record_script(
+            project_id, feature_id, name, url,
+            url_key=resolved_url_key,
+            url_key_value=resolved_url_key_value,
+        )
         logger.info("Recording succeeded: script_id=%s, dest=%s", script_id, dest)
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except (ValueError, RuntimeError) as e:

@@ -55,6 +55,32 @@ def _extract_test_actions(script_path):
     return "\n".join(actions)
 
 
+def _substitute_template_vars(source, var_keys, env_vars, fallback_key, fallback_value):
+    """Resolve {{KEY}} placeholders in a script body.
+
+    For each key in var_keys:
+      - If present in env_vars, substitute with the env value
+      - Else if it matches the script's fallback_key, substitute with fallback_value
+        and log a warning
+      - Else raise ValueError (caller fails the script)
+    """
+    warnings = []
+    for key in var_keys:
+        placeholder = "{{" + key + "}}"
+        if key in env_vars:
+            value = env_vars[key]
+        elif key == fallback_key and fallback_value:
+            value = fallback_value
+            warnings.append(f"Variable '{key}' not in env, using recorded fallback")
+        else:
+            raise ValueError(
+                f"Script requires variable '{key}' but it's not in the selected environment "
+                f"and no fallback is available."
+            )
+        source = source.replace(placeholder, value)
+    return source, warnings
+
+
 def _patch_actions(actions_src):
     """Apply runtime patches: networkidle waits."""
     actions_src = re.sub(
@@ -182,7 +208,8 @@ def execute_run():
 
         # 2. Load suite items with scripts (ordered)
         items = conn.execute(
-            "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path "
+            "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
+            "sc.start_url_key, sc.start_url_value, sc.var_keys "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -332,6 +359,22 @@ def execute_run():
                         logger.warning("execute_run: extracted empty actions from %s", script_path)
                     else:
                         logger.debug("execute_run: extracted %d chars of actions:\n%s", len(actions_src), actions_src[:500])
+
+                    # Resolve {{KEY}} placeholders against the selected env (with start URL fallback)
+                    try:
+                        script_var_keys = json.loads(item["var_keys"] or "[]")
+                    except (TypeError, ValueError):
+                        script_var_keys = []
+                    if script_var_keys:
+                        actions_src, subs_warnings = _substitute_template_vars(
+                            actions_src,
+                            script_var_keys,
+                            env_vars_dict,
+                            item["start_url_key"],
+                            item["start_url_value"],
+                        )
+                        for w in subs_warnings:
+                            logger.warning("execute_run: %s — %s", item["script_name"], w)
 
                     actions_src = _patch_actions(actions_src)
                     logger.debug("execute_run: patched actions (%d chars)", len(actions_src))
