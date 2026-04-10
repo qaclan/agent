@@ -140,7 +140,7 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None):
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None):
     """Sync a script. IDs are LOCAL IDs (optional)."""
     key = get_auth_key()
     if not key:
@@ -156,6 +156,12 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
     payload = {"cli_script_id": script_id, "cloud_id": cloud_id, "name": name, "channel": channel}
     if row and row["created_by"]:
         payload["created_by"] = row["created_by"]
+    if start_url_key:
+        payload["start_url_key"] = start_url_key
+    if start_url_value:
+        payload["start_url_value"] = start_url_value
+    if var_keys is not None:
+        payload["var_keys"] = var_keys
     if suite_id:
         cloud_suite_id = _get_cloud_id("suites", suite_id)
         if cloud_suite_id:
@@ -344,8 +350,10 @@ def sync_all(project_id=None):
 
         # Scripts (with feature_id, project_id, and file content)
         scripts = conn.execute(
-            "SELECT id, name, feature_id, project_id, file_path FROM scripts WHERE project_id = ?", (pid,)
+            "SELECT id, name, feature_id, project_id, file_path, start_url_key, start_url_value, var_keys "
+            "FROM scripts WHERE project_id = ?", (pid,)
         ).fetchall()
+        import json as _json
         for sc in scripts:
             file_content = None
             if sc["file_path"]:
@@ -354,11 +362,18 @@ def sync_all(project_id=None):
                         file_content = f.read()
                 except Exception:
                     pass
+            try:
+                sc_var_keys = _json.loads(sc["var_keys"] or "[]")
+            except (TypeError, ValueError):
+                sc_var_keys = []
             result = sync_script_to_cloud(
                 sc["id"], sc["name"],
                 feature_id=sc["feature_id"],
                 project_id=sc["project_id"],
                 file_content=file_content,
+                start_url_key=sc["start_url_key"],
+                start_url_value=sc["start_url_value"],
+                var_keys=sc_var_keys,
             )
             if result:
                 total_synced["scripts"] += 1

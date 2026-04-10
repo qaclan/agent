@@ -136,6 +136,21 @@ def init_db():
     _migrate_run_diagnostics(conn)
     _migrate_created_by(conn)
     _migrate_run_options(conn)
+    _migrate_script_templating(conn)
+
+
+def _migrate_script_templating(conn):
+    """Add columns to support env-aware recording: start URL provenance + var dependencies."""
+    for ddl in (
+        "ALTER TABLE scripts ADD COLUMN start_url_key TEXT",
+        "ALTER TABLE scripts ADD COLUMN start_url_value TEXT",
+        "ALTER TABLE scripts ADD COLUMN var_keys TEXT DEFAULT '[]'",
+    ):
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_cloud_id(conn):
