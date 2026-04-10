@@ -629,9 +629,14 @@ async function renderScriptsPage() {
     </div>`
 }
 
-function recordScriptModal() {
+async function recordScriptModal() {
   const features = window._features || []
   if (features.length === 0) { toast('Create a feature first', 'error'); return }
+
+  // Load environments for the dropdown
+  const envsRes = await api('GET', '/envs')
+  const envs = envsRes.environments || []
+
   showModal('Record Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
@@ -644,6 +649,22 @@ function recordScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Environment (optional)</label>
+      <select id="rec-env" onchange="_onRecordEnvChange()">
+        <option value="">— No environment —</option>
+        ${envs.map(e => `<option value="${escHtml(e.name)}">${escHtml(e.name)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group" id="rec-url-key-group" style="display:none">
+      <label class="form-label">URL Variable</label>
+      <select id="rec-url-key"></select>
+      <p class="text-muted" id="rec-url-key-hint" style="margin-top:4px;font-size:11px"></p>
+    </div>
+    <div class="form-group" id="rec-path-group" style="display:none">
+      <label class="form-label">Path (optional)</label>
+      <input type="text" id="rec-path" placeholder="e.g. /login">
+    </div>
+    <div class="form-group" id="rec-url-group">
       <label class="form-label">Start URL (optional)</label>
       <input type="text" id="rec-url" placeholder="e.g. https://myapp.com">
     </div>
@@ -652,6 +673,9 @@ function recordScriptModal() {
     { label: 'Start Recording', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('rec-name').value.trim()
       const feature_id = document.getElementById('rec-feature').value
+      const env_name = document.getElementById('rec-env').value
+      const url_key = document.getElementById('rec-url-key')?.value || ''
+      const path_suffix = document.getElementById('rec-path')?.value.trim() || ''
       const url = document.getElementById('rec-url').value.trim()
       if (!name || !feature_id) { toast('Name and feature required', 'error'); return }
 
@@ -662,12 +686,62 @@ function recordScriptModal() {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const res = await api('POST', '/scripts/record', { name, feature_id, url: url || undefined })
+      const payload = { name, feature_id }
+      if (env_name && url_key) {
+        payload.env_name = env_name
+        payload.url_key = url_key
+        if (path_suffix) payload.path_suffix = path_suffix
+      } else if (url) {
+        payload.url = url
+      }
+
+      const res = await api('POST', '/scripts/record', payload)
       if (res.ok === false) { closeModal(); toast(res.error, 'error'); return }
       closeModal(); toast('Script "' + name + '" recorded')
       renderScriptsPage()
     }}
   ])
+}
+
+async function _onRecordEnvChange() {
+  const envName = document.getElementById('rec-env').value
+  const keyGroup = document.getElementById('rec-url-key-group')
+  const pathGroup = document.getElementById('rec-path-group')
+  const urlGroup = document.getElementById('rec-url-group')
+  const keySelect = document.getElementById('rec-url-key')
+  const hint = document.getElementById('rec-url-key-hint')
+
+  if (!envName) {
+    keyGroup.style.display = 'none'
+    pathGroup.style.display = 'none'
+    urlGroup.style.display = ''
+    return
+  }
+
+  // Fetch the env vars for the selected env
+  const res = await api('GET', '/envs/' + encodeURIComponent(envName))
+  const allVars = res.variables || []
+  // Filter to URL-shaped values only
+  const urlVars = allVars.filter(v => /^https?:\/\//.test(v.value))
+
+  if (urlVars.length === 0) {
+    keyGroup.style.display = ''
+    pathGroup.style.display = 'none'
+    urlGroup.style.display = ''
+    keySelect.innerHTML = '<option value="">— No URL variables in this env —</option>'
+    keySelect.disabled = true
+    hint.textContent = 'Add a variable with an http:// or https:// value to "' + envName + '" to use it here.'
+    return
+  }
+
+  keySelect.disabled = false
+  keySelect.innerHTML = urlVars.map(v =>
+    `<option value="${escHtml(v.key)}" data-url="${escHtml(v.value)}">${escHtml(v.key)} — ${escHtml(v.value)}</option>`
+  ).join('')
+  keyGroup.style.display = ''
+  pathGroup.style.display = ''
+  urlGroup.style.display = 'none'
+  hint.textContent = ''
 }
 
 function createScriptModal() {
@@ -701,6 +775,21 @@ function createScriptModal() {
   ])
 }
 
+function _scriptProvenanceHTML(s) {
+  const parts = []
+  if (s.start_url_key && s.start_url_value) {
+    parts.push(`<div><span class="text-muted">Recorded against:</span> <code>${escHtml(s.start_url_key)}</code> = <code>${escHtml(s.start_url_value)}</code></div>`)
+  } else if (s.start_url_value) {
+    parts.push(`<div><span class="text-muted">Recorded URL:</span> <code>${escHtml(s.start_url_value)}</code></div>`)
+  }
+  const keys = Array.isArray(s.var_keys) ? s.var_keys : []
+  if (keys.length > 0) {
+    parts.push(`<div><span class="text-muted">Depends on:</span> ${keys.map(k => `<span class="badge badge-neutral">${escHtml(k)}</span>`).join(' ')}</div>`)
+  }
+  if (parts.length === 0) return ''
+  return `<div class="form-group" style="font-size:12px;display:flex;flex-direction:column;gap:4px">${parts.join('')}</div>`
+}
+
 async function viewScriptModal(id) {
   const res = await api('GET', '/scripts/' + id)
   if (res.ok === false) { toast(res.error, 'error'); return }
@@ -710,6 +799,7 @@ async function viewScriptModal(id) {
       <label class="form-label">Name</label>
       <p>${escHtml(s.name)}</p>
     </div>
+    ${_scriptProvenanceHTML(s)}
     <div class="form-group">
       <label class="form-label">Content</label>
       <textarea readonly style="min-height:200px;background:var(--bg-base);cursor:default">${escHtml(s.content || '')}</textarea>
@@ -728,6 +818,7 @@ async function editScriptModal(id) {
       <label class="form-label">Script Name</label>
       <input type="text" id="edit-script-name" value="${escHtml(s.name)}">
     </div>
+    ${_scriptProvenanceHTML(s)}
     <div class="form-group">
       <label class="form-label">Content</label>
       <textarea id="edit-script-content" style="min-height:200px">${escHtml(s.content || '')}</textarea>

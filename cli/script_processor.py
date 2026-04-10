@@ -65,3 +65,37 @@ def inject_storage_state(script_content: str) -> str:
         )
 
     return script_content
+
+
+def inject_url_template(script_content: str, base_value: str, key_name: str) -> str:
+    """Rewrite page.goto() calls that match base_value with a {{KEY}} template placeholder.
+
+    Transforms:
+        page.goto("https://staging.example.com/login")
+    Into:
+        page.goto("{{APP_URL}}/login")
+
+    The {{KEY}} placeholder is resolved at runtime by the run executor, which
+    substitutes it with the value of the matching env var from the selected
+    environment. If the env doesn't have that key, the runtime falls back to
+    the recorded value stored on the script row.
+
+    Only goto calls whose URL starts with base_value are rewritten — other
+    absolute URLs (e.g. third-party redirects) are left untouched.
+    """
+    if not base_value or not key_name:
+        return script_content
+
+    # Normalize: strip trailing slash so paths concatenate cleanly
+    base = base_value.rstrip("/")
+
+    # Match page.goto("<base>...") with single or double quotes
+    pattern = re.compile(
+        r'page\.goto\(\s*["\']' + re.escape(base) + r'(?P<path>[^"\']*)["\']\s*\)'
+    )
+
+    def _replace(m):
+        path = m.group("path")
+        return f'page.goto("{{{{{key_name}}}}}{path}")'
+
+    return pattern.sub(_replace, script_content)

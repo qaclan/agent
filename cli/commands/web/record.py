@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shutil
@@ -10,7 +11,7 @@ from rich.console import Console
 
 from cli.config import get_active_project, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
-from cli.script_processor import inject_storage_state
+from cli.script_processor import inject_storage_state, inject_url_template
 from datetime import datetime, timezone
 
 console = Console()
@@ -19,12 +20,16 @@ logger = logging.getLogger("qaclan.record")
 SEPARATOR = "─" * 45
 
 
-def record_script(project_id, feature_id, name, url=None):
+def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_value=None):
     """Core recording logic shared by CLI and web UI.
 
     Launches Playwright codegen, saves the recorded script, and inserts a DB record.
     Returns (script_id, dest_path) on success.
     Raises ValueError for validation errors, RuntimeError for recording failures.
+
+    If url_key + url_key_value are provided, the recorded script's page.goto()
+    calls whose URL starts with url_key_value are rewritten as {{url_key}}
+    placeholders for runtime substitution.
     """
     conn = get_conn()
 
@@ -133,6 +138,15 @@ def record_script(project_id, feature_id, name, url=None):
             raw_script = f.read()
         processed_script = inject_storage_state(raw_script)
 
+        # Templatize start URL if recorded against an env var
+        var_keys_list = []
+        start_url_value = url_key_value or url
+        if url_key and url_key_value:
+            # Match against the env var's base value, not the full recorded URL,
+            # so deeper paths visited during recording also get templatized.
+            processed_script = inject_url_template(processed_script, url_key_value, url_key)
+            var_keys_list = [url_key]
+
         script_id = generate_id("script")
         dest = os.path.join(SCRIPTS_DIR, f"{script_id}.py")
         os.makedirs(SCRIPTS_DIR, exist_ok=True)
@@ -143,14 +157,22 @@ def record_script(project_id, feature_id, name, url=None):
         from cli.config import get_user_name
         created_by = get_user_name()
         conn.execute(
-            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'CLI_RECORDED', ?, ?)",
-            (script_id, feature_id, project_id, name, dest, now, created_by),
+            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by, start_url_key, start_url_value, var_keys) "
+            "VALUES (?, ?, ?, 'web', ?, ?, 'CLI_RECORDED', ?, ?, ?, ?, ?)",
+            (script_id, feature_id, project_id, name, dest, now, created_by, url_key, start_url_value, json.dumps(var_keys_list)),
         )
         conn.commit()
 
         from cli.sync import sync_script_to_cloud
-        sync_script_to_cloud(script_id, name, feature_id=feature_id, project_id=project_id, file_content=processed_script)
+        sync_script_to_cloud(
+            script_id, name,
+            feature_id=feature_id,
+            project_id=project_id,
+            file_content=processed_script,
+            start_url_key=url_key,
+            start_url_value=start_url_value,
+            var_keys=var_keys_list,
+        )
 
         return script_id, dest
     finally:
