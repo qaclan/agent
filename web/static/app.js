@@ -1,3 +1,134 @@
+// ── CM6 load check (diagnostic) ────────────────────────────────
+// Flip to `true` if you ever need to silence this.
+if (typeof window !== 'undefined') {
+  if (window.CM6 && window.CM6.EditorView) {
+    console.log('[qaclan] CodeMirror 6 loaded:', Object.keys(window.CM6))
+  } else {
+    console.warn('[qaclan] CodeMirror 6 NOT loaded — window.CM6 is undefined')
+  }
+}
+
+// ── Script Editor Wrapper ──────────────────────────────────────
+// Unified interface so modal code doesn't care whether the underlying editor
+// is CodeMirror 6 or a plain textarea. Every instance exposes the same shape:
+//   { mode, getValue, setValue, insertAtCursor, focus, destroy }
+//
+// Resolution order:
+//   1. state.settings.editor_mode === 'code' AND window.CM6 loaded → CM6
+//   2. CM6 init threw → textarea fallback + toast
+//   3. state.settings.editor_mode === 'text' → textarea
+
+function _createScriptEditor(hostEl, initialContent, { readOnly = false } = {}) {
+  const wantCode = (state.settings.editor_mode || 'code') === 'code'
+  if (wantCode && window.CM6 && window.CM6.EditorView) {
+    try {
+      return _createCM6ScriptEditor(hostEl, initialContent || '', { readOnly })
+    } catch (e) {
+      console.warn('[qaclan] CM6 init failed, falling back to textarea:', e)
+      toast('Code editor unavailable, using plain text', 'warning')
+    }
+  }
+  return _createTextareaScriptEditor(hostEl, initialContent || '', { readOnly })
+}
+
+function _createCM6ScriptEditor(hostEl, initialContent, { readOnly }) {
+  const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
+  const extensions = [basicSetup(), python(), oneDark]
+  if (readOnly) extensions.push(EditorView.editable.of(false))
+  // Host styling: border, rounded, themed to match the rest of the UI
+  hostEl.style.border = '1px solid var(--border-default)'
+  hostEl.style.borderRadius = '6px'
+  hostEl.style.overflow = 'hidden'
+  hostEl.style.minHeight = '55vh'
+  hostEl.style.maxHeight = '65vh'
+  hostEl.style.display = 'flex'
+  hostEl.style.flexDirection = 'column'
+  const view = new EditorView({
+    state: EditorState.create({ doc: initialContent, extensions }),
+    parent: hostEl,
+  })
+  // Let CM6's scroller fill the host
+  const scroller = hostEl.querySelector('.cm-editor')
+  if (scroller) {
+    scroller.style.flex = '1 1 auto'
+    scroller.style.minHeight = '0'
+    scroller.style.height = '100%'
+  }
+  return {
+    mode: 'code',
+    getValue: () => view.state.doc.toString(),
+    setValue: (text) => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text || '' },
+      })
+    },
+    insertAtCursor: (text) => {
+      const { from, to } = view.state.selection.main
+      view.dispatch({
+        changes: { from, to, insert: text },
+        selection: { anchor: from + text.length },
+        scrollIntoView: true,
+      })
+      view.focus()
+    },
+    focus: () => view.focus(),
+    destroy: () => { try { view.destroy() } catch (_) {} },
+  }
+}
+
+function _createTextareaScriptEditor(hostEl, initialContent, { readOnly }) {
+  const ta = document.createElement('textarea')
+  ta.style.cssText = 'width:100%;min-height:55vh;max-height:65vh;font-family:monospace;font-size:12px;line-height:1.5;padding:10px;background:var(--bg-base);color:var(--text-primary);border:1px solid var(--border-default);border-radius:6px;resize:vertical'
+  if (readOnly) {
+    ta.readOnly = true
+    ta.style.cursor = 'default'
+  }
+  ta.value = initialContent
+  hostEl.appendChild(ta)
+  return {
+    mode: 'text',
+    getValue: () => ta.value,
+    setValue: (text) => { ta.value = text || '' },
+    insertAtCursor: (text) => {
+      const start = ta.selectionStart
+      const end = ta.selectionEnd
+      ta.value = ta.value.slice(0, start) + text + ta.value.slice(end)
+      const newPos = start + text.length
+      ta.focus()
+      ta.setSelectionRange(newPos, newPos)
+      _scrollTextareaToCaret(ta, newPos)
+      _flashTextareaBackground(ta)
+    },
+    focus: () => ta.focus(),
+    destroy: () => {},
+  }
+}
+
+// Call from DevTools console as `qcEditorSmokeTest()` to spawn a test CM6 editor
+// in the current page. Leaves a bordered panel at the top-left. Useful for
+// verifying the bundle renders before wiring it into real modals.
+function qcEditorSmokeTest() {
+  if (!window.CM6) { console.error('window.CM6 not loaded'); return }
+  const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
+  const host = document.createElement('div')
+  host.id = 'qc-editor-smoketest'
+  host.style.cssText = 'position:fixed;top:20px;left:20px;width:600px;height:300px;z-index:9999;border:2px solid #3b82f6;background:var(--bg-base);resize:both;overflow:auto'
+  const closeBtn = document.createElement('button')
+  closeBtn.textContent = '✕ close test'
+  closeBtn.style.cssText = 'position:absolute;top:4px;right:4px;z-index:10000;font-size:11px;padding:2px 6px'
+  closeBtn.onclick = () => host.remove()
+  host.appendChild(closeBtn)
+  document.body.appendChild(host)
+  new EditorView({
+    state: EditorState.create({
+      doc: '# CM6 smoke test\nfrom playwright.sync_api import sync_playwright\n\nwith sync_playwright() as p:\n    browser = p.chromium.launch()\n    page = browser.new_page()\n    page.goto("https://example.com")\n    print(page.title())\n',
+      extensions: [basicSetup(), python(), oneDark],
+    }),
+    parent: host,
+  })
+  console.log('[qaclan] smoke test editor rendered — drag corner to resize, click ✕ to close')
+}
+
 // ── State & Router ──────────────────────────────────────────────
 
 const state = {
@@ -5,6 +136,7 @@ const state = {
   page: 'scripts',
   authenticated: false,
   user: null,
+  settings: { editor_mode: 'code' },  // backend overrides via /api/settings on init
 }
 
 const routes = {
@@ -34,6 +166,14 @@ async function init() {
   }
   state.authenticated = true
   state.user = authRes.user || null
+
+  // Load backend-driven settings (editor mode, etc.) — best-effort
+  try {
+    const settingsRes = await api('GET', '/settings')
+    if (settingsRes && settingsRes.ok && settingsRes.settings) {
+      Object.assign(state.settings, settingsRes.settings)
+    }
+  } catch (e) { /* keep defaults */ }
 
   const res = await api('GET', '/projects/active')
   if (res.id) state.activeProject = { id: res.id, name: res.name }
@@ -266,6 +406,14 @@ function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
 }
 
 function closeModal() {
+  // Fire any cleanup hook the current modal registered (e.g. CM6 editor teardown)
+  // before we blow away the modal DOM. Runs once, then clears.
+  const hook = window._qcModalCleanupHook
+  window._qcModalCleanupHook = null
+  if (typeof hook === 'function') {
+    try { hook() } catch (e) { console.warn('[qaclan] modal cleanup hook failed:', e) }
+  }
+
   document.getElementById('modal-backdrop').classList.add('hidden')
   document.getElementById('modal-root').classList.add('hidden')
   document.getElementById('modal-root').innerHTML = ''
@@ -1160,20 +1308,20 @@ async function createScriptModal() {
         <select id="insert-var-key" style="flex:1;min-width:150px" disabled>
           <option value="">— Pick env first —</option>
         </select>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor('script-content')">Insert at cursor</button>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor('script-content')">Scan &amp; Bind</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
       </div>
       <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
     </div>
     <div class="form-group">
       <label class="form-label">Script Content</label>
-      <textarea id="script-content" style="min-height:400px;font-family:monospace" placeholder="from playwright.sync_api import sync_playwright&#10;&#10;with sync_playwright() as p:&#10;    browser = p.chromium.launch()&#10;    ..."></textarea>
+      <div id="create-script-editor-host"></div>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Create Script', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('script-name').value.trim()
       const feature_id = document.getElementById('script-feature').value
-      const content = document.getElementById('script-content').value
+      const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
       if (!name || !feature_id) { toast('Name and feature required', 'error'); return }
       const res = await api('POST', '/scripts', { name, feature_id, content })
       if (res.ok === false) { toast(res.error, 'error'); return }
@@ -1181,6 +1329,16 @@ async function createScriptModal() {
       renderScriptsPage()
     }}
   ], '', 'lg')
+
+  const host = document.getElementById('create-script-editor-host')
+  if (host) {
+    const editor = _createScriptEditor(host, '')
+    window._qcCurrentEditor = editor
+    window._qcModalCleanupHook = () => {
+      editor.destroy()
+      if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+    }
+  }
 }
 
 function _scriptProvenanceHTML(s) {
@@ -1210,10 +1368,21 @@ async function viewScriptModal(id) {
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">
       <label class="form-label">Content</label>
-      <textarea readonly style="min-height:400px;background:var(--bg-base);cursor:default;font-family:monospace">${escHtml(s.content || '')}</textarea>
+      <div id="view-script-editor-host"></div>
     </div>`, [
     { label: 'Close', cls: 'btn-ghost', action: closeModal }
   ], 'Script ID: ' + s.id, 'lg')
+
+  // Render the editor after the modal is in the DOM
+  const host = document.getElementById('view-script-editor-host')
+  if (host) {
+    const editor = _createScriptEditor(host, s.content || '', { readOnly: true })
+    window._qcCurrentEditor = editor
+    window._qcModalCleanupHook = () => {
+      editor.destroy()
+      if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+    }
+  }
 }
 
 async function editScriptModal(id) {
@@ -1238,19 +1407,19 @@ async function editScriptModal(id) {
         <select id="insert-var-key" style="flex:1;min-width:150px" disabled>
           <option value="">— Pick env first —</option>
         </select>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor('edit-script-content')">Insert at cursor</button>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor('edit-script-content')">Scan &amp; Bind</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
       </div>
       <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
     </div>
     <div class="form-group">
       <label class="form-label">Content</label>
-      <textarea id="edit-script-content" style="min-height:400px;font-family:monospace">${escHtml(s.content || '')}</textarea>
+      <div id="edit-script-editor-host"></div>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Save', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('edit-script-name').value.trim()
-      const content = document.getElementById('edit-script-content').value
+      const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
       if (!name) return
       const res = await api('PUT', '/scripts/' + id, { name, content })
       if (res.ok === false) { toast(res.error, 'error'); return }
@@ -1258,6 +1427,16 @@ async function editScriptModal(id) {
       renderScriptsPage()
     }}
   ], 'Script ID: ' + s.id, 'lg')
+
+  const host = document.getElementById('edit-script-editor-host')
+  if (host) {
+    const editor = _createScriptEditor(host, s.content || '')
+    window._qcCurrentEditor = editor
+    window._qcModalCleanupHook = () => {
+      editor.destroy()
+      if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+    }
+  }
 }
 
 async function _loadEnvKeysForInsert() {
@@ -1281,23 +1460,12 @@ async function _loadEnvKeysForInsert() {
   ).join('')
 }
 
-function _insertVarAtCursor(textareaId) {
+function _insertVarAtCursor() {
   const key = document.getElementById('insert-var-key').value
   if (!key) { toast('Pick a variable first', 'error'); return }
-  const ta = document.getElementById(textareaId || 'edit-script-content')
-  if (!ta) return
-  const placeholder = '{{' + key + '}}'
-  const start = ta.selectionStart
-  const end = ta.selectionEnd
-  ta.value = ta.value.slice(0, start) + placeholder + ta.value.slice(end)
-  const newPos = start + placeholder.length
-  ta.focus()
-  ta.setSelectionRange(newPos, newPos)
-
-  // Scroll the textarea so the insertion point is visible
-  _scrollTextareaToCaret(ta, newPos)
-  // Flash the inserted placeholder to draw the eye
-  _flashTextareaBackground(ta)
+  const editor = window._qcCurrentEditor
+  if (!editor) return
+  editor.insertAtCursor('{{' + key + '}}')
 }
 
 function _scrollTextareaToCaret(ta, caretPos) {
@@ -1323,10 +1491,10 @@ function _flashTextareaBackground(ta) {
   }, 150)
 }
 
-async function scanAndBindFromEditor(textareaId) {
-  const ta = document.getElementById(textareaId)
-  if (!ta) return
-  const content = ta.value
+async function scanAndBindFromEditor() {
+  const editor = window._qcCurrentEditor
+  if (!editor) return
+  const content = editor.getValue()
   const fills = _parseFillCalls(content)
   if (fills.length === 0) { toast('No .fill() calls found in script', 'error'); return }
 
@@ -1359,11 +1527,11 @@ async function scanAndBindFromEditor(textareaId) {
     category: _categorizeField(f.locator, patterns),
   }))
 
-  // Apply bindings in-memory, then write back to the textarea (no server round-trip yet)
-  _showFieldReviewModalForEditor(textareaId, content, categorized, envVars, secretCats, envName)
+  // Apply bindings in-memory, then write back to the editor via the wrapper API
+  _showFieldReviewModalForEditor(content, categorized, envVars, secretCats, envName)
 }
 
-function _showFieldReviewModalForEditor(textareaId, originalContent, fills, envVars, secretCats, envName) {
+function _showFieldReviewModalForEditor(originalContent, fills, envVars, secretCats, envName) {
   _showFieldReviewModalCore({
     fills,
     originalContent,
@@ -1372,10 +1540,10 @@ function _showFieldReviewModalForEditor(textareaId, originalContent, fills, envV
     envName,
     useOverlay: true,  // render on top of the existing edit/create script modal
     onApply: (newContent) => {
-      const ta = document.getElementById(textareaId)
-      if (ta) {
-        ta.value = newContent
-        ta.focus()
+      const editor = window._qcCurrentEditor
+      if (editor) {
+        editor.setValue(newContent)
+        editor.focus()
       }
     },
     onSkip: () => {},
