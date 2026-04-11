@@ -37,22 +37,13 @@ QAClan ships a standalone `.exe` — no Python required. Pick the build that mat
 
 Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest).
 
-Then, in **PowerShell**:
+Open **PowerShell** in the folder you downloaded it to and run it directly — no install, no PATH setup:
 
 ```powershell
-# 1. Move the exe somewhere on your PATH (or create one)
-New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Programs\qaclan" | Out-Null
-Move-Item -Force .\qaclan-windows-amd64.exe "$env:LOCALAPPDATA\Programs\qaclan\qaclan.exe"
-
-# 2. Add it to your user PATH (one-time)
-$qaclanPath = "$env:LOCALAPPDATA\Programs\qaclan"
-[Environment]::SetEnvironmentVariable("Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$qaclanPath", "User")
-
-# 3. Open a NEW PowerShell window so the PATH change takes effect, then verify
-qaclan --help
+.\qaclan-windows-amd64.exe serve
 ```
 
-Replace `qaclan-windows-amd64.exe` with `qaclan-windows-arm64.exe` if you downloaded the ARM64 build.
+On ARM64, use `.\qaclan-windows-arm64.exe serve` instead.
 
 **Install Playwright (required for `qaclan web record` / `qaclan web run`):**
 
