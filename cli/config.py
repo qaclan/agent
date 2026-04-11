@@ -91,3 +91,32 @@ def get_active_project(console):
         console.print("[red]No active project. Run: qaclan project create \"name\"[/red]")
         return None
     return row
+
+
+# Built-in patterns for sensitive form fields. Categories map to substring matches
+# (case-insensitive) against the locator text of .fill() calls. Users can extend
+# or override these by adding "sensitive_field_patterns" to ~/.qaclan/config.json.
+DEFAULT_SENSITIVE_PATTERNS = {
+    "username": ["user", "username", "email", "login", "userid", "e-mail"],
+    "password": ["pass", "password", "pwd", "passwd"],
+    "tenant":   ["tenant", "org", "organization", "workspace", "account"],
+    "token":    ["token", "api_key", "apikey", "secret", "access_key"],
+    "otp":      ["otp", "code", "2fa", "mfa", "pin", "verification"],
+    "client":   ["client_id", "clientid", "client_secret"],
+    "host":     ["host", "base_url", "endpoint"],
+}
+
+# Categories whose recorded values should be masked in the UI and never logged at runtime.
+SECRET_CATEGORIES = {"password", "token", "otp", "client"}
+
+
+def get_sensitive_field_patterns():
+    """Return active sensitive-field patterns: defaults merged with user overrides."""
+    cfg = _read_config()
+    user_patterns = cfg.get("sensitive_field_patterns", {})
+    merged = {k: list(v) for k, v in DEFAULT_SENSITIVE_PATTERNS.items()}
+    if isinstance(user_patterns, dict):
+        for category, patterns in user_patterns.items():
+            if isinstance(patterns, list):
+                merged[category] = patterns
+    return merged

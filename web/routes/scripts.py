@@ -6,7 +6,7 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
-from cli.config import get_active_project_id, SCRIPTS_DIR
+from cli.config import get_active_project_id, SCRIPTS_DIR, get_sensitive_field_patterns, SECRET_CATEGORIES
 
 _VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
 
@@ -29,6 +29,19 @@ bp = Blueprint('scripts', __name__)
 
 def _require_active_project():
     return get_active_project_id()
+
+
+@bp.route('/api/scripts/sensitive-patterns', methods=['GET'])
+def get_sensitive_patterns():
+    """Return the active sensitive field patterns for client-side field detection."""
+    try:
+        return jsonify({
+            "ok": True,
+            "patterns": get_sensitive_field_patterns(),
+            "secret_categories": list(SECRET_CATEGORIES),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @bp.route('/api/scripts', methods=['GET'])
@@ -145,15 +158,23 @@ def create_script():
 
         from cli.config import get_user_name
         created_by = get_user_name()
+        # Scan {{KEY}} placeholders so var_keys is populated for runtime substitution
+        var_keys_list = _scan_var_keys(content)
         conn.execute(
-            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'WEB_CREATED', ?, ?)",
-            (script_id, feature_id, project_id, name, file_path, now, created_by),
+            "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by, var_keys) "
+            "VALUES (?, ?, ?, 'web', ?, ?, 'WEB_CREATED', ?, ?, ?)",
+            (script_id, feature_id, project_id, name, file_path, now, created_by, json.dumps(var_keys_list)),
         )
         conn.commit()
 
         from cli.sync import sync_script_to_cloud
-        sync_script_to_cloud(script_id, name, feature_id=feature_id, project_id=project_id, file_content=content)
+        sync_script_to_cloud(
+            script_id, name,
+            feature_id=feature_id,
+            project_id=project_id,
+            file_content=content,
+            var_keys=var_keys_list,
+        )
 
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except Exception as e:
@@ -271,7 +292,9 @@ def record_script_route():
             ).fetchone()
             if not var_row:
                 return jsonify({"ok": False, "error": f"Variable \"{url_key}\" not found in env \"{env_name}\""}), 404
-            base_value = var_row["value"].rstrip("/")
+            base_value = (var_row["value"] or "").rstrip("/")
+            if not base_value:
+                return jsonify({"ok": False, "error": f"Variable \"{url_key}\" has an empty value in env \"{env_name}\""}), 400
             url = base_value + path_suffix
             resolved_url_key = url_key
             resolved_url_key_value = base_value

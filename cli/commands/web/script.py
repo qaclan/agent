@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import shutil
 
 import click
@@ -9,6 +11,20 @@ from rich.table import Table
 from cli.config import get_active_project, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli.script_processor import inject_storage_state
+
+_VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
+
+
+def _scan_var_keys(content):
+    """Extract unique {{KEY}} placeholders from a script body."""
+    if not content:
+        return []
+    seen = []
+    for m in _VAR_PLACEHOLDER_RE.finditer(content):
+        key = m.group(1)
+        if key not in seen:
+            seen.append(key)
+    return seen
 
 console = Console()
 
@@ -104,23 +120,31 @@ def script_import(file_path, name, feature_id):
     # Post-process to inject shared session support
     with open(file_path, "r") as f:
         raw_script = f.read()
+    processed = inject_storage_state(raw_script)
     with open(dest, "w") as f:
-        f.write(inject_storage_state(raw_script))
+        f.write(processed)
+
+    # Scan for {{KEY}} placeholders so imported scripts get var_keys populated
+    var_keys_list = _scan_var_keys(processed)
 
     now = datetime.now(timezone.utc).isoformat()
     from cli.config import get_user_name
     created_by = get_user_name()
     conn.execute(
-        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by) "
-        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?, ?)",
-        (script_id, feature_id, proj["id"], name, dest, now, created_by),
+        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by, var_keys) "
+        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?, ?, ?)",
+        (script_id, feature_id, proj["id"], name, dest, now, created_by, json.dumps(var_keys_list)),
     )
     conn.commit()
     console.print(f"[green]✓[/green] Script imported: {name} [{script_id}]")
     from cli.sync import sync_script_to_cloud
-    with open(dest, "r") as f:
-        file_content = f.read()
-    sync_script_to_cloud(script_id, name, feature_id=feature_id, project_id=proj["id"], file_content=file_content)
+    sync_script_to_cloud(
+        script_id, name,
+        feature_id=feature_id,
+        project_id=proj["id"],
+        file_content=processed,
+        var_keys=var_keys_list,
+    )
     console.print(f"  Feature: {feat['name']}")
     console.print(f"  File: {dest}")
 
