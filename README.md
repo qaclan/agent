@@ -45,7 +45,7 @@ Open **PowerShell** in the folder you downloaded it to and run it directly — n
 
 On ARM64, use `.\qaclan-windows-arm64.exe serve` instead.
 
-**Install Playwright (required for `qaclan web record` / `qaclan web run`):**
+**Install Playwright:**
 
 The Windows binary uses your system-installed Playwright instead of bundling it. Install Node.js from [nodejs.org](https://nodejs.org/) (LTS), then in PowerShell:
 
