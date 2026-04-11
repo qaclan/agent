@@ -6,7 +6,7 @@ from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
-from cli.config import get_active_project_id, SCRIPTS_DIR, get_sensitive_field_patterns, SECRET_CATEGORIES
+from cli.config import get_active_project_id, SCRIPTS_DIR, get_sensitive_field_patterns, SECRET_CATEGORIES, get_editor_mode
 
 _VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
 
@@ -39,6 +39,20 @@ def get_sensitive_patterns():
             "ok": True,
             "patterns": get_sensitive_field_patterns(),
             "secret_categories": list(SECRET_CATEGORIES),
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/settings', methods=['GET'])
+def get_settings():
+    """Return agent settings the frontend needs on startup."""
+    try:
+        return jsonify({
+            "ok": True,
+            "settings": {
+                "editor_mode": get_editor_mode(),
+            },
         })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

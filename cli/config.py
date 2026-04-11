@@ -119,3 +119,24 @@ def get_sensitive_field_patterns():
             if isinstance(patterns, list):
                 merged[category] = patterns
     return merged
+
+
+# Editor preference for the script editor UI. Shipped as "code" by default
+# (syntax-highlighted CodeMirror 6). Can be flipped to "text" for a plain
+# textarea — useful as a fallback or for minimal-JS environments.
+#
+# Resolution order (first non-empty wins):
+#   1. QACLAN_EDITOR_MODE environment variable (dev override)
+#   2. "editor_mode" field in ~/.qaclan/config.json (per-user override)
+#   3. DEFAULT_EDITOR_MODE constant below (shipped with the binary)
+DEFAULT_EDITOR_MODE = os.environ.get("QACLAN_EDITOR_MODE", "code")
+ALLOWED_EDITOR_MODES = ("code", "text")
+
+
+def get_editor_mode():
+    """Return the active script editor mode: 'code' or 'text'."""
+    cfg = _read_config()
+    mode = cfg.get("editor_mode") or DEFAULT_EDITOR_MODE
+    if mode not in ALLOWED_EDITOR_MODES:
+        mode = "code"
+    return mode
