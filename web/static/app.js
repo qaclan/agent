@@ -231,7 +231,7 @@ async function createProjectPrompt() {
 
 // ── Modal System ────────────────────────────────────────────────
 
-function showModal(title, bodyHTML, buttons = [], subtitle = '') {
+function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
   const backdrop = document.getElementById('modal-backdrop')
   const root = document.getElementById('modal-root')
 
@@ -239,8 +239,9 @@ function showModal(title, bodyHTML, buttons = [], subtitle = '') {
     `<button class="btn btn-sm ${b.cls}" data-btn-idx="${i}">${escHtml(b.label)}</button>`
   ).join('')
 
+  const sizeClass = size ? ` modal-${size}` : ''
   root.innerHTML = `
-    <div class="modal-card">
+    <div class="modal-card${sizeClass}">
       <div class="modal-header">
         <div>
           <div class="modal-title">${title}</div>
@@ -269,6 +270,64 @@ function closeModal() {
   document.getElementById('modal-root').classList.add('hidden')
   document.getElementById('modal-root').innerHTML = ''
   document.getElementById('modal-backdrop').onclick = null
+}
+
+// Overlay modal: renders into a dynamically-created container ABOVE the primary
+// modal, so nested modals (e.g. Scan & Bind review from inside the edit modal)
+// don't destroy the underlying modal's DOM and state.
+function showOverlayModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
+  closeOverlayModal()  // ensure any prior overlay is gone
+
+  const backdrop = document.createElement('div')
+  backdrop.id = 'modal-overlay-backdrop'
+  backdrop.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:200;backdrop-filter:blur(2px)'
+  document.body.appendChild(backdrop)
+
+  const root = document.createElement('div')
+  root.id = 'modal-overlay-root'
+  root.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:201;min-width:480px;width:90%;display:flex;flex-direction:column;animation:modalIn 0.18s ease'
+  if (size === 'xl') {
+    root.style.maxWidth = '1280px'
+    root.style.maxHeight = '92vh'
+  } else if (size === 'lg') {
+    root.style.maxWidth = '960px'
+    root.style.maxHeight = '92vh'
+  } else {
+    root.style.maxWidth = '620px'
+    root.style.maxHeight = '85vh'
+  }
+  document.body.appendChild(root)
+
+  const btns = buttons.map((b, i) =>
+    `<button class="btn btn-sm ${b.cls}" data-btn-idx="${i}">${escHtml(b.label)}</button>`
+  ).join('')
+
+  const sizeClass = size ? ` modal-${size}` : ''
+  root.innerHTML = `
+    <div class="modal-card${sizeClass}">
+      <div class="modal-header">
+        <div>
+          <div class="modal-title">${title}</div>
+          ${subtitle ? `<div class="modal-subtitle">${subtitle}</div>` : ''}
+        </div>
+        <button class="modal-close" onclick="closeOverlayModal()">\u2715</button>
+      </div>
+      <div class="modal-body">${bodyHTML}</div>
+      ${buttons.length ? `<div class="modal-footer">${btns}</div>` : ''}
+    </div>`
+
+  buttons.forEach((b, i) => {
+    root.querySelector(`[data-btn-idx="${i}"]`)
+        ?.addEventListener('click', b.action)
+  })
+
+  backdrop.onclick = closeOverlayModal
+  setTimeout(() => root.querySelector('input, textarea, select')?.focus(), 50)
+}
+
+function closeOverlayModal() {
+  document.getElementById('modal-overlay-backdrop')?.remove()
+  document.getElementById('modal-overlay-root')?.remove()
 }
 
 // ── Toast Notifications ─────────────────────────────────────────
@@ -698,9 +757,341 @@ async function recordScriptModal() {
       const res = await api('POST', '/scripts/record', payload)
       if (res.ok === false) { closeModal(); toast(res.error, 'error'); return }
       closeModal(); toast('Script "' + name + '" recorded')
+
+      // Post-record: load script and trigger field review if any .fill() calls exist
+      await reviewRecordedScriptFields(res.id, env_name)
       renderScriptsPage()
     }}
   ])
+}
+
+// ── Field detection & review (Phase B) ──────────────────────────
+
+function _parseFillCalls(scriptBody) {
+  // Extract every .fill(...) call. Supports two forms:
+  //   1. Two-arg legacy:   page.fill("#email", "value")
+  //   2. Chained semantic: page.get_by_role("textbox", name="Email").fill("value")
+  //                        page.locator("#email").fill("value")
+  // For both, we capture:
+  //   - locator: the descriptive text used for categorization
+  //     (legacy: the first arg; chained: the chain expression like 'get_by_role("textbox", name="Email")')
+  //   - value: the filled-in string
+  //   - matchStart/matchEnd/fullMatch: only the .fill(...) call itself, for in-place rewrite
+  const calls = []
+
+  // Pass 1 — two-arg legacy form: .fill("locator", "value")
+  const legacyRe = /\.fill\(\s*(["'])((?:\\.|(?!\1).)*)\1\s*,\s*(["'])((?:\\.|(?!\3).)*)\3\s*\)/g
+  let m
+  while ((m = legacyRe.exec(scriptBody)) !== null) {
+    calls.push({
+      locator: m[2],
+      value: m[4],
+      valueQuote: m[3],
+      matchStart: m.index,
+      matchEnd: m.index + m[0].length,
+      fullMatch: m[0],
+    })
+  }
+
+  // Pass 2 — single-arg chained form: <chain>.fill("value")
+  // The chain may include get_by_role/get_by_label/etc. with their own quoted args.
+  // To avoid conflicting with the legacy form, skip matches where the .fill( has a comma inside.
+  const singleRe = /\.fill\(\s*(["'])((?:\\.|(?!\1).)*)\1\s*\)/g
+  while ((m = singleRe.exec(scriptBody)) !== null) {
+    // Walk backward from m.index to find the start of the chain on the same line
+    // (chains can span lines but Playwright codegen keeps each .fill on a single line)
+    const lineStart = scriptBody.lastIndexOf('\n', m.index) + 1
+    const linePrefix = scriptBody.slice(lineStart, m.index)
+    // Strip leading whitespace and `await ` if present
+    const chain = linePrefix.replace(/^\s*(await\s+)?/, '')
+
+    calls.push({
+      locator: chain,
+      value: m[2],
+      valueQuote: m[1],
+      matchStart: m.index,
+      matchEnd: m.index + m[0].length,
+      fullMatch: m[0],
+    })
+  }
+
+  // Sort by position so the review modal shows fields in script order
+  calls.sort((a, b) => a.matchStart - b.matchStart)
+  return calls
+}
+
+function _categorizeField(locator, patterns) {
+  // patterns: { username: ["user", "email", ...], password: [...], ... }
+  // Returns the category name whose pattern list has the longest substring match,
+  // or null if no category matches.
+  const lower = locator.toLowerCase()
+  let bestCategory = null
+  let bestLen = 0
+  for (const [category, words] of Object.entries(patterns || {})) {
+    for (const word of words) {
+      if (word && lower.includes(word.toLowerCase()) && word.length > bestLen) {
+        bestCategory = category
+        bestLen = word.length
+      }
+    }
+  }
+  return bestCategory
+}
+
+function _suggestEnvKeysForCategory(category, envVars, secretCategories) {
+  // Return env vars sorted by likelihood of matching the category.
+  // Score: substring match against category and its synonyms = high, others = low.
+  // For secret categories, only suggest is_secret=true vars.
+  if (!category || !envVars) return []
+  const isSecretCat = secretCategories && secretCategories.includes(category)
+  const candidates = isSecretCat ? envVars.filter(v => v.is_secret) : envVars
+
+  const cat = category.toLowerCase()
+  return candidates
+    .map(v => {
+      const k = v.key.toLowerCase()
+      let score = 0
+      if (k.includes(cat)) score += 10
+      if (cat === 'username' && (k.includes('user') || k.includes('email') || k.includes('login'))) score += 5
+      if (cat === 'password' && (k.includes('pass') || k.includes('pwd'))) score += 5
+      if (cat === 'tenant' && (k.includes('tenant') || k.includes('org') || k.includes('workspace'))) score += 5
+      if (cat === 'token' && (k.includes('token') || k.includes('key') || k.includes('secret'))) score += 5
+      return { ...v, _score: score }
+    })
+    .sort((a, b) => b._score - a._score)
+}
+
+async function reviewRecordedScriptFields(scriptId, envName) {
+  // Load the recorded script + sensitive patterns
+  const sRes = await api('GET', '/scripts/' + scriptId)
+  if (sRes.ok === false) return
+  const script = sRes.script || sRes
+  const content = script.content || ''
+
+  const fills = _parseFillCalls(content)
+  if (fills.length === 0) return  // nothing to review
+
+  const patternsRes = await api('GET', '/scripts/sensitive-patterns')
+  const patterns = patternsRes.patterns || {}
+  const secretCats = patternsRes.secret_categories || []
+
+  // Categorize each fill
+  const categorized = fills.map((f, i) => ({
+    ...f,
+    index: i,
+    category: _categorizeField(f.locator, patterns),
+  }))
+  const sensitiveFills = categorized.filter(f => f.category)
+  if (sensitiveFills.length === 0 && fills.length === 0) return
+
+  // Load env vars for suggestions (if user picked an env at record time)
+  let envVars = []
+  if (envName) {
+    const eRes = await api('GET', '/envs/' + encodeURIComponent(envName))
+    envVars = eRes.variables || []
+  }
+
+  await _showFieldReviewModal(scriptId, content, categorized, envVars, secretCats, envName)
+}
+
+function _lineNumberAt(content, offset) {
+  // 1-indexed line number for a given character offset
+  let line = 1
+  for (let i = 0; i < offset && i < content.length; i++) {
+    if (content[i] === '\n') line++
+  }
+  return line
+}
+
+function _lineTextAt(content, offset) {
+  const start = content.lastIndexOf('\n', offset - 1) + 1
+  let end = content.indexOf('\n', offset)
+  if (end === -1) end = content.length
+  return content.slice(start, end)
+}
+
+function _renderDiffLine(lineText, value, valueQuote, mode, replacementKey) {
+  // Render a line with the target value (wrapped in its quotes) highlighted.
+  // mode: 'before' = red strikethrough on the value;
+  //       'after'  = the value span replaced with {{KEY}} on a green background.
+  const target = valueQuote + value + valueQuote
+  const idx = lineText.lastIndexOf(target)
+  if (idx === -1) return escHtml(lineText)
+  const head = escHtml(lineText.slice(0, idx))
+  const tail = escHtml(lineText.slice(idx + target.length))
+  if (mode === 'before') {
+    return head + `<span class="diff-highlight-before">${escHtml(target)}</span>` + tail
+  }
+  // 'after' — show the replacement with the quote marks preserved around {{KEY}}
+  const newInner = valueQuote + '{{' + (replacementKey || '') + '}}' + valueQuote
+  return head + `<span class="diff-highlight-after">${escHtml(newInner)}</span>` + tail
+}
+
+function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats, envName, onApply, onSkip, useOverlay = false }) {
+  // When called from inside another modal (e.g. editor Scan & Bind), render as an
+  // overlay so the underlying modal and its state (textarea value, etc.) stay alive.
+  const modalShowFn = useOverlay ? showOverlayModal : showModal
+  const modalCloseFn = useOverlay ? closeOverlayModal : closeModal
+
+  const sensitive = fills.filter(f => f.category)
+  const others = fills.filter(f => !f.category)
+
+  // Precompute line info per fill so we don't re-walk the content every render
+  fills.forEach(f => {
+    f.lineNumber = _lineNumberAt(originalContent, f.matchStart)
+    f.lineText = _lineTextAt(originalContent, f.matchStart)
+  })
+
+  const categoryAccent = (cat) => {
+    if (!cat) return { border: 'var(--border-default)', bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1' }
+    if (secretCats.includes(cat)) return { border: '#f87171', bg: 'rgba(248,113,113,0.14)', fg: '#fca5a5' }
+    if (cat === 'username' || cat === 'tenant') return { border: '#60a5fa', bg: 'rgba(96,165,250,0.14)', fg: '#93c5fd' }
+    if (cat === 'host') return { border: '#a78bfa', bg: 'rgba(167,139,250,0.14)', fg: '#c4b5fd' }
+    return { border: 'var(--border-default)', bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1' }
+  }
+
+  const renderRow = (f) => {
+    const isSecret = f.category && secretCats.includes(f.category)
+    const valuePreview = isSecret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : f.value
+    const suggestions = f.category ? _suggestEnvKeysForCategory(f.category, envVars, secretCats) : envVars
+    const opts = ['<option value="">— Skip —</option>']
+      .concat(suggestions.map(v => `<option value="${escHtml(v.key)}">${escHtml(v.key)}</option>`))
+      .join('')
+    const accent = categoryAccent(f.category)
+    const categoryLabel = `<span style="display:inline-block;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:4px;background:${accent.bg};color:${accent.fg};border:1px solid ${accent.border}">${escHtml(f.category || 'field')}</span>`
+    // "Before" line with the original value highlighted red
+    const beforeLineHtml = _renderDiffLine(f.lineText, f.value, f.valueQuote, 'before')
+    return `
+      <div class="field-review-row" data-fill-index="${f.index}" style="padding:14px 16px;border-bottom:1px solid var(--border-subtle);border-left:3px solid ${accent.border};margin-bottom:2px">
+        <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+          ${categoryLabel}
+          <span style="font-family:monospace;font-size:12px;font-weight:600;color:var(--text-secondary);background:var(--bg-base);padding:3px 8px;border-radius:3px">L${f.lineNumber}</span>
+          <span style="color:var(--text-secondary);font-size:12px">Recorded: <code>${escHtml(valuePreview)}</code></span>
+          <select class="field-review-select" style="margin-left:auto;min-width:220px" onchange="_updateFieldReviewPreview(${f.index})">${opts}</select>
+        </div>
+        <div style="font-family:monospace;font-size:12px;line-height:1.6;background:var(--bg-base);padding:10px 12px;border-radius:4px;overflow-x:auto">
+          <div style="display:flex;gap:10px">
+            <span style="color:var(--text-secondary);flex-shrink:0;width:52px">before:</span>
+            <span style="color:var(--text-primary);white-space:pre">${beforeLineHtml}</span>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:4px">
+            <span style="color:var(--text-secondary);flex-shrink:0;width:52px">after:</span>
+            <span id="preview-after-${f.index}" style="color:var(--text-primary);white-space:pre">${beforeLineHtml}</span>
+          </div>
+        </div>
+      </div>`
+  }
+
+  const sensitiveBlock = sensitive.length === 0
+    ? '<p class="text-muted">No sensitive fields detected.</p>'
+    : sensitive.map(renderRow).join('')
+
+  const othersBlock = others.length === 0
+    ? ''
+    : `<details style="margin-top:14px">
+         <summary style="cursor:pointer;color:var(--text-primary);font-size:13px;font-weight:600;padding:8px 0">Show all ${others.length} other fill field${others.length === 1 ? '' : 's'}</summary>
+         <div style="margin-top:8px">${others.map(renderRow).join('')}</div>
+       </details>`
+
+  const noEnvHint = envName
+    ? ''
+    : '<p class="form-hint" style="margin-bottom:8px">No environment selected. Bindings use whatever env is selected at run time.</p>'
+
+  // Store fills + originalContent globally so the onchange preview handler can access them
+  window._fieldReviewState = { fills, originalContent }
+
+  modalShowFn('Review Fields', `
+    ${noEnvHint}
+    <p class="form-hint" style="margin-bottom:14px">Bind detected fields to environment variables. Pick a key to preview the result. Skipped fields stay hardcoded.</p>
+    <div>${sensitiveBlock}</div>
+    ${othersBlock}`, [
+    { label: 'Skip & save as-is', cls: 'btn-ghost', action: () => { modalCloseFn(); onSkip && onSkip() } },
+    { label: 'Apply Bindings', cls: 'btn-primary', action: async () => {
+      // Scope queries to the correct modal root so we don't pick up stray elements
+      const modalRoot = useOverlay
+        ? document.getElementById('modal-overlay-root')
+        : document.getElementById('modal-root')
+      const rows = (modalRoot || document).querySelectorAll('.field-review-row')
+      const bindings = []
+      rows.forEach(r => {
+        const idx = parseInt(r.getAttribute('data-fill-index'), 10)
+        const key = r.querySelector('.field-review-select').value
+        if (key) bindings.push({ index: idx, key })
+      })
+
+      if (bindings.length === 0) {
+        modalCloseFn(); onSkip && onSkip(); return
+      }
+
+      const newContent = _rewriteScriptWithBindings(originalContent, fills, bindings)
+      modalCloseFn()
+      if (onApply) await onApply(newContent, bindings.length)
+    }}
+  ], '', 'xl')
+}
+
+function _updateFieldReviewPreview(fillIndex) {
+  const state = window._fieldReviewState
+  if (!state) return
+  const fill = state.fills.find(f => f.index === fillIndex)
+  if (!fill) return
+  const row = document.querySelector(`.field-review-row[data-fill-index="${fillIndex}"]`)
+  if (!row) return
+  const key = row.querySelector('.field-review-select').value
+  const preview = document.getElementById('preview-after-' + fillIndex)
+  if (!preview) return
+
+  if (!key) {
+    // No binding selected — show the original line (same as "before")
+    preview.innerHTML = _renderDiffLine(fill.lineText, fill.value, fill.valueQuote, 'before')
+    return
+  }
+  // Render with the "after" diff highlight (green replacement on the value span)
+  preview.innerHTML = _renderDiffLine(fill.lineText, fill.value, fill.valueQuote, 'after', key)
+}
+
+// Post-record wrapper that persists via PUT
+function _showFieldReviewModal(scriptId, originalContent, fills, envVars, secretCats, envName) {
+  return new Promise(resolve => {
+    _showFieldReviewModalCore({
+      fills, originalContent, envVars, secretCats, envName,
+      onApply: async (newContent, count) => {
+        const updateRes = await api('PUT', '/scripts/' + scriptId, { content: newContent })
+        if (updateRes.ok === false) toast(updateRes.error, 'error')
+        else toast(count + ' field' + (count === 1 ? '' : 's') + ' bound')
+        resolve()
+      },
+      onSkip: () => resolve(),
+    })
+  })
+}
+
+function _rewriteScriptWithBindings(content, fills, bindings) {
+  // Replace each bound .fill() value with "{{KEY}}". Apply replacements
+  // back-to-front so earlier indices stay valid.
+  const sortedBindings = [...bindings].sort((a, b) => b.index - a.index)
+  let result = content
+  for (const b of sortedBindings) {
+    const f = fills[b.index]
+    if (!f) continue
+    const placeholder = '{{' + b.key + '}}'
+    // Replace only the LAST occurrence of the quoted value inside fullMatch.
+    // For chained .fill("value") this is the only quoted string.
+    // For legacy .fill("loc", "value") the value is always the second/last quoted string,
+    // so anchoring on the last occurrence avoids ever touching the locator.
+    const target = f.valueQuote + f.value + f.valueQuote
+    const replacement = f.valueQuote + placeholder + f.valueQuote
+    const lastIdx = f.fullMatch.lastIndexOf(target)
+    const newCall = lastIdx >= 0
+      ? f.fullMatch.slice(0, lastIdx) + replacement + f.fullMatch.slice(lastIdx + target.length)
+      : f.fullMatch
+    result = result.slice(0, f.matchStart) + newCall + result.slice(f.matchEnd)
+  }
+  return result
+}
+
+function _escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 async function _onRecordEnvChange() {
@@ -744,8 +1135,10 @@ async function _onRecordEnvChange() {
   hint.textContent = ''
 }
 
-function createScriptModal() {
+async function createScriptModal() {
   const features = window._features || []
+  const envsRes = await api('GET', '/envs')
+  const envs = envsRes.environments || []
   showModal('New Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
@@ -758,8 +1151,23 @@ function createScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Insert Variable</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="insert-var-env" style="flex:1;min-width:150px" onchange="_loadEnvKeysForInsert()">
+          <option value="">— Select env —</option>
+          ${envs.map(e => `<option value="${escHtml(e.name)}">${escHtml(e.name)}</option>`).join('')}
+        </select>
+        <select id="insert-var-key" style="flex:1;min-width:150px" disabled>
+          <option value="">— Pick env first —</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor('script-content')">Insert at cursor</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor('script-content')">Scan &amp; Bind</button>
+      </div>
+      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
+    </div>
+    <div class="form-group">
       <label class="form-label">Script Content</label>
-      <textarea id="script-content" placeholder="from playwright.sync_api import sync_playwright&#10;&#10;with sync_playwright() as p:&#10;    browser = p.chromium.launch()&#10;    ..."></textarea>
+      <textarea id="script-content" style="min-height:400px;font-family:monospace" placeholder="from playwright.sync_api import sync_playwright&#10;&#10;with sync_playwright() as p:&#10;    browser = p.chromium.launch()&#10;    ..."></textarea>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Create Script', cls: 'btn-primary', action: async () => {
@@ -772,22 +1180,22 @@ function createScriptModal() {
       closeModal(); toast('Script "' + name + '" created')
       renderScriptsPage()
     }}
-  ])
+  ], '', 'lg')
 }
 
 function _scriptProvenanceHTML(s) {
   const parts = []
   if (s.start_url_key && s.start_url_value) {
-    parts.push(`<div><span class="text-muted">Recorded against:</span> <code>${escHtml(s.start_url_key)}</code> = <code>${escHtml(s.start_url_value)}</code></div>`)
+    parts.push(`<div style="color:var(--text-secondary)"><strong style="color:var(--text-primary);font-weight:600">Recorded against:</strong> <code>${escHtml(s.start_url_key)}</code> = <code>${escHtml(s.start_url_value)}</code></div>`)
   } else if (s.start_url_value) {
-    parts.push(`<div><span class="text-muted">Recorded URL:</span> <code>${escHtml(s.start_url_value)}</code></div>`)
+    parts.push(`<div style="color:var(--text-secondary)"><strong style="color:var(--text-primary);font-weight:600">Recorded URL:</strong> <code>${escHtml(s.start_url_value)}</code></div>`)
   }
   const keys = Array.isArray(s.var_keys) ? s.var_keys : []
   if (keys.length > 0) {
-    parts.push(`<div><span class="text-muted">Depends on:</span> ${keys.map(k => `<span class="badge badge-neutral">${escHtml(k)}</span>`).join(' ')}</div>`)
+    parts.push(`<div style="color:var(--text-secondary);display:flex;align-items:center;gap:6px;flex-wrap:wrap"><strong style="color:var(--text-primary);font-weight:600">Depends on:</strong> ${keys.map(k => `<span class="badge badge-neutral">${escHtml(k)}</span>`).join('')}</div>`)
   }
   if (parts.length === 0) return ''
-  return `<div class="form-group" style="font-size:12px;display:flex;flex-direction:column;gap:4px">${parts.join('')}</div>`
+  return `<div class="form-group" style="font-size:13px;display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--bg-base);border-radius:6px">${parts.join('')}</div>`
 }
 
 async function viewScriptModal(id) {
@@ -802,17 +1210,18 @@ async function viewScriptModal(id) {
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">
       <label class="form-label">Content</label>
-      <textarea readonly style="min-height:200px;background:var(--bg-base);cursor:default">${escHtml(s.content || '')}</textarea>
+      <textarea readonly style="min-height:400px;background:var(--bg-base);cursor:default;font-family:monospace">${escHtml(s.content || '')}</textarea>
     </div>`, [
     { label: 'Close', cls: 'btn-ghost', action: closeModal }
-  ], 'Script ID: ' + s.id)
+  ], 'Script ID: ' + s.id, 'lg')
 }
 
 async function editScriptModal(id) {
   const sRes = await api('GET', '/scripts/' + id)
   if (sRes.ok === false) { toast(sRes.error, 'error'); return }
   const s = sRes.script || sRes
-  const features = window._features || []
+  const envsRes = await api('GET', '/envs')
+  const envs = envsRes.environments || []
   showModal('Edit Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
@@ -820,8 +1229,23 @@ async function editScriptModal(id) {
     </div>
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">
+      <label class="form-label">Insert Variable</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="insert-var-env" style="flex:1;min-width:150px" onchange="_loadEnvKeysForInsert()">
+          <option value="">— Select env —</option>
+          ${envs.map(e => `<option value="${escHtml(e.name)}">${escHtml(e.name)}</option>`).join('')}
+        </select>
+        <select id="insert-var-key" style="flex:1;min-width:150px" disabled>
+          <option value="">— Pick env first —</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor('edit-script-content')">Insert at cursor</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor('edit-script-content')">Scan &amp; Bind</button>
+      </div>
+      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
+    </div>
+    <div class="form-group">
       <label class="form-label">Content</label>
-      <textarea id="edit-script-content" style="min-height:200px">${escHtml(s.content || '')}</textarea>
+      <textarea id="edit-script-content" style="min-height:400px;font-family:monospace">${escHtml(s.content || '')}</textarea>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Save', cls: 'btn-primary', action: async () => {
@@ -833,7 +1257,129 @@ async function editScriptModal(id) {
       closeModal(); toast('Script updated')
       renderScriptsPage()
     }}
-  ], 'Script ID: ' + s.id)
+  ], 'Script ID: ' + s.id, 'lg')
+}
+
+async function _loadEnvKeysForInsert() {
+  const envName = document.getElementById('insert-var-env').value
+  const keySelect = document.getElementById('insert-var-key')
+  if (!envName) {
+    keySelect.innerHTML = '<option value="">— Pick env first —</option>'
+    keySelect.disabled = true
+    return
+  }
+  const res = await api('GET', '/envs/' + encodeURIComponent(envName))
+  const vars = res.variables || []
+  if (vars.length === 0) {
+    keySelect.innerHTML = '<option value="">— No vars in this env —</option>'
+    keySelect.disabled = true
+    return
+  }
+  keySelect.disabled = false
+  keySelect.innerHTML = vars.map(v =>
+    `<option value="${escHtml(v.key)}">${escHtml(v.key)}</option>`
+  ).join('')
+}
+
+function _insertVarAtCursor(textareaId) {
+  const key = document.getElementById('insert-var-key').value
+  if (!key) { toast('Pick a variable first', 'error'); return }
+  const ta = document.getElementById(textareaId || 'edit-script-content')
+  if (!ta) return
+  const placeholder = '{{' + key + '}}'
+  const start = ta.selectionStart
+  const end = ta.selectionEnd
+  ta.value = ta.value.slice(0, start) + placeholder + ta.value.slice(end)
+  const newPos = start + placeholder.length
+  ta.focus()
+  ta.setSelectionRange(newPos, newPos)
+
+  // Scroll the textarea so the insertion point is visible
+  _scrollTextareaToCaret(ta, newPos)
+  // Flash the inserted placeholder to draw the eye
+  _flashTextareaBackground(ta)
+}
+
+function _scrollTextareaToCaret(ta, caretPos) {
+  // Estimate line height from computed style, count newlines up to caret,
+  // and scroll so the caret line is roughly centered in the viewport.
+  const cs = window.getComputedStyle(ta)
+  const lineHeight = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4 || 18
+  const linesBeforeCaret = (ta.value.slice(0, caretPos).match(/\n/g) || []).length
+  const targetScroll = Math.max(0, (linesBeforeCaret * lineHeight) - (ta.clientHeight / 2))
+  ta.scrollTop = targetScroll
+}
+
+function _flashTextareaBackground(ta) {
+  // Brief yellow flash so the user sees "something happened here" on big scripts
+  const prevBg = ta.style.backgroundColor
+  const prevTransition = ta.style.transition
+  ta.style.transition = 'background-color 0.1s ease'
+  ta.style.backgroundColor = 'rgba(250, 204, 21, 0.22)'
+  setTimeout(() => {
+    ta.style.transition = 'background-color 0.6s ease'
+    ta.style.backgroundColor = prevBg || ''
+    setTimeout(() => { ta.style.transition = prevTransition || '' }, 700)
+  }, 150)
+}
+
+async function scanAndBindFromEditor(textareaId) {
+  const ta = document.getElementById(textareaId)
+  if (!ta) return
+  const content = ta.value
+  const fills = _parseFillCalls(content)
+  if (fills.length === 0) { toast('No .fill() calls found in script', 'error'); return }
+
+  const patternsRes = await api('GET', '/scripts/sensitive-patterns')
+  const patterns = patternsRes.patterns || {}
+  const secretCats = patternsRes.secret_categories || []
+
+  // Use the env currently selected in the Insert Variable picker as the source for suggestions
+  const envName = document.getElementById('insert-var-env')?.value || ''
+  let envVars = []
+  if (envName) {
+    const eRes = await api('GET', '/envs/' + encodeURIComponent(envName))
+    envVars = eRes.variables || []
+  } else {
+    // Fallback: try to offer the union of all envs' keys so user isn't stuck
+    const envsRes = await api('GET', '/envs')
+    const envs = envsRes.environments || []
+    const seen = new Set()
+    for (const e of envs) {
+      const r = await api('GET', '/envs/' + encodeURIComponent(e.name))
+      for (const v of (r.variables || [])) {
+        if (!seen.has(v.key)) { seen.add(v.key); envVars.push(v) }
+      }
+    }
+  }
+
+  const categorized = fills.map((f, i) => ({
+    ...f,
+    index: i,
+    category: _categorizeField(f.locator, patterns),
+  }))
+
+  // Apply bindings in-memory, then write back to the textarea (no server round-trip yet)
+  _showFieldReviewModalForEditor(textareaId, content, categorized, envVars, secretCats, envName)
+}
+
+function _showFieldReviewModalForEditor(textareaId, originalContent, fills, envVars, secretCats, envName) {
+  _showFieldReviewModalCore({
+    fills,
+    originalContent,
+    envVars,
+    secretCats,
+    envName,
+    useOverlay: true,  // render on top of the existing edit/create script modal
+    onApply: (newContent) => {
+      const ta = document.getElementById(textareaId)
+      if (ta) {
+        ta.value = newContent
+        ta.focus()
+      }
+    },
+    onSkip: () => {},
+  })
 }
 
 async function deleteScript(id, name) {
