@@ -834,7 +834,7 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   position: fixed;
   bottom: 24px;
   right: 24px;
-  z-index: 200;
+  z-index: 300;
   display: flex;
   flex-direction: column;
   gap: 8px;

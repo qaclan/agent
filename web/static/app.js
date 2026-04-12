@@ -181,14 +181,17 @@ async function init() {
   renderTopbar()
   await routes[state.page]()
 
-  // Close dropdowns on outside click
-  document.addEventListener('click', (e) => {
-    const wrap = document.getElementById('project-switcher-wrap')
-    if (wrap && !wrap.contains(e.target)) {
-      const dd = document.getElementById('project-dropdown')
-      if (dd) dd.classList.add('hidden')
-    }
-  })
+  // Close dropdowns on outside click — use a named function so it's only registered once
+  if (!window._qcDropdownListenerAdded) {
+    window._qcDropdownListenerAdded = true
+    document.addEventListener('click', (e) => {
+      const wrap = document.getElementById('project-switcher-wrap')
+      if (wrap && !wrap.contains(e.target)) {
+        const dd = document.getElementById('project-dropdown')
+        if (dd) dd.classList.add('hidden')
+      }
+    })
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init)
@@ -578,14 +581,6 @@ async function submitAuthKey() {
   renderTopbar()
   await routes[state.page]()
 
-  document.addEventListener('click', (e) => {
-    const wrap = document.getElementById('project-switcher-wrap')
-    if (wrap && !wrap.contains(e.target)) {
-      const dd = document.getElementById('project-dropdown')
-      if (dd) dd.classList.add('hidden')
-    }
-  })
-
   toast('Logged in as ' + (res.user?.name || 'user'))
 }
 
@@ -969,13 +964,14 @@ function _parseFillCalls(scriptBody) {
 }
 
 function _categorizeField(locator, patterns) {
-  // patterns: { username: ["user", "email", ...], password: [...], ... }
+  // patterns: { category: { patterns: [...], canonical_key: "..." }, ... }
   // Returns the category name whose pattern list has the longest substring match,
   // or null if no category matches.
   const lower = locator.toLowerCase()
   let bestCategory = null
   let bestLen = 0
-  for (const [category, words] of Object.entries(patterns || {})) {
+  for (const [category, cfg] of Object.entries(patterns || {})) {
+    const words = Array.isArray(cfg) ? cfg : (cfg.patterns || [])
     for (const word of words) {
       if (word && lower.includes(word.toLowerCase()) && word.length > bestLen) {
         bestCategory = category
@@ -1039,7 +1035,7 @@ async function reviewRecordedScriptFields(scriptId, envName) {
     envVars = eRes.variables || []
   }
 
-  await _showFieldReviewModal(scriptId, content, categorized, envVars, secretCats, envName)
+  await _showFieldReviewModal(scriptId, content, categorized, envVars, secretCats, envName, patterns)
 }
 
 function _lineNumberAt(content, offset) {
@@ -1075,7 +1071,7 @@ function _renderDiffLine(lineText, value, valueQuote, mode, replacementKey) {
   return head + `<span class="diff-highlight-after">${escHtml(newInner)}</span>` + tail
 }
 
-function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats, envName, onApply, onSkip, useOverlay = false }) {
+async function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats, envName, patterns, onApply, onSkip, useOverlay = false }) {
   // When called from inside another modal (e.g. editor Scan & Bind), render as an
   // overlay so the underlying modal and its state (textarea value, etc.) stay alive.
   const modalShowFn = useOverlay ? showOverlayModal : showModal
@@ -1090,6 +1086,26 @@ function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats
     f.lineText = _lineTextAt(originalContent, f.matchStart)
   })
 
+  // Load all envs for the env selector
+  const envsRes = await api('GET', '/envs')
+  const allEnvs = envsRes.environments || []
+
+  // Mutable state: currently loaded env vars (changes when user picks a different env)
+  let currentEnvName = envName || ''
+  let currentEnvVars = envVars || []
+
+  // Track user selections so they persist across env switches.
+  // Map of fillIndex → selectedKey. Updated on every dropdown change.
+  const userSelections = new Map()
+
+  // Collect canonical keys for quick lookup
+  const canonicalKeys = new Map()  // category → canonical_key
+  if (patterns) {
+    for (const [cat, cfg] of Object.entries(patterns)) {
+      if (cfg.canonical_key) canonicalKeys.set(cat, cfg.canonical_key)
+    }
+  }
+
   const categoryAccent = (cat) => {
     if (!cat) return { border: 'var(--border-default)', bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1' }
     if (secretCats.includes(cat)) return { border: '#f87171', bg: 'rgba(248,113,113,0.14)', fg: '#fca5a5' }
@@ -1098,16 +1114,46 @@ function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats
     return { border: 'var(--border-default)', bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1' }
   }
 
-  const renderRow = (f) => {
+  function _buildDropdownOpts(f, envVarsList) {
+    const savedKey = userSelections.get(f.index) || ''
+
+    // No env selected yet — show disabled placeholder
+    if (!currentEnvName) {
+      return '<option value="" selected>— Select environment first —</option>'
+    }
+
+    const suggestions = f.category ? _suggestEnvKeysForCategory(f.category, envVarsList, secretCats) : envVarsList
+    const envKeySet = new Set(envVarsList.map(v => v.key))
+
+    const optParts = ['<option value=""' + (savedKey === '' ? ' selected' : '') + '>— Skip —</option>']
+
+    // For sensitive fields: always include the canonical key as an option
+    if (f.category && canonicalKeys.has(f.category)) {
+      const canonical = canonicalKeys.get(f.category)
+      const inEnv = envKeySet.has(canonical)
+      const label = inEnv ? canonical : canonical + ' (suggested — will be added to env)'
+      const isSelected = savedKey === canonical
+      // Don't duplicate if the env already has this key (it'll appear in the env list below)
+      if (!inEnv) {
+        optParts.push(`<option value="${escHtml(canonical)}"${isSelected ? ' selected' : ''}>${escHtml(label)}</option>`)
+      }
+    }
+
+    // Env keys (sorted by relevance for sensitive, all for non-sensitive)
+    optParts.push(...suggestions.map(v => {
+      const isSelected = savedKey === v.key
+      return `<option value="${escHtml(v.key)}"${isSelected ? ' selected' : ''}>${escHtml(v.key)}</option>`
+    }))
+
+    return optParts.join('')
+  }
+
+  function renderRow(f) {
     const isSecret = f.category && secretCats.includes(f.category)
     const valuePreview = isSecret ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : f.value
-    const suggestions = f.category ? _suggestEnvKeysForCategory(f.category, envVars, secretCats) : envVars
-    const opts = ['<option value="">— Skip —</option>']
-      .concat(suggestions.map(v => `<option value="${escHtml(v.key)}">${escHtml(v.key)}</option>`))
-      .join('')
+    const opts = _buildDropdownOpts(f, currentEnvVars)
     const accent = categoryAccent(f.category)
     const categoryLabel = `<span style="display:inline-block;font-size:13px;font-weight:700;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:4px;background:${accent.bg};color:${accent.fg};border:1px solid ${accent.border}">${escHtml(f.category || 'field')}</span>`
-    // "Before" line with the original value highlighted red
     const beforeLineHtml = _renderDiffLine(f.lineText, f.value, f.valueQuote, 'before')
     return `
       <div class="field-review-row" data-fill-index="${f.index}" style="padding:14px 16px;border-bottom:1px solid var(--border-subtle);border-left:3px solid ${accent.border};margin-bottom:2px">
@@ -1115,7 +1161,7 @@ function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats
           ${categoryLabel}
           <span style="font-family:monospace;font-size:12px;font-weight:600;color:var(--text-secondary);background:var(--bg-base);padding:3px 8px;border-radius:3px">L${f.lineNumber}</span>
           <span style="color:var(--text-secondary);font-size:12px">Recorded: <code>${escHtml(valuePreview)}</code></span>
-          <select class="field-review-select" style="margin-left:auto;min-width:220px" onchange="_updateFieldReviewPreview(${f.index})">${opts}</select>
+          <select class="field-review-select" style="margin-left:auto;min-width:220px" onchange="_onFieldReviewSelect(${f.index}, this.value)">${opts}</select>
         </div>
         <div style="font-family:monospace;font-size:12px;line-height:1.6;background:var(--bg-base);padding:10px 12px;border-radius:4px;overflow-x:auto">
           <div style="display:flex;gap:10px">
@@ -1130,32 +1176,95 @@ function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats
       </div>`
   }
 
-  const sensitiveBlock = sensitive.length === 0
-    ? '<p class="text-muted">No sensitive fields detected.</p>'
-    : sensitive.map(renderRow).join('')
+  // Track whether user has expanded the "other fields" section so we can
+  // preserve that state across env-change re-renders.
+  let othersExpanded = false
 
-  const othersBlock = others.length === 0
-    ? ''
-    : `<details style="margin-top:14px">
-         <summary style="cursor:pointer;color:var(--text-primary);font-size:13px;font-weight:600;padding:8px 0">Show all ${others.length} other fill field${others.length === 1 ? '' : 's'}</summary>
-         <div style="margin-top:8px">${others.map(renderRow).join('')}</div>
-       </details>`
+  function renderFieldRows() {
+    const sensitiveBlock = sensitive.length === 0
+      ? '<p class="text-muted">No sensitive fields detected.</p>'
+      : sensitive.map(renderRow).join('')
+    const othersBlock = others.length === 0
+      ? ''
+      : `<details${othersExpanded ? ' open' : ''} style="margin-top:14px" ontoggle="window._qcOthersToggled && window._qcOthersToggled(this)">
+           <summary style="cursor:pointer;color:var(--text-primary);font-size:13px;font-weight:600;padding:8px 0">Show all ${others.length} other fill field${others.length === 1 ? '' : 's'}</summary>
+           <div style="margin-top:8px">${others.map(renderRow).join('')}</div>
+         </details>`
+    return `<div>${sensitiveBlock}</div>${othersBlock}`
+  }
 
-  const noEnvHint = envName
-    ? ''
-    : '<p class="form-hint" style="margin-bottom:8px">No environment selected. Bindings use whatever env is selected at run time.</p>'
+  window._qcOthersToggled = function(el) { othersExpanded = el.open }
 
   // Store fills + originalContent globally so the onchange preview handler can access them
   window._fieldReviewState = { fills, originalContent }
 
+  // Cleanup function: nulls out all window globals this modal sets.
+  // Called on close (both Skip and Apply paths, and close-X/backdrop).
+  function _cleanupReviewModalGlobals() {
+    window._fieldReviewState = null
+    window._onFieldReviewSelect = null
+    window._onReviewEnvChange = null
+    window._qcOthersToggled = null
+  }
+
+  // Save user selection and update preview on dropdown change
+  window._onFieldReviewSelect = function(fillIndex, key) {
+    if (key) {
+      userSelections.set(fillIndex, key)
+    } else {
+      userSelections.delete(fillIndex)
+    }
+    _updateFieldReviewPreview(fillIndex)
+  }
+
+  // Expose the env-change handler globally so the select's onchange can call it
+  window._onReviewEnvChange = async function() {
+    const modalRoot = useOverlay
+      ? document.getElementById('modal-overlay-root')
+      : document.getElementById('modal-root')
+    if (!modalRoot) return
+    const sel = modalRoot.querySelector('#review-env-select')
+    if (!sel) return
+    currentEnvName = sel.value
+    if (currentEnvName) {
+      const eRes = await api('GET', '/envs/' + encodeURIComponent(currentEnvName))
+      currentEnvVars = eRes.variables || []
+    } else {
+      currentEnvVars = []
+    }
+    // Re-render field rows with new env's keys
+    const container = modalRoot.querySelector('#review-fields-container')
+    if (container) container.innerHTML = renderFieldRows()
+    // Re-attach preview state
+    window._fieldReviewState = { fills, originalContent }
+    // Restore "after" previews for any fields that have a saved selection
+    for (const [fillIndex, key] of userSelections.entries()) {
+      if (key) _updateFieldReviewPreview(fillIndex)
+    }
+  }
+
+  const envSelectorHTML = `
+    <div class="form-group" style="margin-bottom:14px">
+      <label class="form-label" style="font-weight:600">Environment</label>
+      <select id="review-env-select" style="width:100%;max-width:300px" onchange="_onReviewEnvChange()">
+        <option value="">— Select environment —</option>
+        ${allEnvs.map(e => `<option value="${escHtml(e.name)}" ${e.name === currentEnvName ? 'selected' : ''}>${escHtml(e.name)} (${e.var_count} vars)</option>`).join('')}
+      </select>
+      ${!currentEnvName ? '<p class="form-hint" style="margin-top:4px">Select an environment to see available keys and enable Apply.</p>' : ''}
+    </div>`
+
   modalShowFn('Review Fields', `
-    ${noEnvHint}
+    ${envSelectorHTML}
     <p class="form-hint" style="margin-bottom:14px">Bind detected fields to environment variables. Pick a key to preview the result. Skipped fields stay hardcoded.</p>
-    <div>${sensitiveBlock}</div>
-    ${othersBlock}`, [
+    <div id="review-fields-container">${renderFieldRows()}</div>`, [
     { label: 'Skip & save as-is', cls: 'btn-ghost', action: () => { modalCloseFn(); onSkip && onSkip() } },
     { label: 'Apply Bindings', cls: 'btn-primary', action: async () => {
-      // Scope queries to the correct modal root so we don't pick up stray elements
+      if (!currentEnvName) {
+        toast('Select an environment first', 'error')
+        return
+      }
+
+      // Scope queries to the correct modal root
       const modalRoot = useOverlay
         ? document.getElementById('modal-overlay-root')
         : document.getElementById('modal-root')
@@ -1172,10 +1281,47 @@ function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats
       }
 
       const newContent = _rewriteScriptWithBindings(originalContent, fills, bindings)
+
+      // Auto-add missing keys to the selected env with recorded values
+      const envKeySet = new Set(currentEnvVars.map(v => v.key))
+      const missingVars = bindings
+        .filter(b => !envKeySet.has(b.key))
+        .map(b => {
+          const fill = fills[b.index]
+          const isSecret = fill && fill.category && secretCats.includes(fill.category)
+          return { key: b.key, value: fill ? fill.value : '', is_secret: isSecret ? 1 : 0 }
+        })
+
+      if (missingVars.length > 0) {
+        const appendRes = await api('POST', '/envs/' + encodeURIComponent(currentEnvName) + '/vars/append', { vars: missingVars })
+        if (appendRes.ok !== false && appendRes.added > 0) {
+          const keyNames = missingVars.map(v => v.key).join(', ')
+          toast('Added ' + keyNames + ' to "' + currentEnvName + '" with recorded values')
+        }
+      }
+
       modalCloseFn()
       if (onApply) await onApply(newContent, bindings.length)
     }}
   ], '', 'xl')
+
+  // Register cleanup hook AFTER modalShowFn has rendered. This avoids the bug where
+  // showOverlayModal's defensive closeOverlayModal() call would trigger our cleanup
+  // before the modal even appeared.
+  if (useOverlay) {
+    const _origCloseOverlay = window.closeOverlayModal
+    window.closeOverlayModal = function() {
+      _cleanupReviewModalGlobals()
+      window.closeOverlayModal = _origCloseOverlay
+      _origCloseOverlay()
+    }
+  } else {
+    const prevHook = window._qcModalCleanupHook
+    window._qcModalCleanupHook = () => {
+      _cleanupReviewModalGlobals()
+      if (typeof prevHook === 'function') prevHook()
+    }
+  }
 }
 
 function _updateFieldReviewPreview(fillIndex) {
@@ -1199,10 +1345,10 @@ function _updateFieldReviewPreview(fillIndex) {
 }
 
 // Post-record wrapper that persists via PUT
-function _showFieldReviewModal(scriptId, originalContent, fills, envVars, secretCats, envName) {
-  return new Promise(resolve => {
-    _showFieldReviewModalCore({
-      fills, originalContent, envVars, secretCats, envName,
+async function _showFieldReviewModal(scriptId, originalContent, fills, envVars, secretCats, envName, patterns) {
+  return new Promise(async (resolve) => {
+    await _showFieldReviewModalCore({
+      fills, originalContent, envVars, secretCats, envName, patterns,
       onApply: async (newContent, count) => {
         const updateRes = await api('PUT', '/scripts/' + scriptId, { content: newContent })
         if (updateRes.ok === false) toast(updateRes.error, 'error')
@@ -1528,16 +1674,17 @@ async function scanAndBindFromEditor() {
   }))
 
   // Apply bindings in-memory, then write back to the editor via the wrapper API
-  _showFieldReviewModalForEditor(content, categorized, envVars, secretCats, envName)
+  await _showFieldReviewModalForEditor(content, categorized, envVars, secretCats, envName, patterns)
 }
 
-function _showFieldReviewModalForEditor(originalContent, fills, envVars, secretCats, envName) {
-  _showFieldReviewModalCore({
+async function _showFieldReviewModalForEditor(originalContent, fills, envVars, secretCats, envName, patterns) {
+  await _showFieldReviewModalCore({
     fills,
     originalContent,
     envVars,
     secretCats,
     envName,
+    patterns,
     useOverlay: true,  // render on top of the existing edit/create script modal
     onApply: (newContent) => {
       const editor = window._qcCurrentEditor
@@ -1679,6 +1826,11 @@ async function editSuiteModal(id) {
   window._editSuiteId = id
   window._editSuiteScripts = suiteScripts
   window._editAllScripts = allScripts
+  window._qcModalCleanupHook = () => {
+    window._editSuiteId = null
+    window._editSuiteScripts = null
+    window._editAllScripts = null
+  }
 
   // Drag-and-drop reordering
   const list = document.getElementById('suite-script-list')

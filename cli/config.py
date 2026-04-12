@@ -96,13 +96,13 @@ def get_active_project(console):
 # (case-insensitive) against the locator text of .fill() calls. Users can extend
 # or override these by adding "sensitive_field_patterns" to ~/.qaclan/config.json.
 DEFAULT_SENSITIVE_PATTERNS = {
-    "username": ["user", "username", "email", "login", "userid", "e-mail"],
-    "password": ["pass", "password", "pwd", "passwd"],
-    "tenant":   ["tenant", "org", "organization", "workspace", "account"],
-    "token":    ["token", "api_key", "apikey", "secret", "access_key"],
-    "otp":      ["otp", "code", "2fa", "mfa", "pin", "verification"],
-    "client":   ["client_id", "clientid", "client_secret"],
-    "host":     ["host", "base_url", "endpoint"],
+    "username": {"patterns": ["user", "username", "email", "login", "userid", "e-mail"], "canonical_key": "username"},
+    "password": {"patterns": ["pass", "password", "pwd", "passwd"], "canonical_key": "password"},
+    "tenant":   {"patterns": ["tenant", "org", "organization", "workspace", "account"], "canonical_key": "tenant_id"},
+    "token":    {"patterns": ["token", "api_key", "apikey", "secret", "access_key"], "canonical_key": "api_token"},
+    "otp":      {"patterns": ["otp", "code", "2fa", "mfa", "pin", "verification"], "canonical_key": "otp_code"},
+    "client":   {"patterns": ["client_id", "clientid", "client_secret"], "canonical_key": "client_id"},
+    "host":     {"patterns": ["host", "base_url", "endpoint"], "canonical_key": "base_url"},
 }
 
 # Categories whose recorded values should be masked in the UI and never logged at runtime.
@@ -110,14 +110,24 @@ SECRET_CATEGORIES = {"password", "token", "otp", "client"}
 
 
 def get_sensitive_field_patterns():
-    """Return active sensitive-field patterns: defaults merged with user overrides."""
+    """Return active sensitive-field patterns: defaults merged with user overrides.
+
+    Returns dict of { category: { patterns: [...], canonical_key: "..." } }.
+    User overrides can be either the new dict shape or the old list-only shape
+    (for backward compat with existing config.json files).
+    """
     cfg = _read_config()
     user_patterns = cfg.get("sensitive_field_patterns", {})
-    merged = {k: list(v) for k, v in DEFAULT_SENSITIVE_PATTERNS.items()}
+    merged = {k: dict(v) for k, v in DEFAULT_SENSITIVE_PATTERNS.items()}
     if isinstance(user_patterns, dict):
-        for category, patterns in user_patterns.items():
-            if isinstance(patterns, list):
-                merged[category] = patterns
+        for category, val in user_patterns.items():
+            if isinstance(val, dict):
+                # New shape: { patterns: [...], canonical_key: "..." }
+                merged[category] = val
+            elif isinstance(val, list):
+                # Old shape: just a list of patterns — preserve existing canonical_key if category exists
+                existing = merged.get(category, {})
+                merged[category] = {"patterns": val, "canonical_key": existing.get("canonical_key", category.upper())}
     return merged
 
 
