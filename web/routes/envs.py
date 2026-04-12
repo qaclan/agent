@@ -199,6 +199,58 @@ def update_vars(env_name):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route('/api/envs/<env_name>/vars/append', methods=['POST'])
+def append_vars(env_name):
+    """Add vars that don't already exist in this environment. Skips duplicates."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        conn = get_conn()
+        env_row = conn.execute(
+            "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+            (project_id, env_name),
+        ).fetchone()
+        if not env_row:
+            return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
+
+        data = request.get_json(force=True)
+        vars_list = data.get("vars", [])
+        environment_id = env_row["id"]
+
+        # Load existing keys to skip duplicates
+        existing_keys = set(
+            r["key"] for r in conn.execute(
+                "SELECT key FROM env_vars WHERE environment_id = ?", (environment_id,)
+            ).fetchall()
+        )
+
+        new_vars = [
+            v for v in vars_list
+            if v.get("key", "").strip() and v["key"].strip() not in existing_keys
+        ]
+
+        if new_vars:
+            rows = [
+                (generate_id("evar"), environment_id, v["key"].strip(), v.get("value", ""), int(v.get("is_secret", 0)))
+                for v in new_vars
+            ]
+            conn.executemany(
+                "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
+                "VALUES (?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+            from cli.sync import sync_env_vars_to_cloud
+            sync_env_vars_to_cloud(environment_id)
+
+        return jsonify({"ok": True, "added": len(new_vars)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/envs/<env_name>/copy', methods=['POST'])
 def copy_env(env_name):
     try:
