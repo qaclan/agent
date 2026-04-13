@@ -46,8 +46,6 @@ npm install -g playwright@1.58.0
 playwright install chromium
 ```
 
-> **SmartScreen note:** Windows may warn that the binary is from an unknown publisher the first time you run it. Click **More info → Run anyway**, or unblock it with `Unblock-File .\qaclan.exe` in PowerShell.
-
 ### 3. Log in and launch the web UI
 
 ```bash
