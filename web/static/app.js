@@ -2006,7 +2006,7 @@ function showRunResults(run, suiteName) {
       // Screenshot block
       let screenshotBlock = ''
       if (s.screenshot_path) {
-        const filename = s.screenshot_path.split('/').pop()
+        const filename = s.screenshot_path.split(/[\\/]/).pop()
         screenshotBlock = `<div class="script-result-screenshot">
           <img src="/api/screenshots/${encodeURIComponent(filename)}" alt="Failure screenshot"
                onclick="window.open(this.src, '_blank')" />
