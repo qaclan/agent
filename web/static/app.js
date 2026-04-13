@@ -296,6 +296,9 @@ async function renderTopbar() {
       <p>${sub}</p>
     </div>
     <div class="topbar-right">
+      <button class="theme-btn" id="btn-theme" onclick="toggleTheme()" title="Toggle light/dark mode">
+        ${getTheme() === 'light' ? '\u263D' : '\u2600'}
+      </button>
       <button class="sync-btn" id="btn-pull" onclick="triggerPull()" title="Pull workspace from cloud">
         <span class="sync-icon">\u2193</span>
         <span class="sync-label">Pull</span>
@@ -325,6 +328,21 @@ async function renderTopbar() {
       </div>
     </div>`
 }
+
+function getTheme() {
+  return localStorage.getItem('qaclan-theme') || 'dark'
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme)
+  localStorage.setItem('qaclan-theme', theme)
+  const btn = document.getElementById('btn-theme')
+  if (btn) btn.textContent = theme === 'light' ? '\u263D' : '\u2600'
+}
+function toggleTheme() {
+  applyTheme(getTheme() === 'light' ? 'dark' : 'light')
+}
+// Apply immediately so first paint matches the saved theme
+applyTheme(getTheme())
 
 async function triggerPush() {
   const btn = document.getElementById('btn-push')
