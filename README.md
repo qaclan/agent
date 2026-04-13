@@ -37,14 +37,6 @@ QAClan ships a standalone `.exe` — no Python required. Pick the build that mat
 
 Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest).
 
-Open **PowerShell** in the folder you downloaded it to and run it directly — no install, no PATH setup:
-
-```powershell
-.\qaclan-windows-amd64.exe serve
-```
-
-On ARM64, use `.\qaclan-windows-arm64.exe serve` instead.
-
 **Install Playwright:**
 
 The Windows binary uses your system-installed Playwright instead of bundling it. Install Node.js from [nodejs.org](https://nodejs.org/) (LTS), then in PowerShell:
