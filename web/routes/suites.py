@@ -19,7 +19,7 @@ def list_suites():
 
         conn = get_conn()
         rows = conn.execute(
-            "SELECT su.id, su.name, su.channel, su.first_run_at, su.last_run_at, "
+            "SELECT su.id, su.cloud_id, su.name, su.channel, su.first_run_at, su.last_run_at, "
             "su.last_run_status, su.created_at, "
             "(SELECT COUNT(*) FROM suite_items si WHERE si.suite_id = su.id) AS script_count "
             "FROM suites su WHERE su.project_id = ? "

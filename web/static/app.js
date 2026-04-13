@@ -1778,16 +1778,23 @@ async function renderSuitesPage() {
       <table>
         <thead><tr>
           <th>Suite</th>
+          <th>ID</th>
           <th>Scripts</th>
           <th>Last Run</th>
           <th></th>
         </tr></thead>
         <tbody>
           ${suites.length === 0
-            ? `<tr><td colspan="4"><div class="empty-state"><div class="empty-state-icon">\u25A6</div><p>No suites yet.</p></div></td></tr>`
+            ? `<tr><td colspan="5"><div class="empty-state"><div class="empty-state-icon">\u25A6</div><p>No suites yet.</p></div></td></tr>`
             : suites.map(s => `
             <tr>
               <td><strong>${escHtml(s.name)}</strong></td>
+              <td>
+                <button class="id-chip" onclick="copyToClipboard('${s.id}', this)" title="Copy suite ID">
+                  <code>${s.id}</code>
+                  <span class="id-chip-icon">\u2398</span>
+                </button>
+              </td>
               <td><span class="badge badge-neutral">${s.script_count} scripts</span></td>
               <td>${s.last_run_status
                 ? `<span class="badge ${s.last_run_status==='PASSED'?'badge-success':'badge-danger'}"><span class="badge-dot"></span>${s.last_run_status}</span>`
@@ -1801,6 +1808,19 @@ async function renderSuitesPage() {
         </tbody>
       </table>
     </div>`
+}
+
+async function copyToClipboard(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text)
+    if (btn) {
+      btn.classList.add('copied')
+      setTimeout(() => btn.classList.remove('copied'), 1200)
+    }
+    toast('Copied: ' + text, 'success')
+  } catch (e) {
+    toast('Copy failed', 'error')
+  }
 }
 
 function createSuiteModal() {
