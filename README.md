@@ -56,15 +56,13 @@ playwright install chromium
 
 > **SmartScreen note:** Windows may warn that the binary is from an unknown publisher the first time you run it. Click **More info → Run anyway**, or unblock it with `Unblock-File .\qaclan.exe` in PowerShell.
 
-### 3. Launch the web UI
+### 3. Log in and launch the web UI
 
 ```bash
-qaclan serve
+qaclan login --key <your_auth_key> && qaclan serve
 ```
 
-### 4. Enter your auth key
-
-When the browser opens at `http://localhost:7823`, enter your auth key and start managing your Playwright tests locally.
+The browser opens at `http://localhost:7823` — start managing your Playwright tests locally.
 
 ## Features
 
