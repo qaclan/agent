@@ -318,16 +318,6 @@ body {
 .id-chip.copied .id-chip-icon::before { content: '\2713'; }
 .id-chip.copied .id-chip-icon { font-size: 0; }
 .id-chip.copied .id-chip-icon::before { font-size: 12px; }
-.id-chip-group { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-.id-chip-cloud { color: var(--accent); border-color: var(--accent-subtle); }
-.id-chip-cloud:hover { border-color: var(--accent); }
-.id-chip-tag {
-  font-family: var(--font-ui);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
-}
 
 .project-switcher {
   position: relative;
