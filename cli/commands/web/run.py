@@ -348,45 +348,9 @@ def web_run(suite_id, env_name, stop_on_fail, browser, resolution, headless):
     )
     conn.commit()
 
-    # Sync run to cloud
-    from cli.sync import sync_run_to_cloud, _read_screenshot_b64
-    script_run_rows = conn.execute(
-        "SELECT sr.script_id, s.name as script_name, sr.status, sr.duration_ms, sr.error_message, "
-        "sr.order_index, sr.console_errors, sr.network_failures, sr.console_log, sr.network_log, "
-        "sr.screenshot_path "
-        "FROM script_runs sr JOIN scripts s ON sr.script_id = s.id "
-        "WHERE sr.suite_run_id = ? ORDER BY sr.order_index",
-        (run_id,),
-    ).fetchall()
-
-    sync_run_to_cloud(
-        run_id=run_id,
-        suite_id=suite_id,
-        status=final_status,
-        started_at=now,
-        completed_at=finished_at,
-        duration_ms=int(total_duration * 1000),
-        project_id=proj["id"],
-        browser=browser,
-        resolution=resolution,
-        headless=headless,
-        script_results=[
-            {
-                "script_id": r["script_id"],
-                "script_name": r["script_name"],
-                "status": r["status"].lower(),
-                "duration_ms": r["duration_ms"] or 0,
-                "error_output": r["error_message"],
-                "order_index": r["order_index"],
-                "console_errors": r["console_errors"] or 0,
-                "network_failures": r["network_failures"] or 0,
-                "console_log": r["console_log"],
-                "network_log": r["network_log"],
-                "screenshot_b64": _read_screenshot_b64(r["screenshot_path"]),
-            }
-            for r in script_run_rows
-        ],
-    )
+    # Queue run for cloud sync (payload built at drain time from DB)
+    from cli.sync_queue import enqueue
+    enqueue("run", run_id, "upsert")
 
     # Print summary
     console.print(f"\n{SEPARATOR}")

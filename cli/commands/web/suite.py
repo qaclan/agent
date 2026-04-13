@@ -31,8 +31,8 @@ def suite_create(name):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Suite created: {name} [{sid}]  [bold cyan]\\[WEB][/bold cyan]")
-    from cli.sync import sync_suite_to_cloud
-    sync_suite_to_cloud(sid, name, proj["id"])
+    from cli.sync_queue import enqueue
+    enqueue("suite", sid, "upsert")
 
 
 @suite.command("add")
@@ -73,8 +73,8 @@ def suite_add(suite_id, script_id):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Added {sc['name']} to {s['name']} [order: {max_order + 1}]")
-    from cli.sync import sync_suite_items_to_cloud
-    sync_suite_items_to_cloud(suite_id, proj["id"])
+    from cli.sync_queue import enqueue
+    enqueue("suite_items", suite_id, "upsert")
 
 
 @suite.command("reorder")
@@ -100,8 +100,8 @@ def suite_reorder(suite_id, scripts):
         )
     conn.commit()
     console.print(f"[green]✓[/green] Reordered {len(script_ids)} scripts in {s['name']}")
-    from cli.sync import sync_suite_items_to_cloud
-    sync_suite_items_to_cloud(suite_id, proj["id"])
+    from cli.sync_queue import enqueue
+    enqueue("suite_items", suite_id, "upsert")
 
 
 @suite.command("remove")
@@ -124,8 +124,8 @@ def suite_remove(suite_id, script_id):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Removed script from {s['name']}")
-    from cli.sync import sync_suite_items_to_cloud
-    sync_suite_items_to_cloud(suite_id, proj["id"])
+    from cli.sync_queue import enqueue
+    enqueue("suite_items", suite_id, "upsert")
 
 
 @suite.command("show")
@@ -220,5 +220,5 @@ def suite_delete(suite_id):
     conn.execute("DELETE FROM suites WHERE id = ?", (suite_id,))
     conn.commit()
     console.print(f"[green]✓[/green] Suite deleted: {s['name']}")
-    from cli.sync import delete_suite_from_cloud
-    delete_suite_from_cloud(suite_id)
+    from cli.sync_queue import enqueue
+    enqueue("suite", suite_id, "delete")

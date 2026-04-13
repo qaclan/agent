@@ -181,14 +181,8 @@ def create_script():
         )
         conn.commit()
 
-        from cli.sync import sync_script_to_cloud
-        sync_script_to_cloud(
-            script_id, name,
-            feature_id=feature_id,
-            project_id=project_id,
-            file_content=content,
-            var_keys=var_keys_list,
-        )
+        from cli.sync_queue import enqueue
+        enqueue("script", script_id, "upsert")
 
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
     except Exception as e:
@@ -236,33 +230,8 @@ def update_script(script_id):
 
         conn.commit()
 
-        # Sync updated script to cloud
-        from cli.sync import sync_script_to_cloud
-        updated_name = name if name is not None else conn.execute(
-            "SELECT name FROM scripts WHERE id = ?", (script_id,)
-        ).fetchone()["name"]
-        file_content = None
-        file_path = row["file_path"]
-        if file_path and os.path.exists(file_path):
-            with open(file_path, "r") as f:
-                file_content = f.read()
-        script_row = conn.execute(
-            "SELECT feature_id, project_id, start_url_key, start_url_value, var_keys "
-            "FROM scripts WHERE id = ?", (script_id,)
-        ).fetchone()
-        try:
-            var_keys_list = json.loads(script_row["var_keys"] or "[]")
-        except (TypeError, ValueError):
-            var_keys_list = []
-        sync_script_to_cloud(
-            script_id, updated_name,
-            feature_id=script_row["feature_id"],
-            project_id=script_row["project_id"],
-            file_content=file_content,
-            start_url_key=script_row["start_url_key"],
-            start_url_value=script_row["start_url_value"],
-            var_keys=var_keys_list,
-        )
+        from cli.sync_queue import enqueue
+        enqueue("script", script_id, "upsert")
 
         return jsonify({"ok": True, "id": script_id})
     except Exception as e:
@@ -356,8 +325,8 @@ def delete_script(script_id):
         conn.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
         conn.commit()
 
-        from cli.sync import delete_script_from_cloud
-        delete_script_from_cloud(script_id)
+        from cli.sync_queue import enqueue
+        enqueue("script", script_id, "delete")
 
         return jsonify({"ok": True})
     except Exception as e:

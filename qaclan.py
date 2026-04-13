@@ -116,19 +116,52 @@ run_group.add_command(run_show, "show")
 @qaclan.command()
 @click.option("--all", "push_all_projects", is_flag=True, help="Push all projects, not just the active one")
 def push(push_all_projects):
-    """Push all local data to the cloud server."""
+    """Force a full resync: re-enqueue every local entity then drain the queue."""
     require_auth()
     from cli.config import get_active_project_id
-    from cli.sync import sync_all
+    from cli.db import get_conn
+    from cli.sync_queue import enqueue, flush_sync, queue_depth
     from rich.console import Console
     console = Console()
+
+    conn = get_conn()
     if push_all_projects:
-        sync_all(project_id=None)
+        project_ids = [r["id"] for r in conn.execute("SELECT id FROM projects").fetchall()]
     else:
-        project_id = get_active_project_id()
-        if not project_id:
+        pid = get_active_project_id()
+        if pid:
+            project_ids = [pid]
+        else:
             console.print("[yellow]No active project. Pushing all projects...[/yellow]")
-        sync_all(project_id=project_id)
+            project_ids = [r["id"] for r in conn.execute("SELECT id FROM projects").fetchall()]
+
+    if not project_ids:
+        console.print("[yellow]No projects to push.[/yellow]")
+        return
+
+    for pid in project_ids:
+        enqueue("project", pid, "upsert")
+        for f in conn.execute("SELECT id FROM features WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("feature", f["id"], "upsert")
+        for s in conn.execute("SELECT id FROM suites WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("suite", s["id"], "upsert")
+            enqueue("suite_items", s["id"], "upsert")
+        for sc in conn.execute("SELECT id FROM scripts WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("script", sc["id"], "upsert")
+        for env in conn.execute("SELECT id FROM environments WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("environment", env["id"], "upsert")
+            enqueue("env_vars", env["id"], "upsert")
+        for run in conn.execute("SELECT id FROM suite_runs WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("run", run["id"], "upsert")
+
+    total = queue_depth()
+    console.print(f"[bold]Pushing {total} pending items...[/bold]")
+    flush_sync(deadline=60)
+    remaining = queue_depth()
+    if remaining == 0:
+        console.print(f"[green]✓ Push complete[/green]")
+    else:
+        console.print(f"[yellow]⚠ {remaining} item(s) still pending — will retry in background[/yellow]")
 
 
 @qaclan.command()
@@ -151,15 +184,12 @@ def serve(port, host, no_browser):
 
     console = Console()
 
-    # Run a full sync on startup (best-effort)
+    # Start the background sync-queue drainer (best-effort)
     from cli.config import get_auth_key
     if get_auth_key():
-        console.print('[dim]Syncing to cloud...[/dim]')
-        try:
-            from cli.sync import sync_all
-            sync_all()
-        except Exception as e:
-            console.print(f'[yellow]⚠ Startup sync failed: {e}[/yellow]')
+        from cli.sync_queue import start_worker, trigger_now
+        start_worker()
+        trigger_now()
 
     app = create_app()
     url = f'http://localhost:{port}'

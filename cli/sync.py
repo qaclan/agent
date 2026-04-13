@@ -1,14 +1,30 @@
 """Cloud sync helper. Wraps cli/api.py calls with error handling.
-Sync is best-effort — failures print a warning but never block the CLI."""
+Sync is best-effort — failures print a warning but never block the CLI.
+Enter strict_mode() to make failures raise (used by the sync_queue drainer)."""
 
 import base64
+import contextlib
 import os
+import threading
 
 from rich.console import Console
 from cli.config import get_auth_key
 from cli import api
 
 console = Console()
+
+_strict = threading.local()
+
+
+@contextlib.contextmanager
+def strict_mode():
+    """Inside this context, _try_sync re-raises instead of swallowing."""
+    prev = getattr(_strict, "on", False)
+    _strict.on = True
+    try:
+        yield
+    finally:
+        _strict.on = prev
 
 
 def _read_screenshot_b64(path):
@@ -23,10 +39,12 @@ def _read_screenshot_b64(path):
 
 
 def _try_sync(label, fn):
-    """Run a sync function, catch and warn on failure."""
+    """Run a sync function, catch and warn on failure (raise in strict_mode)."""
     try:
         return fn()
     except Exception as e:
+        if getattr(_strict, "on", False):
+            raise
         console.print(f"[yellow]⚠ Cloud sync failed ({label}): {e}[/yellow]")
         return None
 

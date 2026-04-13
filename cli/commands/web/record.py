@@ -164,16 +164,8 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
         )
         conn.commit()
 
-        from cli.sync import sync_script_to_cloud
-        sync_script_to_cloud(
-            script_id, name,
-            feature_id=feature_id,
-            project_id=project_id,
-            file_content=processed_script,
-            start_url_key=url_key,
-            start_url_value=start_url_value,
-            var_keys=var_keys_list,
-        )
+        from cli.sync_queue import enqueue
+        enqueue("script", script_id, "upsert")
 
         return script_id, dest
     finally:
