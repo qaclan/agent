@@ -119,47 +119,31 @@ def push(push_all_projects):
     """Force a full resync: re-enqueue every local entity then drain the queue."""
     require_auth()
     from cli.config import get_active_project_id
-    from cli.db import get_conn
-    from cli.sync_queue import enqueue, flush_sync, queue_depth
+    from cli.sync_queue import enqueue_all, flush_sync, queue_depth
     from rich.console import Console
     console = Console()
 
-    conn = get_conn()
     if push_all_projects:
-        project_ids = [r["id"] for r in conn.execute("SELECT id FROM projects").fetchall()]
+        project_ids = None
     else:
         pid = get_active_project_id()
         if pid:
             project_ids = [pid]
         else:
             console.print("[yellow]No active project. Pushing all projects...[/yellow]")
-            project_ids = [r["id"] for r in conn.execute("SELECT id FROM projects").fetchall()]
+            project_ids = None
 
-    if not project_ids:
-        console.print("[yellow]No projects to push.[/yellow]")
+    enqueue_all(project_ids)
+    total = queue_depth()
+    if total == 0:
+        console.print("[yellow]No pending items to push.[/yellow]")
         return
 
-    for pid in project_ids:
-        enqueue("project", pid, "upsert")
-        for f in conn.execute("SELECT id FROM features WHERE project_id = ?", (pid,)).fetchall():
-            enqueue("feature", f["id"], "upsert")
-        for s in conn.execute("SELECT id FROM suites WHERE project_id = ?", (pid,)).fetchall():
-            enqueue("suite", s["id"], "upsert")
-            enqueue("suite_items", s["id"], "upsert")
-        for sc in conn.execute("SELECT id FROM scripts WHERE project_id = ?", (pid,)).fetchall():
-            enqueue("script", sc["id"], "upsert")
-        for env in conn.execute("SELECT id FROM environments WHERE project_id = ?", (pid,)).fetchall():
-            enqueue("environment", env["id"], "upsert")
-            enqueue("env_vars", env["id"], "upsert")
-        for run in conn.execute("SELECT id FROM suite_runs WHERE project_id = ?", (pid,)).fetchall():
-            enqueue("run", run["id"], "upsert")
-
-    total = queue_depth()
     console.print(f"[bold]Pushing {total} pending items...[/bold]")
     flush_sync(deadline=60)
     remaining = queue_depth()
     if remaining == 0:
-        console.print(f"[green]✓ Push complete[/green]")
+        console.print("[green]✓ Push complete[/green]")
     else:
         console.print(f"[yellow]⚠ {remaining} item(s) still pending — will retry in background[/yellow]")
 

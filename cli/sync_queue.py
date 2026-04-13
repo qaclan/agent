@@ -309,6 +309,32 @@ def trigger_now():
     _wake.set()
 
 
+def enqueue_all(project_ids=None):
+    """Re-enqueue every local entity under the given project_ids (or all if None).
+    Returns (enqueued_count, total_queue_depth_after)."""
+    from cli.db import get_conn
+    conn = get_conn()
+    if project_ids is None:
+        project_ids = [r["id"] for r in conn.execute("SELECT id FROM projects").fetchall()]
+    before = queue_depth()
+    for pid in project_ids:
+        enqueue("project", pid, "upsert")
+        for f in conn.execute("SELECT id FROM features WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("feature", f["id"], "upsert")
+        for s in conn.execute("SELECT id FROM suites WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("suite", s["id"], "upsert")
+            enqueue("suite_items", s["id"], "upsert")
+        for sc in conn.execute("SELECT id FROM scripts WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("script", sc["id"], "upsert")
+        for env in conn.execute("SELECT id FROM environments WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("environment", env["id"], "upsert")
+            enqueue("env_vars", env["id"], "upsert")
+        for run in conn.execute("SELECT id FROM suite_runs WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("run", run["id"], "upsert")
+    after = queue_depth()
+    return (after - before, after)
+
+
 def flush_sync(deadline=5.0):
     """Blocking best-effort drain with wall-clock cap. Used by short-lived CLI commands."""
     if not get_auth_key():

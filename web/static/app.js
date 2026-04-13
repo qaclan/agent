@@ -295,25 +295,71 @@ async function renderTopbar() {
       <h1>${title}</h1>
       <p>${sub}</p>
     </div>
-    <div class="project-switcher" id="project-switcher-wrap">
-      <button class="project-switcher-btn" onclick="toggleProjectDropdown(event)">
-        <span class="project-dot"></span>
-        <span>${state.activeProject ? escHtml(state.activeProject.name) : 'Select Project'}</span>
-        <span class="project-chevron">\u25BE</span>
+    <div class="topbar-right">
+      <button class="sync-btn" id="btn-pull" onclick="triggerPull()" title="Pull workspace from cloud">
+        <span class="sync-icon">\u2193</span>
+        <span class="sync-label">Pull</span>
       </button>
-      <div class="project-dropdown hidden" id="project-dropdown">
-        ${projects.map(p => `
-          <div class="project-dropdown-item ${state.activeProject?.id===p.id?'active':''}"
-               onclick="switchProject('${p.id}')">
-            <span>${state.activeProject?.id===p.id ? '\u25CF ' : '\u25CB '} ${escHtml(p.name)}</span>
-            <span class="project-delete-btn" onclick="event.stopPropagation();deleteProjectPrompt('${p.id}','${escHtml(p.name)}')" title="Delete">\u2715</span>
-          </div>`).join('')}
-        <div class="project-dropdown-divider"></div>
-        <div class="project-dropdown-item project-dropdown-new" onclick="createProjectPrompt()">
-          + New Project
+      <button class="sync-btn" id="btn-push" onclick="triggerPush()" title="Push pending changes to cloud">
+        <span class="sync-icon">\u2191</span>
+        <span class="sync-label">Push</span>
+      </button>
+      <div class="project-switcher" id="project-switcher-wrap">
+        <button class="project-switcher-btn" onclick="toggleProjectDropdown(event)">
+          <span class="project-dot"></span>
+          <span>${state.activeProject ? escHtml(state.activeProject.name) : 'Select Project'}</span>
+          <span class="project-chevron">\u25BE</span>
+        </button>
+        <div class="project-dropdown hidden" id="project-dropdown">
+          ${projects.map(p => `
+            <div class="project-dropdown-item ${state.activeProject?.id===p.id?'active':''}"
+                 onclick="switchProject('${p.id}')">
+              <span>${state.activeProject?.id===p.id ? '\u25CF ' : '\u25CB '} ${escHtml(p.name)}</span>
+              <span class="project-delete-btn" onclick="event.stopPropagation();deleteProjectPrompt('${p.id}','${escHtml(p.name)}')" title="Delete">\u2715</span>
+            </div>`).join('')}
+          <div class="project-dropdown-divider"></div>
+          <div class="project-dropdown-item project-dropdown-new" onclick="createProjectPrompt()">
+            + New Project
+          </div>
         </div>
       </div>
     </div>`
+}
+
+async function triggerPush() {
+  const btn = document.getElementById('btn-push')
+  if (!btn || btn.disabled) return
+  btn.disabled = true
+  btn.classList.add('syncing')
+  try {
+    const res = await api('POST', '/sync/push')
+    if (res.ok === false) { toast(res.error || 'Push failed', 'error'); return }
+    toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+  } catch (e) {
+    toast('Push failed: ' + e, 'error')
+  } finally {
+    btn.disabled = false
+    btn.classList.remove('syncing')
+  }
+}
+
+async function triggerPull() {
+  const btn = document.getElementById('btn-pull')
+  if (!btn || btn.disabled) return
+  btn.disabled = true
+  btn.classList.add('syncing')
+  try {
+    const res = await api('POST', '/sync/pull')
+    if (res.ok === false) { toast(res.error || 'Pull failed', 'error'); return }
+    toast(res.message || 'Pulled', 'success')
+    await renderTopbar()
+    if (routes[state.page]) await routes[state.page]()
+  } catch (e) {
+    toast('Pull failed: ' + e, 'error')
+  } finally {
+    btn.disabled = false
+    btn.classList.remove('syncing')
+  }
 }
 
 function toggleProjectDropdown(e) {
