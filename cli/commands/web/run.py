@@ -79,28 +79,31 @@ def _patch_actions(actions_src):
 
 
 @click.command("run")
-@click.option("--suite", "suite_id", required=True, help="Suite ID to run")
+@click.option("--suite", "suite_ref", required=True, help="Suite to run: local id, cloud id, or name (within active project)")
 @click.option("--env", "env_name", default=None, help="Environment name")
 @click.option("--stop-on-fail", is_flag=True, help="Stop on first failure")
 @click.option("--browser", type=click.Choice(["chromium", "firefox", "webkit"]), default="chromium", help="Browser engine")
 @click.option("--resolution", default=None, help="Viewport WxH, e.g. 1920x1080")
 @click.option("--headless", is_flag=True, default=False, help="Run in headless mode")
-def web_run(suite_id, env_name, stop_on_fail, browser, resolution, headless):
+def web_run(suite_ref, env_name, stop_on_fail, browser, resolution, headless):
     """Execute a web test suite."""
     proj = get_active_project(console)
     if not proj:
         return
     conn = get_conn()
 
-    # Load suite
+    # Resolve --suite by local id, cloud id, or name (within active project)
     s = conn.execute(
-        "SELECT * FROM suites WHERE id = ? AND project_id = ?", (suite_id, proj["id"])
+        "SELECT * FROM suites WHERE project_id = ? AND (id = ? OR cloud_id = ? OR name = ?)",
+        (proj["id"], suite_ref, suite_ref, suite_ref),
     ).fetchone()
     if not s:
-        console.print(f"[red]Suite {suite_id} not found. Run: qaclan web suite list[/red]")
+        console.print(f"[red]Suite not found in active project: {suite_ref}[/red]")
+        console.print("Run: [bold]qaclan web suite list[/bold]")
         return
+    suite_id = s["id"]
     if s["channel"] != "web":
-        console.print(f"[red]Suite {suite_id} is a {s['channel'].upper()} suite. Use: qaclan {s['channel']} run[/red]")
+        console.print(f"[red]Suite '{s['name']}' is a {s['channel'].upper()} suite. Use: qaclan {s['channel']} run[/red]")
         return
 
     # Load suite items

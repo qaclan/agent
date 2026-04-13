@@ -1808,10 +1808,17 @@ async function renderSuitesPage() {
             <tr>
               <td><strong>${escHtml(s.name)}</strong></td>
               <td>
-                <button class="id-chip" onclick="copyToClipboard('${s.id}', this)" title="Copy suite ID">
-                  <code>${s.id}</code>
-                  <span class="id-chip-icon">\u2398</span>
-                </button>
+                <div class="id-chip-group">
+                  <button class="id-chip" onclick="copyToClipboard('${s.id}', this)" title="Local ID — click to copy">
+                    <code>${s.id}</code>
+                    <span class="id-chip-icon">\u2398</span>
+                  </button>
+                  ${s.cloud_id ? `
+                  <button class="id-chip id-chip-cloud" onclick="copyToClipboard('${s.cloud_id}', this)" title="Cloud ID — click to copy (use in CI after qaclan pull)">
+                    <span class="id-chip-tag">cloud</span>
+                    <span class="id-chip-icon">\u2398</span>
+                  </button>` : ''}
+                </div>
               </td>
               <td><span class="badge badge-neutral">${s.script_count} scripts</span></td>
               <td>${s.last_run_status
