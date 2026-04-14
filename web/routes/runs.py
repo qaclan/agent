@@ -265,10 +265,6 @@ def execute_run():
         script_results = []
         run_start = time.time()
 
-        # Storage state file for session persistence across runs
-        storage_state_path = os.path.join(os.path.expanduser("~/.qaclan"), "storage_state.json")
-        logger.debug("execute_run: storage_state_path=%s exists=%s", storage_state_path, os.path.exists(storage_state_path))
-
         # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
         default_browsers = get_default_playwright_browsers_path()
         is_frozen = is_frozen_binary()
@@ -311,14 +307,11 @@ def execute_run():
             browser_inst = browser_engine.launch(headless=headless)
             logger.info("execute_run: browser launched, creating context...")
             context_opts = {}
-            if os.path.exists(storage_state_path):
-                context_opts["storage_state"] = storage_state_path
             if resolution:
                 w, h = resolution.split("x")
                 context_opts["viewport"] = {"width": int(w), "height": int(h)}
             context = browser_inst.new_context(**context_opts)
-            logger.info("execute_run: browser context created (storage_state=%s, resolution=%s)",
-                        "loaded" if os.path.exists(storage_state_path) else "none", resolution or "default")
+            logger.info("execute_run: browser context created (resolution=%s)", resolution or "default")
 
             # 6. Loop through scripts
             for idx, item in enumerate(items):
@@ -495,10 +488,6 @@ def execute_run():
                         "console_log": json.dumps(console_errors) if console_errors else None,
                         "network_log": json.dumps(network_failures) if network_failures else None,
                     })
-
-            # Save storage state for session persistence
-            logger.debug("execute_run: saving storage state to %s", storage_state_path)
-            context.storage_state(path=storage_state_path)
 
             # Close shared browser
             logger.info("execute_run: closing browser...")
