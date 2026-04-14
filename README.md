@@ -37,6 +37,8 @@ QAClan ships a standalone `.exe` — no Python required. Pick the build that mat
 
 Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest).
 
+After downloading, open **PowerShell** in the folder containing the `.exe` and run the commands below from there.
+
 **Install Playwright:**
 
 The Windows binary uses your system-installed Playwright instead of bundling it. Install Node.js from [nodejs.org](https://nodejs.org/) (LTS), then in PowerShell:
@@ -48,9 +50,20 @@ playwright install chromium
 
 ### 3. Log in and launch the web UI
 
+**Linux / macOS:**
+
 ```bash
 qaclan login --key <your_auth_key> && qaclan serve
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+.\qaclan-windows-amd64.exe login --key <your_auth_key>
+.\qaclan-windows-amd64.exe serve
+```
+
+(Use `qaclan-windows-arm64.exe` on ARM64 devices.)
 
 The browser opens at `http://localhost:7823` — start managing your Playwright tests locally.
 
