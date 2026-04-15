@@ -2174,16 +2174,68 @@ async function renderEnvsPage() {
   }
 }
 
-function _envVarRowHTML(key, value, isSecret) {
+function _envVarRowHTML(key, value, isSecret, isMasked, envName) {
+  // isMasked=true means the value shown is a placeholder for a stored secret.
+  // We tag the row so the collector knows to send {unchanged:true} unless the user edits.
+  const maskedAttr = isMasked ? ' data-masked="1"' : ''
+  const envAttr = envName ? ` data-env-name="${escHtml(envName)}"` : ''
   return `
-    <tr>
+    <tr${maskedAttr}${envAttr}>
       <td style="width:30%"><input type="text" class="env-row-key" value="${escHtml(key)}" placeholder="KEY"></td>
-      <td><input type="${isSecret ? 'password' : 'text'}" class="env-row-value" value="${escHtml(value)}" placeholder="value"></td>
+      <td><input type="${isSecret ? 'password' : 'text'}" class="env-row-value" value="${escHtml(value)}" placeholder="value" oninput="_onEnvValueEdit(this)" onfocus="_onEnvValueFocus(this)"></td>
       <td style="width:60px">
-        <label class="checkbox-wrap" style="margin:0" title="Secret"><input type="checkbox" class="env-row-secret" ${isSecret ? 'checked' : ''}> \uD83D\uDD12</label>
+        <label class="checkbox-wrap" style="margin:0" title="Secret"><input type="checkbox" class="env-row-secret" ${isSecret ? 'checked' : ''} onchange="_onEnvSecretToggle(this)"> \uD83D\uDD12</label>
       </td>
       <td style="width:40px"><button class="btn btn-xs btn-outline-danger" onclick="this.closest('tr').remove()">\u2715</button></td>
     </tr>`
+}
+
+function _onEnvValueFocus(input) {
+  // First focus on a masked secret clears the placeholder so typed input replaces it.
+  const tr = input.closest('tr')
+  if (tr && tr.dataset.masked === '1' && !tr.dataset.edited) {
+    input.value = ''
+  }
+}
+
+function _onEnvValueEdit(input) {
+  const tr = input.closest('tr')
+  if (!tr) return
+  tr.dataset.edited = '1'
+  delete tr.dataset.masked
+}
+
+async function _onEnvSecretToggle(cb) {
+  const tr = cb.closest('tr')
+  if (!tr) return
+  const valInput = tr.querySelector('.env-row-value')
+  if (!valInput) return
+
+  // Un-ticking a stored-masked secret: fetch decrypted value so the user sees it.
+  // Only fetch when the row is still "masked" — if the user already typed a new
+  // plaintext, we must not overwrite their input.
+  if (!cb.checked && tr.dataset.masked === '1') {
+    const envName = tr.dataset.envName
+    const keyInput = tr.querySelector('.env-row-key')
+    const key = keyInput ? keyInput.value.trim() : ''
+    if (envName && key) {
+      try {
+        const res = await api('GET', '/envs/' + encodeURIComponent(envName) + '/vars/' + encodeURIComponent(key) + '/reveal')
+        if (res && res.ok) {
+          valInput.value = res.value || ''
+        } else if (res && res.error) {
+          toast(res.error, 'error')
+        }
+      } catch (e) {
+        toast('Failed to reveal value', 'error')
+      }
+    }
+  }
+
+  valInput.type = cb.checked ? 'password' : 'text'
+  // Toggling the checkbox means the user is redefining this value — no longer a stored-masked row.
+  delete tr.dataset.masked
+  tr.dataset.edited = '1'
 }
 
 function _addEnvVarRow(tableId) {
@@ -2202,7 +2254,13 @@ function _collectVarsFromTable(tableId) {
     const key = tr.querySelector('.env-row-key')?.value.trim()
     const value = tr.querySelector('.env-row-value')?.value || ''
     const is_secret = tr.querySelector('.env-row-secret')?.checked ? 1 : 0
-    if (key) vars.push({ key, value, is_secret })
+    if (!key) return
+    // Masked secret left untouched: tell backend to keep the stored ciphertext as-is.
+    if (is_secret && tr.dataset.masked === '1') {
+      vars.push({ key, is_secret, unchanged: true })
+    } else {
+      vars.push({ key, value, is_secret })
+    }
   })
   return vars
 }
@@ -2235,7 +2293,7 @@ async function renderEnvCard(name) {
     <div id="env-body-${escHtml(name)}" class="hidden">
       <div style="padding:12px 20px">
         <table class="env-vars-table" id="${escHtml(tableId)}">
-          ${varList.map(v => _envVarRowHTML(v.key, v.value, v.is_secret)).join('')}
+          ${varList.map(v => _envVarRowHTML(v.key, v.value, v.is_secret, !!v.is_secret, name)).join('')}
         </table>
       </div>
       <div class="env-footer">

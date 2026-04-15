@@ -2,6 +2,9 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
+from cli.crypto import encrypt, decrypt, is_encrypted
+
+MASKED_DISPLAY = "\u2022" * 8
 
 bp = Blueprint('envs', __name__)
 
@@ -56,7 +59,7 @@ def get_env_vars(env_name):
         for r in rows:
             v = dict(r)
             if v["is_secret"]:
-                v["value"] = "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+                v["value"] = MASKED_DISPLAY
             variables.append(v)
 
         return jsonify({"ok": True, "environment": env_name, "variables": variables})
@@ -178,12 +181,34 @@ def update_vars(env_name):
 
         environment_id = env_row["id"]
 
-        # Replace all vars: delete existing, insert new
+        # Snapshot existing values to preserve unchanged secrets (upsert pattern)
+        existing_by_key = {
+            r["key"]: r["value"]
+            for r in conn.execute(
+                "SELECT key, value FROM env_vars WHERE environment_id = ?",
+                (environment_id,),
+            ).fetchall()
+        }
+
+        rows = []
+        for v in vars_list:
+            key = v.get("key", "").strip()
+            if not key:
+                continue
+            is_secret = int(v.get("is_secret", 0))
+            unchanged = bool(v.get("unchanged"))
+            if unchanged and is_secret:
+                # UI signalled no edit — retain existing ciphertext
+                value = existing_by_key.get(key, "")
+            else:
+                raw = v.get("value", "") or ""
+                if is_secret and raw and not is_encrypted(raw):
+                    value = encrypt(raw)
+                else:
+                    value = raw
+            rows.append((generate_id("evar"), environment_id, key, value, is_secret))
+
         conn.execute("DELETE FROM env_vars WHERE environment_id = ?", (environment_id,))
-        rows = [
-            (generate_id("evar"), environment_id, v.get("key", "").strip(), v.get("value", ""), int(v.get("is_secret", 0)))
-            for v in vars_list if v.get("key", "").strip()
-        ]
         conn.executemany(
             "INSERT INTO env_vars (id, environment_id, key, value, is_secret) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -232,8 +257,14 @@ def append_vars(env_name):
         ]
 
         if new_vars:
+            def _prep_value(v):
+                raw = v.get("value", "") or ""
+                is_secret = int(v.get("is_secret", 0))
+                if is_secret and raw and not is_encrypted(raw):
+                    return encrypt(raw)
+                return raw
             rows = [
-                (generate_id("evar"), environment_id, v["key"].strip(), v.get("value", ""), int(v.get("is_secret", 0)))
+                (generate_id("evar"), environment_id, v["key"].strip(), _prep_value(v), int(v.get("is_secret", 0)))
                 for v in new_vars
             ]
             conn.executemany(
@@ -307,6 +338,36 @@ def copy_env(env_name):
         sync_env_vars_to_cloud(new_env_id)
 
         return jsonify({"ok": True, "id": new_env_id, "name": new_name}), 201
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/envs/<env_name>/vars/<key>/reveal', methods=['GET'])
+def reveal_var(env_name, key):
+    """Return the decrypted plaintext for a single secret var.
+    Used by the UI when a user unticks the secret checkbox.
+    """
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        row = get_conn().execute(
+            "SELECT ev.value, ev.is_secret "
+            "FROM env_vars ev JOIN environments e ON ev.environment_id = e.id "
+            "WHERE e.project_id = ? AND e.name = ? AND ev.key = ?",
+            (project_id, env_name, key),
+        ).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": f"Variable \"{key}\" not found"}), 404
+
+        value = row["value"] or ""
+        if row["is_secret"] and value:
+            value = decrypt(value)
+
+        resp = jsonify({"ok": True, "key": key, "value": value})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

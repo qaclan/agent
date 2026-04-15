@@ -12,6 +12,7 @@ from pathlib import Path
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
+from cli.crypto import decrypt
 
 logger = logging.getLogger("qaclan.runs")
 
@@ -82,17 +83,28 @@ def _substitute_template_vars(source, var_keys, env_vars, fallback_key, fallback
 
 
 def _patch_actions(actions_src):
-    """Apply runtime patches: networkidle waits."""
+    """Apply runtime patches: resilient goto wait strategy.
+
+    Rewrites page.goto(url) -> page.goto(url, wait_until="domcontentloaded")
+    so SPAs with long-tail network activity (analytics, websockets, polling)
+    don't stall navigation. Only matches bare goto(url) calls; any goto that
+    already specifies wait_until / timeout / other kwargs is left untouched.
+    """
     actions_src = re.sub(
-        r'(page\.goto\([^)]+\))',
-        r'\1\npage.wait_for_load_state("networkidle")',
+        r'page\.goto\(\s*(["\'][^"\']+["\'])\s*\)',
+        r'page.goto(\1, wait_until="domcontentloaded")',
         actions_src,
     )
-    actions_src = re.sub(
-        r'(\.click\(\))',
-        r'\1\npage.wait_for_load_state("networkidle")',
-        actions_src,
-    )
+
+    # Optional: post-click wait. Disabled by default — re-enable if specific
+    # scripts need it. Uses "domcontentloaded" instead of "networkidle" because
+    # modern SPAs (websockets, polling, analytics) rarely hit true network idle.
+    # actions_src = re.sub(
+    #     r'(\.click\(\))',
+    #     r'\1\npage.wait_for_load_state("domcontentloaded")',
+    #     actions_src,
+    # )
+
     return actions_src
 
 
@@ -235,11 +247,14 @@ def execute_run():
                 return jsonify({"ok": False, "error": f"Environment \"{env_name}\" not found"}), 404
             environment_id = env_row["id"]
             variables = conn.execute(
-                "SELECT key, value FROM env_vars WHERE environment_id = ?",
+                "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
                 (env_row["id"],),
             ).fetchall()
             for v in variables:
-                env_vars_dict[v["key"]] = v["value"]
+                val = v["value"]
+                if v["is_secret"] and val:
+                    val = decrypt(val)
+                env_vars_dict[v["key"]] = val
             logger.info("execute_run: loaded %d env vars from environment '%s'", len(env_vars_dict), env_name)
 
         # Inject env vars into current process
