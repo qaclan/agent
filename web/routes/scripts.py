@@ -171,8 +171,8 @@ def create_script():
         conn.execute(
             "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, "
             "created_at, created_by, var_keys) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'WEB_CREATED', ?, ?, ?, ?)",
-            (script_id, feature_id, project_id, name, file_path, language, now, created_by, json.dumps(var_keys_list)),
+            "VALUES (?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?)",
+            (script_id, feature_id, project_id, name, file_path, content, language, now, created_by, json.dumps(var_keys_list)),
         )
         conn.commit()
 
@@ -254,8 +254,8 @@ def update_script(script_id):
             # Re-scan {{KEY}} placeholders so var_keys stays in sync with the body
             new_var_keys = _scan_var_keys(content)
             conn.execute(
-                "UPDATE scripts SET var_keys = ? WHERE id = ?",
-                (json.dumps(new_var_keys), script_id),
+                "UPDATE scripts SET source = ?, var_keys = ? WHERE id = ?",
+                (content, json.dumps(new_var_keys), script_id),
             )
 
         conn.commit()

@@ -46,4 +46,4 @@ class ScriptStrategy(ABC):
         """Escape ``value`` so it can be safely spliced into a string literal
         of the target language. Default implementation handles Python/JSON-like
         backslash+quote escaping; override for languages with different rules."""
-        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")

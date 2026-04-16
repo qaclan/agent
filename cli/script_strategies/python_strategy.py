@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 import sys
 from typing import List
 
@@ -166,7 +167,19 @@ class PythonStrategy(ScriptStrategy):
         return [py, script_path]
 
     def validate_runtime(self) -> None:
-        self._resolve_python_executable()
+        py = self._resolve_python_executable()
+        if is_frozen_binary():
+            result = subprocess.run(
+                [py, "-c", "import playwright"],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "The 'playwright' Python package is not installed for the system Python. "
+                    "Install it: pip install playwright==1.58.0\n"
+                    "Then install browser binaries: playwright install"
+                )
 
     # ---- internals ----
 

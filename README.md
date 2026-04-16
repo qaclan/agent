@@ -63,6 +63,14 @@ npm install -g playwright@1.58.0
 playwright install chromium
 ```
 
+**Recording or running JavaScript / TypeScript scripts** requires Node.js and the Playwright npm package regardless of OS:
+
+```bash
+# Install Node.js from https://nodejs.org (LTS), then:
+npm install -g playwright@1.58.0
+npx playwright install
+```
+
 > **SmartScreen note:** Windows may warn that the binary is from an unknown publisher the first time you run it. Click **More info → Run anyway**, or unblock it with `Unblock-File .\qaclan.exe` in PowerShell.
 
 ### 3. Launch the web UI

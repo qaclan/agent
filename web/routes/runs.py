@@ -28,13 +28,6 @@ def _require_active_project():
     return get_active_project_id()
 
 
-def _py_literal_escape(value: str) -> str:
-    """Escape a string so it can be spliced into a Python double-quoted literal
-    without breaking the literal or injecting code. Secrets substituted at run
-    time flow through this on their way into the rendered subprocess script."""
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
-
-
 def _read_artifacts(path: Path):
     """Read the artifacts JSON a script writes on exit. Missing or malformed
     files degrade gracefully to empty lists — a crashed script may not have
@@ -159,7 +152,7 @@ def execute_run():
 
         items = conn.execute(
             "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
+            "sc.source, sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -273,12 +266,16 @@ def execute_run():
 
             try:
                 strategy = get_strategy(language)
-                script_path = item["file_path"]
-                if not os.path.exists(script_path):
-                    raise FileNotFoundError(f"Script file not found: {script_path}")
-
-                with open(script_path, "r") as f:
-                    source = f.read()
+                db_source = item["source"] or ""
+                if db_source and db_source not in ("WEB_CREATED", "CLI_RECORDED"):
+                    source = db_source
+                else:
+                    # Legacy rows pre-date source storage — fall back to file.
+                    script_path = item["file_path"]
+                    if not os.path.exists(script_path):
+                        raise FileNotFoundError(f"Script file not found: {script_path}")
+                    with open(script_path, "r") as f:
+                        source = f.read()
 
                 # Resolve {{KEY}} placeholders against the selected env (with
                 # recorded start-URL fallback). Values are escaped for the
@@ -292,7 +289,7 @@ def execute_run():
                     source, subs_warnings = substitute_template_vars(
                         source, script_var_keys, env_vars_dict,
                         item["start_url_key"], item["start_url_value"],
-                        escape_fn=_py_literal_escape if language == "python" else None,
+                        escape_fn=strategy.escape_for_literal,
                     )
                     for w in subs_warnings:
                         logger.warning("execute_run: %s — %s", item["script_name"], w)

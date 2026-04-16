@@ -156,8 +156,8 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
         conn.execute(
             "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, "
             "created_at, created_by, start_url_key, start_url_value, var_keys) "
-            "VALUES (?, ?, ?, 'web', ?, ?, 'CLI_RECORDED', ?, ?, ?, ?, ?, ?)",
-            (script_id, feature_id, project_id, name, dest, language, now, created_by,
+            "VALUES (?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (script_id, feature_id, project_id, name, dest, processed, language, now, created_by,
              url_key, start_url_value, json.dumps(var_keys_list)),
         )
         conn.commit()

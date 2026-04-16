@@ -19,10 +19,12 @@ via os.environ — secrets never touch the parent process environment.
 
 from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.python_strategy import PythonStrategy
+from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 
 
 _STRATEGIES = {
     "python": PythonStrategy(),
+    "javascript": JavaScriptStrategy(),
 }
 
 SUPPORTED_LANGUAGES = tuple(_STRATEGIES.keys())
