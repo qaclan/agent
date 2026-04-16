@@ -851,6 +851,14 @@ async function recordScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Language</label>
+      <select id="rec-language">
+        <option value="python" selected>Python</option>
+        <option value="javascript">JavaScript</option>
+        <option value="typescript">TypeScript</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label class="form-label">Environment (optional)</label>
       <select id="rec-env" onchange="_onRecordEnvChange()">
         <option value="">— No environment —</option>
@@ -875,6 +883,7 @@ async function recordScriptModal() {
     { label: 'Start Recording', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('rec-name').value.trim()
       const feature_id = document.getElementById('rec-feature').value
+      const language = document.getElementById('rec-language').value
       const env_name = document.getElementById('rec-env').value
       const url_key = document.getElementById('rec-url-key')?.value || ''
       const path_suffix = document.getElementById('rec-path')?.value.trim() || ''
@@ -888,7 +897,7 @@ async function recordScriptModal() {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const payload = { name, feature_id }
+      const payload = { name, feature_id, language }
       if (env_name && url_key) {
         payload.env_name = env_name
         payload.url_key = url_key
@@ -1445,6 +1454,14 @@ async function createScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Language</label>
+      <select id="script-language">
+        <option value="python" selected>Python</option>
+        <option value="javascript">JavaScript</option>
+        <option value="typescript">TypeScript</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label class="form-label">Insert Variable</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select id="insert-var-env" style="flex:1;min-width:150px" onchange="_loadEnvKeysForInsert()">
@@ -1467,9 +1484,10 @@ async function createScriptModal() {
     { label: 'Create Script', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('script-name').value.trim()
       const feature_id = document.getElementById('script-feature').value
+      const language = document.getElementById('script-language').value
       const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
       if (!name || !feature_id) { toast('Name and feature required', 'error'); return }
-      const res = await api('POST', '/scripts', { name, feature_id, content })
+      const res = await api('POST', '/scripts', { name, feature_id, language, content })
       if (res.ok === false) { toast(res.error, 'error'); return }
       closeModal(); toast('Script "' + name + '" created')
       renderScriptsPage()
@@ -1537,10 +1555,19 @@ async function editScriptModal(id) {
   const s = sRes.script || sRes
   const envsRes = await api('GET', '/envs')
   const envs = envsRes.environments || []
+  const lang = s.language || 'python'
+  const langLabel = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript' }[lang] || lang
   showModal('Edit Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
       <input type="text" id="edit-script-name" value="${escHtml(s.name)}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Language</label>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="badge badge-neutral">${escHtml(langLabel)}</span>
+        <span class="form-hint" style="margin:0">Language is set at creation time.</span>
+      </div>
     </div>
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">

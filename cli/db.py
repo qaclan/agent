@@ -137,6 +137,16 @@ def init_db():
     _migrate_created_by(conn)
     _migrate_run_options(conn)
     _migrate_script_templating(conn)
+    _migrate_script_language(conn)
+
+
+def _migrate_script_language(conn):
+    """Add language column so each script knows which runtime drives it."""
+    try:
+        conn.execute("ALTER TABLE scripts ADD COLUMN language TEXT NOT NULL DEFAULT 'python'")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_script_templating(conn):
