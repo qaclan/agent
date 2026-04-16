@@ -17,13 +17,31 @@ def pull():
     if not key:
         console.print("[red]Not logged in. Run: qaclan login[/red]")
         return
-
     console.print("[dim]Pulling workspace from cloud...[/dim]")
     try:
-        data = api.pull_workspace(key)
+        counts = pull_workspace()
     except Exception as e:
         console.print(f"[red]Pull failed: {e}[/red]")
         return
+    total = sum(counts.values())
+    if total == 0:
+        console.print("\n[dim]Everything up to date — nothing new to pull.[/dim]")
+    else:
+        console.print(
+            f"\n[bold]Pulled:[/bold] {counts['projects']} projects, {counts['features']} features, "
+            f"{counts['scripts']} scripts, {counts['suites']} suites, "
+            f"{counts['environments']} environments, {counts['env_vars']} env vars"
+        )
+
+
+def pull_workspace():
+    """Download workspace from cloud and merge into local DB. Returns counts dict.
+    Raises on network/server error."""
+    key = get_auth_key()
+    if not key:
+        raise RuntimeError("Not logged in")
+
+    data = api.pull_workspace(key)
 
     conn = get_conn()
     now = datetime.now(timezone.utc).isoformat()
@@ -201,17 +219,5 @@ def pull():
     if not get_active_project_id() and project_map:
         first_local_id = next(iter(project_map.values()))
         set_active_project_id(first_local_id)
-        proj_name = conn.execute("SELECT name FROM projects WHERE id = ?", (first_local_id,)).fetchone()
-        if proj_name:
-            console.print(f"\n[bold]Active project set to: {proj_name['name']}[/bold]")
 
-    # Summary
-    total = sum(counts.values())
-    if total == 0:
-        console.print("\n[dim]Everything up to date — nothing new to pull.[/dim]")
-    else:
-        console.print(
-            f"\n[bold]Pulled:[/bold] {counts['projects']} projects, {counts['features']} features, "
-            f"{counts['scripts']} scripts, {counts['suites']} suites, "
-            f"{counts['environments']} environments, {counts['env_vars']} env vars"
-        )
+    return counts

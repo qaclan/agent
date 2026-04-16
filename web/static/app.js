@@ -295,25 +295,89 @@ async function renderTopbar() {
       <h1>${title}</h1>
       <p>${sub}</p>
     </div>
-    <div class="project-switcher" id="project-switcher-wrap">
-      <button class="project-switcher-btn" onclick="toggleProjectDropdown(event)">
-        <span class="project-dot"></span>
-        <span>${state.activeProject ? escHtml(state.activeProject.name) : 'Select Project'}</span>
-        <span class="project-chevron">\u25BE</span>
+    <div class="topbar-right">
+      <button class="theme-btn" id="btn-theme" onclick="toggleTheme()" title="Toggle light/dark mode">
+        ${getTheme() === 'light' ? '\u263D' : '\u2600'}
       </button>
-      <div class="project-dropdown hidden" id="project-dropdown">
-        ${projects.map(p => `
-          <div class="project-dropdown-item ${state.activeProject?.id===p.id?'active':''}"
-               onclick="switchProject('${p.id}')">
-            <span>${state.activeProject?.id===p.id ? '\u25CF ' : '\u25CB '} ${escHtml(p.name)}</span>
-            <span class="project-delete-btn" onclick="event.stopPropagation();deleteProjectPrompt('${p.id}','${escHtml(p.name)}')" title="Delete">\u2715</span>
-          </div>`).join('')}
-        <div class="project-dropdown-divider"></div>
-        <div class="project-dropdown-item project-dropdown-new" onclick="createProjectPrompt()">
-          + New Project
+      <button class="sync-btn" id="btn-pull" onclick="triggerPull()" title="Pull workspace from cloud">
+        <span class="sync-icon">\u2193</span>
+        <span class="sync-label">Pull</span>
+      </button>
+      <button class="sync-btn" id="btn-push" onclick="triggerPush()" title="Push pending changes to cloud">
+        <span class="sync-icon">\u2191</span>
+        <span class="sync-label">Push</span>
+      </button>
+      <div class="project-switcher" id="project-switcher-wrap">
+        <button class="project-switcher-btn" onclick="toggleProjectDropdown(event)">
+          <span class="project-dot"></span>
+          <span>${state.activeProject ? escHtml(state.activeProject.name) : 'Select Project'}</span>
+          <span class="project-chevron">\u25BE</span>
+        </button>
+        <div class="project-dropdown hidden" id="project-dropdown">
+          ${projects.map(p => `
+            <div class="project-dropdown-item ${state.activeProject?.id===p.id?'active':''}"
+                 onclick="switchProject('${p.id}')">
+              <span>${state.activeProject?.id===p.id ? '\u25CF ' : '\u25CB '} ${escHtml(p.name)}</span>
+              <span class="project-delete-btn" onclick="event.stopPropagation();deleteProjectPrompt('${p.id}','${escHtml(p.name)}')" title="Delete">\u2715</span>
+            </div>`).join('')}
+          <div class="project-dropdown-divider"></div>
+          <div class="project-dropdown-item project-dropdown-new" onclick="createProjectPrompt()">
+            + New Project
+          </div>
         </div>
       </div>
     </div>`
+}
+
+function getTheme() {
+  return localStorage.getItem('qaclan-theme') || 'dark'
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme)
+  localStorage.setItem('qaclan-theme', theme)
+  const btn = document.getElementById('btn-theme')
+  if (btn) btn.textContent = theme === 'light' ? '\u263D' : '\u2600'
+}
+function toggleTheme() {
+  applyTheme(getTheme() === 'light' ? 'dark' : 'light')
+}
+// Apply immediately so first paint matches the saved theme
+applyTheme(getTheme())
+
+async function triggerPush() {
+  const btn = document.getElementById('btn-push')
+  if (!btn || btn.disabled) return
+  btn.disabled = true
+  btn.classList.add('syncing')
+  try {
+    const res = await api('POST', '/sync/push')
+    if (res.ok === false) { toast(res.error || 'Push failed', 'error'); return }
+    toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+  } catch (e) {
+    toast('Push failed: ' + e, 'error')
+  } finally {
+    btn.disabled = false
+    btn.classList.remove('syncing')
+  }
+}
+
+async function triggerPull() {
+  const btn = document.getElementById('btn-pull')
+  if (!btn || btn.disabled) return
+  btn.disabled = true
+  btn.classList.add('syncing')
+  try {
+    const res = await api('POST', '/sync/pull')
+    if (res.ok === false) { toast(res.error || 'Pull failed', 'error'); return }
+    toast(res.message || 'Pulled', 'success')
+    await renderTopbar()
+    if (routes[state.page]) await routes[state.page]()
+  } catch (e) {
+    toast('Pull failed: ' + e, 'error')
+  } finally {
+    btn.disabled = false
+    btn.classList.remove('syncing')
+  }
 }
 
 function toggleProjectDropdown(e) {
@@ -1759,16 +1823,25 @@ async function renderSuitesPage() {
       <table>
         <thead><tr>
           <th>Suite</th>
+          <th>ID</th>
           <th>Scripts</th>
           <th>Last Run</th>
           <th></th>
         </tr></thead>
         <tbody>
           ${suites.length === 0
-            ? `<tr><td colspan="4"><div class="empty-state"><div class="empty-state-icon">\u25A6</div><p>No suites yet.</p></div></td></tr>`
+            ? `<tr><td colspan="5"><div class="empty-state"><div class="empty-state-icon">\u25A6</div><p>No suites yet.</p></div></td></tr>`
             : suites.map(s => `
             <tr>
               <td><strong>${escHtml(s.name)}</strong></td>
+              <td>
+                ${s.cloud_id ? `
+                  <button class="id-chip" onclick="copyToClipboard('${s.cloud_id}', this)" title="Cloud ID: ${s.cloud_id} — click to copy">
+                    <code>${s.cloud_id.slice(0, 8)}\u2026${s.cloud_id.slice(-4)}</code>
+                    <span class="id-chip-icon">\u2398</span>
+                  </button>
+                ` : '<span class="text-muted text-sm">Not synced</span>'}
+              </td>
               <td><span class="badge badge-neutral">${s.script_count} scripts</span></td>
               <td>${s.last_run_status
                 ? `<span class="badge ${s.last_run_status==='PASSED'?'badge-success':'badge-danger'}"><span class="badge-dot"></span>${s.last_run_status}</span>`
@@ -1782,6 +1855,19 @@ async function renderSuitesPage() {
         </tbody>
       </table>
     </div>`
+}
+
+async function copyToClipboard(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text)
+    if (btn) {
+      btn.classList.add('copied')
+      setTimeout(() => btn.classList.remove('copied'), 1200)
+    }
+    toast('Copied: ' + text, 'success')
+  } catch (e) {
+    toast('Copy failed', 'error')
+  }
 }
 
 function createSuiteModal() {
@@ -2033,7 +2119,7 @@ function showRunResults(run, suiteName) {
       // Screenshot block
       let screenshotBlock = ''
       if (s.screenshot_path) {
-        const filename = s.screenshot_path.split('/').pop()
+        const filename = s.screenshot_path.split(/[\\/]/).pop()
         screenshotBlock = `<div class="script-result-screenshot">
           <img src="/api/screenshots/${encodeURIComponent(filename)}" alt="Failure screenshot"
                onclick="window.open(this.src, '_blank')" />

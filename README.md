@@ -37,24 +37,9 @@ QAClan ships a standalone `.exe` — no Python required. Pick the build that mat
 
 Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest).
 
-Then, in **PowerShell**:
+After downloading, open **PowerShell** in the folder containing the `.exe` and run the commands below from there.
 
-```powershell
-# 1. Move the exe somewhere on your PATH (or create one)
-New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Programs\qaclan" | Out-Null
-Move-Item -Force .\qaclan-windows-amd64.exe "$env:LOCALAPPDATA\Programs\qaclan\qaclan.exe"
-
-# 2. Add it to your user PATH (one-time)
-$qaclanPath = "$env:LOCALAPPDATA\Programs\qaclan"
-[Environment]::SetEnvironmentVariable("Path", "$([Environment]::GetEnvironmentVariable('Path','User'));$qaclanPath", "User")
-
-# 3. Open a NEW PowerShell window so the PATH change takes effect, then verify
-qaclan --help
-```
-
-Replace `qaclan-windows-amd64.exe` with `qaclan-windows-arm64.exe` if you downloaded the ARM64 build.
-
-**Install Playwright (required for `qaclan web record` / `qaclan web run`):**
+**Install Playwright:**
 
 The Windows binary uses your system-installed Playwright instead of bundling it. Install Node.js from [nodejs.org](https://nodejs.org/) (LTS), then in PowerShell:
 
@@ -72,16 +57,24 @@ npx playwright install
 ```
 
 > **SmartScreen note:** Windows may warn that the binary is from an unknown publisher the first time you run it. Click **More info → Run anyway**, or unblock it with `Unblock-File .\qaclan.exe` in PowerShell.
+### 3. Log in and launch the web UI
 
-### 3. Launch the web UI
+**Linux / macOS:**
 
 ```bash
-qaclan serve
+qaclan login --key <your_auth_key> && qaclan serve
 ```
 
-### 4. Enter your auth key
+**Windows (PowerShell):**
 
-When the browser opens at `http://localhost:7823`, enter your auth key and start managing your Playwright tests locally.
+```powershell
+.\qaclan-windows-amd64.exe login --key <your_auth_key>
+.\qaclan-windows-amd64.exe serve
+```
+
+(Use `qaclan-windows-arm64.exe` on ARM64 devices.)
+
+The browser opens at `http://localhost:7823` — start managing your Playwright tests locally.
 
 ## Features
 

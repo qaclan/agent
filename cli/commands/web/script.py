@@ -124,15 +124,8 @@ def script_import(file_path, name, feature_id, language):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Script imported: {name} [{script_id}]")
-    from cli.sync import sync_script_to_cloud
-    sync_script_to_cloud(
-        script_id, name,
-        feature_id=feature_id,
-        project_id=proj["id"],
-        file_content=processed,
-        var_keys=var_keys_list,
-        language=language,
-    )
+    from cli.sync_queue import enqueue
+    enqueue("script", script_id, "upsert")
     console.print(f"  Feature: {feat['name']}")
     console.print(f"  File: {dest}")
 
@@ -169,5 +162,5 @@ def script_delete(script_id):
     if os.path.exists(row["file_path"]):
         os.unlink(row["file_path"])
     console.print(f"[green]✓[/green] Script deleted: {row['name']}")
-    from cli.sync import delete_script_from_cloud
-    delete_script_from_cloud(script_id)
+    from cli.sync_queue import enqueue
+    enqueue("script", script_id, "delete")

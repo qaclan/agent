@@ -464,36 +464,10 @@ def execute_run():
         )
         conn.commit()
 
-        logger.debug("execute_run: syncing run %s to cloud...", run_id)
-        from cli.sync import sync_run_to_cloud, _read_screenshot_b64
-        sync_run_to_cloud(
-            run_id=run_id,
-            suite_id=suite_id,
-            status=final_status,
-            started_at=now,
-            completed_at=finished_at,
-            duration_ms=total_duration_ms,
-            project_id=project_id,
-            browser=browser_type,
-            resolution=resolution,
-            headless=headless,
-            script_results=[
-                {
-                    "script_id": sr["script_id"],
-                    "script_name": sr["name"],
-                    "status": sr["status"].lower(),
-                    "duration_ms": sr.get("duration_ms", 0) or 0,
-                    "error_output": sr.get("error_message"),
-                    "order_index": idx,
-                    "console_errors": sr.get("console_errors", 0),
-                    "network_failures": sr.get("network_failures", 0),
-                    "console_log": sr.get("console_log"),
-                    "network_log": sr.get("network_log"),
-                    "screenshot_b64": _read_screenshot_b64(sr.get("screenshot_path")),
-                }
-                for idx, sr in enumerate(script_results)
-            ],
-        )
+        # Queue run for cloud sync (payload built at drain time from DB)
+        logger.debug("execute_run: enqueueing run %s for cloud sync", run_id)
+        from cli.sync_queue import enqueue
+        enqueue("run", run_id, "upsert")
 
         return jsonify({
             "ok": True,
