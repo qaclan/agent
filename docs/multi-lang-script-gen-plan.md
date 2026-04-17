@@ -86,6 +86,22 @@ Each language strategy owns its own harness template, codegen target, runtime va
 - Missing `node` or `npx tsx` produces a pre-flight error with the missing tool name — not a subprocess crash mid-run.
 - `grep -r "_py_literal_escape" cli/ web/` returns nothing after Phase 2.
 
+## System Dependencies (Linux)
+
+Playwright browser binaries require OS-level libraries not installed by default. After running `npx playwright install`, if you see errors like `libgstcodecparsers-1.0.so.0` or `libavif.so.13` missing, install them:
+
+**Option A — Playwright all-in-one (recommended):**
+```bash
+npx playwright install-deps
+```
+
+**Option B — Install specific missing libraries manually (Debian/Ubuntu):**
+```bash
+sudo apt install -y libgstreamer-plugins-bad1.0-0 libavif13
+```
+
+These are one-time setup steps per machine. macOS and Windows users are not affected.
+
 ## Out-of-Scope Follow-ups
 
 - Bun/Deno runtime support (would be a new strategy, not an override).
@@ -98,3 +114,4 @@ _Claude: append short dated notes here when you finish a task or hit a surprise.
 
 - 2026-04-17: Phase 2 complete. `javascript_strategy.py` added; `_py_literal_escape` removed from `runs.py`; all escape delegated to `strategy.escape_for_literal`. Smoke-test still pending.
 - 2026-04-17: `validate_runtime` hardened on both strategies — JS now also checks `require('playwright')` via subprocess; Python (frozen binary mode) checks `import playwright` via subprocess. `package.json` added at repo root for contributor reference. README + CLAUDE.md updated with JS/TS install instructions.
+- 2026-04-17: Documented Linux system dependency issue — `npx playwright install` may fail with missing `libgstcodecparsers-1.0.so.0` / `libavif.so.13`. Fix: `npx playwright install-deps` or `sudo apt install -y libgstreamer-plugins-bad1.0-0 libavif13`. Added to System Dependencies section.

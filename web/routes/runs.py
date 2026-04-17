@@ -318,6 +318,7 @@ def execute_run():
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 
+                child_env.update(strategy.extra_env())
                 cmd = strategy.build_run_command(str(rendered_path))
                 logger.debug("execute_run: spawning %s", cmd)
 

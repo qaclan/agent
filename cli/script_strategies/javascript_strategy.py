@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from typing import List
 
 from cli.script_strategies.base import ScriptStrategy
@@ -141,7 +142,6 @@ class JavaScriptStrategy(ScriptStrategy):
         return ["node", script_path]
 
     def validate_runtime(self) -> None:
-        import subprocess
         if not shutil.which("node"):
             raise RuntimeError(
                 "Node.js is required to run JavaScript scripts. "
@@ -158,6 +158,24 @@ class JavaScriptStrategy(ScriptStrategy):
                 "Install it globally: npm install -g playwright@1.58.0\n"
                 "Then install browser binaries: npx playwright install"
             )
+
+    def extra_env(self) -> dict:
+        npm = shutil.which("npm")
+        if not npm:
+            return {}
+        try:
+            result = subprocess.run(
+                [npm, "root", "-g"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            npm_root = result.stdout.strip()
+            if npm_root:
+                return {"NODE_PATH": npm_root}
+        except Exception:
+            pass
+        return {}
 
     def escape_for_literal(self, value: str) -> str:
         return (

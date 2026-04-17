@@ -42,6 +42,11 @@ class ScriptStrategy(ABC):
         """Raise RuntimeError with a user-facing message if the interpreter or
         required dependencies are not installed."""
 
+    def extra_env(self) -> dict:
+        """Return extra environment variables to inject into the script subprocess.
+        Override in language strategies that need runtime-specific env (e.g. NODE_PATH)."""
+        return {}
+
     def escape_for_literal(self, value: str) -> str:
         """Escape ``value`` so it can be safely spliced into a string literal
         of the target language. Default implementation handles Python/JSON-like
