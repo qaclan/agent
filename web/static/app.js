@@ -18,11 +18,11 @@ if (typeof window !== 'undefined') {
 //   2. CM6 init threw → textarea fallback + toast
 //   3. state.settings.editor_mode === 'text' → textarea
 
-function _createScriptEditor(hostEl, initialContent, { readOnly = false } = {}) {
+function _createScriptEditor(hostEl, initialContent, { readOnly = false, language = 'python' } = {}) {
   const wantCode = (state.settings.editor_mode || 'code') === 'code'
   if (wantCode && window.CM6 && window.CM6.EditorView) {
     try {
-      return _createCM6ScriptEditor(hostEl, initialContent || '', { readOnly })
+      return _createCM6ScriptEditor(hostEl, initialContent || '', { readOnly, language })
     } catch (e) {
       console.warn('[qaclan] CM6 init failed, falling back to textarea:', e)
       toast('Code editor unavailable, using plain text', 'warning')
@@ -31,9 +31,82 @@ function _createScriptEditor(hostEl, initialContent, { readOnly = false } = {}) 
   return _createTextareaScriptEditor(hostEl, initialContent || '', { readOnly })
 }
 
-function _createCM6ScriptEditor(hostEl, initialContent, { readOnly }) {
-  const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
-  const extensions = [basicSetup(), python(), oneDark]
+//============ harness template scafolding =============================
+function _findActionRanges(text) {
+  const beginRe = /(^[ \t]*(#|\/\/)\s*BEGIN ACTIONS[^\n]*\n?)/m
+  const endRe   = /(^[ \t]*(#|\/\/)\s*END ACTIONS[^\n]*\n?)/m
+
+  const begin = beginRe.exec(text)
+  const end = endRe.exec(text)
+
+  if (!begin || !end) return null
+
+  const beginLineEnd = begin.index + begin[0].length
+  const endLineStart = end.index
+
+  if (beginLineEnd > endLineStart) return null
+
+  return {
+    editableFrom: beginLineEnd,
+    editableTo: endLineStart,
+  }
+}
+
+function _createScaffoldDimExtension(initialContent) {
+  const { Decoration, ViewPlugin, RangeSetBuilder } = window.CM6
+  const dimMark = Decoration.mark({ class: 'cm-scaffold-dim' })
+
+  return ViewPlugin.fromClass(class {
+    constructor(view) {
+      this.decorations = this.buildDeco(view)
+    }
+
+    update(update) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = this.buildDeco(update.view)
+      }
+    }
+
+    buildDeco(view) {
+      const text = view.state.doc.toString()
+      const range = _findActionRanges(text)
+      const builder = new RangeSetBuilder()
+
+      if (!range) return builder.finish()
+
+      if (range.editableFrom > 0) {
+        builder.add(0, range.editableFrom, dimMark)
+      }
+
+      if (range.editableTo < text.length) {
+        builder.add(range.editableTo, text.length, dimMark)
+      }
+
+      return builder.finish()
+    }
+  }, {
+    decorations: v => v.decorations
+  })
+}
+
+function _createCM6ScriptEditor(hostEl, initialContent, { readOnly, language = 'python' }) {
+  // const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
+  // const extensions = [basicSetup(), python(), oneDark]
+  // if (readOnly) extensions.push(EditorView.editable.of(false))
+  const { EditorState, EditorView, basicSetup, python, javascript, oneDark } = window.CM6
+
+  const extensions = [basicSetup(), oneDark]
+
+  if (language === 'python') {
+    extensions.push(python())
+  } else if (language === 'typescript') {
+    extensions.push(javascript({ typescript: true }))
+  } else {
+    extensions.push(javascript())
+  }
+
+  extensions.push(_createScaffoldDimExtension(initialContent))
+
   if (readOnly) extensions.push(EditorView.editable.of(false))
   // Host styling: border, rounded, themed to match the rest of the UI
   hostEl.style.border = '1px solid var(--border-default)'
@@ -1631,7 +1704,7 @@ async function viewScriptModal(id) {
   // Render the editor after the modal is in the DOM
   const host = document.getElementById('view-script-editor-host')
   if (host) {
-    const editor = _createScriptEditor(host, s.content || '', { readOnly: true })
+    const editor = _createScriptEditor(host, s.content || '', { readOnly: true, language: s.language || 'python' })
     window._qcCurrentEditor = editor
     window._qcModalCleanupHook = () => {
       editor.destroy()
@@ -1694,7 +1767,7 @@ async function editScriptModal(id) {
 
   const host = document.getElementById('edit-script-editor-host')
   if (host) {
-    const editor = _createScriptEditor(host, s.content || '')
+    const editor = _createScriptEditor(host, s.content || '', { readOnly: false, language: s.language || 'python' })
     window._qcCurrentEditor = editor
     window._qcModalCleanupHook = () => {
       editor.destroy()

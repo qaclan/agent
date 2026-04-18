@@ -104,6 +104,67 @@ window.CM6 = {
 }
 ```
 
+## entry.js with scafolding
+```js
+import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state"
+import {
+  EditorView, keymap, lineNumbers, highlightActiveLine,
+  highlightActiveLineGutter, drawSelection,
+  Decoration, ViewPlugin, ViewUpdate,
+} from "@codemirror/view"
+import {
+  defaultKeymap, indentWithTab, history, historyKeymap,
+} from "@codemirror/commands"
+import {
+  indentOnInput, bracketMatching, syntaxHighlighting,
+  defaultHighlightStyle, foldGutter, foldKeymap, indentUnit,
+} from "@codemirror/language"
+import { searchKeymap, highlightSelectionMatches } from "@codemirror/search"
+import { python } from "@codemirror/lang-python"
+import { javascript } from "@codemirror/lang-javascript"
+import { oneDark } from "@codemirror/theme-one-dark"
+
+function basicSetup() {
+  return [
+    lineNumbers(),
+    highlightActiveLineGutter(),
+    highlightActiveLine(),
+    foldGutter(),
+    drawSelection(),
+    history(),
+    indentUnit.of("    "),
+    indentOnInput(),
+    bracketMatching(),
+    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+    highlightSelectionMatches(),
+    keymap.of([
+      ...defaultKeymap,
+      ...historyKeymap,
+      ...foldKeymap,
+      ...searchKeymap,
+      indentWithTab,
+    ]),
+  ]
+}
+
+window.CM6 = {
+  EditorState,
+  Compartment,
+  RangeSetBuilder,
+
+  EditorView,
+  Decoration,
+  ViewPlugin,
+  ViewUpdate,
+
+  basicSetup,
+  oneDark,
+  indentUnit,
+  python,
+  javascript,
+}
+```
+
 ## Notes
 
 - End users never run this. They get `cm6.js` bundled inside the Nuitka binary.

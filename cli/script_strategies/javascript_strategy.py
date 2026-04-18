@@ -15,8 +15,8 @@ from typing import List
 from cli.script_strategies.base import ScriptStrategy
 
 
-_BEGIN_MARKER = "// --- QACLAN ACTIONS BEGIN ---"
-_END_MARKER = "// --- QACLAN ACTIONS END ---"
+_BEGIN_MARKER = "// BEGIN ACTIONS"
+_END_MARKER = "// END ACTIONS"
 
 
 _HARNESS_TEMPLATE = """\
