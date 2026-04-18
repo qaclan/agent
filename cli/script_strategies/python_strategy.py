@@ -185,7 +185,7 @@ class PythonStrategy(ScriptStrategy):
 
     def _resolve_python_executable(self) -> str:
         if is_frozen_binary():
-            py = shutil.which("python3") or shutil.which("python")
+            py = shutil.which("python3") or shutil.which("python") or shutil.which("py")
             if not py:
                 raise RuntimeError(
                     "Python 3 is required to run Python scripts in binary mode. "
@@ -195,7 +195,7 @@ class PythonStrategy(ScriptStrategy):
         return sys.executable
 
     def _extract_actions(self, raw: str) -> str:
-        """Pull the action body out of Playwright codegen output.
+        """Pull the action body out of Playwright codegen ougtput.
 
         Codegen emits a ``def run(playwright)`` with ``context.new_page()`` and
         ``page.close()`` as bookends around the recorded interactions. We grab

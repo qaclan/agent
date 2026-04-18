@@ -1566,6 +1566,33 @@ async function createScriptModal() {
       editor.destroy()
       if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
     }
+
+    const langSelect = document.getElementById('script-language')
+    let lastTemplate = ''
+
+    const loadTemplate = async (lang) => {
+      const res = await api('GET', '/scripts/starter-template?language=' + encodeURIComponent(lang))
+      if (res && res.ok !== false && typeof res.content === 'string') {
+        return res.content
+      }
+      return ''
+    }
+
+    loadTemplate(langSelect.value).then(tpl => {
+      lastTemplate = tpl
+      if (editor.getValue() === '') editor.setValue(tpl)
+    })
+
+    langSelect.addEventListener('change', async () => {
+      const current = editor.getValue()
+      const newTpl = await loadTemplate(langSelect.value)
+      if (current === '' || current === lastTemplate) {
+        editor.setValue(newTpl)
+      } else {
+        toast('Language changed — existing content kept. Clear the editor to use the new starter template.')
+      }
+      lastTemplate = newTpl
+    })
   }
 }
 

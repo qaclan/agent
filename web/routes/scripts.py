@@ -45,6 +45,22 @@ def get_settings():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route('/api/scripts/starter-template', methods=['GET'])
+def get_starter_template():
+    """Return the empty harness scaffolding for the given language."""
+    try:
+        language = (request.args.get("language") or "").strip()
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                "ok": False,
+                "error": f"Unsupported language '{language}'. Supported: {list(SUPPORTED_LANGUAGES)}",
+            }), 400
+        content = get_strategy(language).starter_template()
+        return jsonify({"ok": True, "content": content})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/scripts', methods=['GET'])
 def list_scripts():
     try:

@@ -62,13 +62,13 @@ Each language strategy owns its own harness template, codegen target, runtime va
 
 **Goal:** Add `typescript_strategy.py` by extending the JS strategy with minimal overrides.
 
-- [ ] Create `cli/script_strategies/typescript_strategy.py`
-  - [ ] Inherit from `JavaScriptStrategy`
-  - [ ] Override `file_extension = ".ts"` (keep `codegen_target = "javascript"` — Playwright has no `--target typescript`)
-  - [ ] Override `build_run_command` → `["npx", "tsx", script_path]`
-  - [ ] Override `validate_runtime` to check `npx tsx` is available
-- [ ] Register `typescript` in `__init__.py`
-- [ ] Smoke-test harness rendering + syntax-check all strategy files
+- [x] Create `cli/script_strategies/typescript_strategy.py`
+  - [x] Inherit from `JavaScriptStrategy`
+  - [x] Override `file_extension = ".ts"` (keep `codegen_target = "javascript"` — Playwright has no `--target typescript`)
+  - [x] Override `build_run_command` → `["npx", "tsx", script_path]`
+  - [x] Override `validate_runtime` to check `npx tsx` is available
+- [x] Register `typescript` in `__init__.py`
+- [x] Smoke-test harness rendering + syntax-check all strategy files
 
 ## Constraints & Invariants
 
@@ -115,3 +115,4 @@ _Claude: append short dated notes here when you finish a task or hit a surprise.
 - 2026-04-17: Phase 2 complete. `javascript_strategy.py` added; `_py_literal_escape` removed from `runs.py`; all escape delegated to `strategy.escape_for_literal`. Smoke-test still pending.
 - 2026-04-17: `validate_runtime` hardened on both strategies — JS now also checks `require('playwright')` via subprocess; Python (frozen binary mode) checks `import playwright` via subprocess. `package.json` added at repo root for contributor reference. README + CLAUDE.md updated with JS/TS install instructions.
 - 2026-04-17: Documented Linux system dependency issue — `npx playwright install` may fail with missing `libgstcodecparsers-1.0.so.0` / `libavif.so.13`. Fix: `npx playwright install-deps` or `sudo apt install -y libgstreamer-plugins-bad1.0-0 libavif13`. Added to System Dependencies section.
+- 2026-04-18: Phase 3 complete. `typescript_strategy.py` added; inherits `JavaScriptStrategy`, overrides `file_extension`, `build_run_command`, and `validate_runtime` (calls `super()` then checks `npx tsx --version`). Registered in `__init__.py`. All smoke-tests pass (harness render, escape, run command, py_compile).

@@ -28,6 +28,19 @@ class ScriptStrategy(ABC):
         """Transform raw codegen output into a self-contained harness script
         that honors the QACLAN_* runtime contract."""
 
+    def starter_template(self) -> str:
+        """Return the empty harness scaffolding for this language.
+
+        Used to seed the script editor for new manual scripts so they share
+        the same structure as recorded scripts. Defaults to rendering the
+        harness with no actions; strategies can override if needed.
+        """
+        return self._render_harness("")
+
+    @abstractmethod
+    def _render_harness(self, actions: str) -> str:
+        """Wrap ``actions`` in the language-specific harness template."""
+
     @abstractmethod
     def rewrite_url_template(self, content: str, base_value: str, key_name: str) -> str:
         """Replace occurrences of ``base_value`` inside page.goto(...) URLs with
