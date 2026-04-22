@@ -105,7 +105,9 @@ function _createCM6ScriptEditor(hostEl, initialContent, { readOnly, language = '
     extensions.push(javascript())
   }
 
-  extensions.push(_createScaffoldDimExtension(initialContent))
+  if(!readOnly) {
+    extensions.push(_createScaffoldDimExtension(initialContent))
+  }
 
   if (readOnly) extensions.push(EditorView.editable.of(false))
   // Host styling: border, rounded, themed to match the rest of the UI
