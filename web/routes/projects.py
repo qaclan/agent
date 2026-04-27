@@ -45,8 +45,8 @@ def create_project():
 
         set_active_project_id(project_id)
 
-        from cli.sync import sync_project_to_cloud
-        sync_project_to_cloud(project_id, name)
+        from cli.sync_queue import enqueue
+        enqueue("project", project_id, "upsert")
 
         return jsonify({"ok": True, "id": project_id, "name": name}), 201
     except Exception as e:
@@ -119,8 +119,8 @@ def delete_project(project_id):
         if get_active_project_id() == project_id:
             set_active_project_id(None)
 
-        from cli.sync import delete_project_from_cloud
-        delete_project_from_cloud(project_id)
+        from cli.sync_queue import enqueue
+        enqueue("project", project_id, "delete")
 
         return jsonify({"ok": True})
     except Exception as e:

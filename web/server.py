@@ -11,6 +11,7 @@ from .routes.suites import bp as suites_bp
 from .routes.runs import bp as runs_bp
 from .routes.envs import bp as envs_bp
 from .routes.auth import bp as auth_bp
+from .routes.sync import bp as sync_bp
 
 
 def _get_base_dir():
@@ -32,7 +33,7 @@ def create_app():
     static_dir = os.path.join(_get_base_dir(), 'static')
     app = Flask(__name__, static_folder=static_dir, static_url_path='')
 
-    for bp in [projects_bp, features_bp, scripts_bp, suites_bp, runs_bp, envs_bp, auth_bp]:
+    for bp in [projects_bp, features_bp, scripts_bp, suites_bp, runs_bp, envs_bp, auth_bp, sync_bp]:
         app.register_blueprint(bp)
 
     @app.route('/')

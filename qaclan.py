@@ -116,19 +116,36 @@ run_group.add_command(run_show, "show")
 @qaclan.command()
 @click.option("--all", "push_all_projects", is_flag=True, help="Push all projects, not just the active one")
 def push(push_all_projects):
-    """Push all local data to the cloud server."""
+    """Force a full resync: re-enqueue every local entity then drain the queue."""
     require_auth()
     from cli.config import get_active_project_id
-    from cli.sync import sync_all
+    from cli.sync_queue import enqueue_all, flush_sync, queue_depth
     from rich.console import Console
     console = Console()
+
     if push_all_projects:
-        sync_all(project_id=None)
+        project_ids = None
     else:
-        project_id = get_active_project_id()
-        if not project_id:
+        pid = get_active_project_id()
+        if pid:
+            project_ids = [pid]
+        else:
             console.print("[yellow]No active project. Pushing all projects...[/yellow]")
-        sync_all(project_id=project_id)
+            project_ids = None
+
+    enqueue_all(project_ids)
+    total = queue_depth()
+    if total == 0:
+        console.print("[yellow]No pending items to push.[/yellow]")
+        return
+
+    console.print(f"[bold]Pushing {total} pending items...[/bold]")
+    flush_sync(deadline=60)
+    remaining = queue_depth()
+    if remaining == 0:
+        console.print("[green]✓ Push complete[/green]")
+    else:
+        console.print(f"[yellow]⚠ {remaining} item(s) still pending — will retry in background[/yellow]")
 
 
 @qaclan.command()
@@ -151,15 +168,12 @@ def serve(port, host, no_browser):
 
     console = Console()
 
-    # Run a full sync on startup (best-effort)
+    # Start the background sync-queue drainer (best-effort)
     from cli.config import get_auth_key
     if get_auth_key():
-        console.print('[dim]Syncing to cloud...[/dim]')
-        try:
-            from cli.sync import sync_all
-            sync_all()
-        except Exception as e:
-            console.print(f'[yellow]⚠ Startup sync failed: {e}[/yellow]')
+        from cli.sync_queue import start_worker, trigger_now
+        start_worker()
+        trigger_now()
 
     app = create_app()
     url = f'http://localhost:{port}'

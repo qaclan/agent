@@ -137,6 +137,35 @@ def init_db():
     _migrate_created_by(conn)
     _migrate_run_options(conn)
     _migrate_script_templating(conn)
+    _migrate_script_language(conn)
+
+
+def _migrate_script_language(conn):
+    """Add language column so each script knows which runtime drives it."""
+    try:
+        conn.execute("ALTER TABLE scripts ADD COLUMN language TEXT NOT NULL DEFAULT 'python'")
+    except Exception:
+        pass  # Column already exists
+    _migrate_sync_queue(conn)
+
+
+def _migrate_sync_queue(conn):
+    """Create the offline-tolerant sync queue table."""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS sync_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            op TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT NOT NULL,
+            last_attempt_at TEXT,
+            UNIQUE(entity_type, entity_id, op)
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_queue_attempts ON sync_queue(attempts, id);
+    """)
+    conn.commit()
 
 
 def _migrate_script_templating(conn):

@@ -1,14 +1,30 @@
 """Cloud sync helper. Wraps cli/api.py calls with error handling.
-Sync is best-effort — failures print a warning but never block the CLI."""
+Sync is best-effort — failures print a warning but never block the CLI.
+Enter strict_mode() to make failures raise (used by the sync_queue drainer)."""
 
 import base64
+import contextlib
 import os
+import threading
 
 from rich.console import Console
 from cli.config import get_auth_key
 from cli import api
 
 console = Console()
+
+_strict = threading.local()
+
+
+@contextlib.contextmanager
+def strict_mode():
+    """Inside this context, _try_sync re-raises instead of swallowing."""
+    prev = getattr(_strict, "on", False)
+    _strict.on = True
+    try:
+        yield
+    finally:
+        _strict.on = prev
 
 
 def _read_screenshot_b64(path):
@@ -23,10 +39,12 @@ def _read_screenshot_b64(path):
 
 
 def _try_sync(label, fn):
-    """Run a sync function, catch and warn on failure."""
+    """Run a sync function, catch and warn on failure (raise in strict_mode)."""
     try:
         return fn()
     except Exception as e:
+        if getattr(_strict, "on", False):
+            raise
         console.print(f"[yellow]⚠ Cloud sync failed ({label}): {e}[/yellow]")
         return None
 
@@ -140,20 +158,37 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None):
-    """Sync a script. IDs are LOCAL IDs (optional)."""
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None, language=None):
+    """Sync a script. IDs are LOCAL IDs (optional).
+
+    ``language`` falls back to the stored column when the caller doesn't pass
+    one, so callers that only know the script id still send an accurate value.
+    """
     key = get_auth_key()
     if not key:
         return None
-    if not channel:
-        from cli.db import get_conn
-        row = get_conn().execute("SELECT channel, created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
-        channel = row["channel"] if row else "web"
+    from cli.db import get_conn
+    if not channel or not language:
+        row = get_conn().execute(
+            "SELECT channel, language, created_by FROM scripts WHERE id = ?",
+            (script_id,),
+        ).fetchone()
+        if not channel:
+            channel = row["channel"] if row else "web"
+        if not language:
+            language = row["language"] if row else "python"
     else:
-        from cli.db import get_conn
-        row = get_conn().execute("SELECT created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
+        row = get_conn().execute(
+            "SELECT created_by FROM scripts WHERE id = ?", (script_id,)
+        ).fetchone()
     cloud_id = _get_cloud_id("scripts", script_id)
-    payload = {"cli_script_id": script_id, "cloud_id": cloud_id, "name": name, "channel": channel}
+    payload = {
+        "cli_script_id": script_id,
+        "cloud_id": cloud_id,
+        "name": name,
+        "channel": channel,
+        "language": language,
+    }
     if row and row["created_by"]:
         payload["created_by"] = row["created_by"]
     if start_url_key:

@@ -98,8 +98,8 @@ def create_env():
         )
         conn.commit()
 
-        from cli.sync import sync_environment_to_cloud
-        sync_environment_to_cloud(env_id, name, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("environment", env_id, "upsert")
 
         return jsonify({"ok": True, "id": env_id, "name": name}), 201
     except Exception as e:
@@ -216,8 +216,8 @@ def update_vars(env_name):
         )
         conn.commit()
 
-        from cli.sync import sync_env_vars_to_cloud
-        sync_env_vars_to_cloud(environment_id)
+        from cli.sync_queue import enqueue
+        enqueue("env_vars", environment_id, "upsert")
 
         return jsonify({"ok": True, "count": len([v for v in vars_list if v.get("key", "").strip()])})
     except Exception as e:
@@ -274,8 +274,8 @@ def append_vars(env_name):
             )
             conn.commit()
 
-            from cli.sync import sync_env_vars_to_cloud
-            sync_env_vars_to_cloud(environment_id)
+            from cli.sync_queue import enqueue
+            enqueue("env_vars", environment_id, "upsert")
 
         return jsonify({"ok": True, "added": len(new_vars)})
     except Exception as e:
@@ -333,9 +333,9 @@ def copy_env(env_name):
         )
         conn.commit()
 
-        from cli.sync import sync_environment_to_cloud, sync_env_vars_to_cloud
-        sync_environment_to_cloud(new_env_id, new_name, project_id)
-        sync_env_vars_to_cloud(new_env_id)
+        from cli.sync_queue import enqueue
+        enqueue("environment", new_env_id, "upsert")
+        enqueue("env_vars", new_env_id, "upsert")
 
         return jsonify({"ok": True, "id": new_env_id, "name": new_name}), 201
     except Exception as e:
@@ -397,8 +397,8 @@ def delete_var(env_name, key):
         conn.execute("DELETE FROM env_vars WHERE id = ?", (existing["id"],))
         conn.commit()
 
-        from cli.sync import sync_env_vars_to_cloud
-        sync_env_vars_to_cloud(env_row["id"])
+        from cli.sync_queue import enqueue
+        enqueue("env_vars", env_row["id"], "upsert")
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -427,8 +427,8 @@ def delete_env(env_name):
         conn.execute("DELETE FROM environments WHERE id = ?", (environment_id,))
         conn.commit()
 
-        from cli.sync import delete_environment_from_cloud
-        delete_environment_from_cloud(environment_id)
+        from cli.sync_queue import enqueue
+        enqueue("environment", environment_id, "delete")
 
         return jsonify({"ok": True})
     except Exception as e:

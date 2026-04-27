@@ -19,7 +19,7 @@ def list_suites():
 
         conn = get_conn()
         rows = conn.execute(
-            "SELECT su.id, su.name, su.channel, su.first_run_at, su.last_run_at, "
+            "SELECT su.id, su.cloud_id, su.name, su.channel, su.first_run_at, su.last_run_at, "
             "su.last_run_status, su.created_at, "
             "(SELECT COUNT(*) FROM suite_items si WHERE si.suite_id = su.id) AS script_count "
             "FROM suites su WHERE su.project_id = ? "
@@ -88,8 +88,8 @@ def create_suite():
         )
         conn.commit()
 
-        from cli.sync import sync_suite_to_cloud
-        sync_suite_to_cloud(suite_id, name, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite", suite_id, "upsert")
 
         return jsonify({"ok": True, "id": suite_id, "name": name}), 201
     except Exception as e:
@@ -119,8 +119,8 @@ def rename_suite(suite_id):
         conn.execute("UPDATE suites SET name = ? WHERE id = ?", (name, suite_id))
         conn.commit()
 
-        from cli.sync import sync_suite_to_cloud
-        sync_suite_to_cloud(suite_id, name, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite", suite_id, "upsert")
 
         return jsonify({"ok": True, "id": suite_id, "name": name})
     except Exception as e:
@@ -173,8 +173,8 @@ def add_script_to_suite(suite_id):
         )
         conn.commit()
 
-        from cli.sync import sync_suite_items_to_cloud
-        sync_suite_items_to_cloud(suite_id, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite_items", suite_id, "upsert")
 
         return jsonify({"ok": True, "id": item_id, "order_index": max_order + 1}), 201
     except Exception as e:
@@ -205,8 +205,8 @@ def remove_script_from_suite(suite_id, script_id):
         )
         conn.commit()
 
-        from cli.sync import sync_suite_items_to_cloud
-        sync_suite_items_to_cloud(suite_id, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite_items", suite_id, "upsert")
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -243,8 +243,8 @@ def reorder_suite_scripts(suite_id):
 
         conn.commit()
 
-        from cli.sync import sync_suite_items_to_cloud
-        sync_suite_items_to_cloud(suite_id, project_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite_items", suite_id, "upsert")
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -271,8 +271,8 @@ def delete_suite(suite_id):
         conn.execute("DELETE FROM suites WHERE id = ?", (suite_id,))
         conn.commit()
 
-        from cli.sync import delete_suite_from_cloud
-        delete_suite_from_cloud(suite_id)
+        from cli.sync_queue import enqueue
+        enqueue("suite", suite_id, "delete")
 
         return jsonify({"ok": True})
     except Exception as e:

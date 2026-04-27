@@ -31,8 +31,8 @@ def feature_create(name):
     )
     conn.commit()
     console.print(f"[green]✓[/green] Feature created: {name} [{fid}]  [bold cyan]\\[WEB][/bold cyan]")
-    from cli.sync import sync_feature_to_cloud
-    sync_feature_to_cloud(fid, name, proj["id"])
+    from cli.sync_queue import enqueue
+    enqueue("feature", fid, "upsert")
 
 
 @feature.command("list")
@@ -90,5 +90,5 @@ def feature_delete(feature_id):
     conn.execute("DELETE FROM features WHERE id = ?", (feature_id,))
     conn.commit()
     console.print(f"[green]✓[/green] Feature deleted: {row['name']}")
-    from cli.sync import delete_feature_from_cloud
-    delete_feature_from_cloud(feature_id)
+    from cli.sync_queue import enqueue
+    enqueue("feature", feature_id, "delete")

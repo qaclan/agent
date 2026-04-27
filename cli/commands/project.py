@@ -33,8 +33,8 @@ def project_create(name):
     set_active_project_id(pid)
     console.print(f"[green]-[/green] Project created: {name} [{pid}]")
     console.print(f"Active project set to: {name}")
-    from cli.sync import sync_project_to_cloud
-    sync_project_to_cloud(pid, name)
+    from cli.sync_queue import enqueue
+    enqueue("project", pid, "upsert")
 
 
 @project.command("list")
@@ -108,5 +108,5 @@ def project_delete(project_id):
         set_active_project_id(None)
 
     console.print(f"[green]✓[/green] Project deleted: {row['name']}")
-    from cli.sync import delete_project_from_cloud
-    delete_project_from_cloud(project_id)
+    from cli.sync_queue import enqueue
+    enqueue("project", project_id, "delete")

@@ -43,7 +43,7 @@ python -m nuitka $ONEFILE_FLAG \
   --lto=no \
   --assume-yes-for-downloads \
   --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle \
-  --include-package=rich._unicode_data \
+  --include-package=rich \
   --include-data-dir=web/static=web/static \
   qaclan.py
 
