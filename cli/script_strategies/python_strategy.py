@@ -91,6 +91,7 @@ def run():
         context = browser.new_context(**_context_opts())
         page = context.new_page()
         page.set_default_timeout(30000)
+        expect.set_options(timeout=15000)
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
         page.on("requestfailed", _on_requestfailed)

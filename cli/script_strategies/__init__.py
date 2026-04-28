@@ -21,12 +21,16 @@ from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.python_strategy import PythonStrategy
 from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 from cli.script_strategies.typescript_strategy import TypeScriptStrategy
+from cli.script_strategies.javascript_test_strategy import JavaScriptTestStrategy
+from cli.script_strategies.typescript_test_strategy import TypeScriptTestStrategy
 
 
 _STRATEGIES = {
     "python": PythonStrategy(),
     "javascript": JavaScriptStrategy(),
     "typescript": TypeScriptStrategy(),
+    "javascript_test": JavaScriptTestStrategy(),
+    "typescript_test": TypeScriptTestStrategy(),
 }
 
 SUPPORTED_LANGUAGES = tuple(_STRATEGIES.keys())

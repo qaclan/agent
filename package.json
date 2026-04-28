@@ -3,6 +3,7 @@
   "description": "JS/TS Playwright harness dependencies for QAClan Agent contributors",
   "private": true,
   "dependencies": {
-    "playwright": "1.58.0"
+    "playwright": "1.58.0",
+    "@playwright/test": "1.58.0"
   }
 }

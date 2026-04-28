@@ -99,7 +99,7 @@ function _createCM6ScriptEditor(hostEl, initialContent, { readOnly, language = '
 
   if (language === 'python') {
     extensions.push(python())
-  } else if (language === 'typescript') {
+  } else if (language === 'typescript' || language === 'typescript_test') {
     extensions.push(javascript({ typescript: true }))
   } else {
     extensions.push(javascript())
@@ -995,6 +995,8 @@ async function recordScriptModal() {
         <option value="python" selected>Python</option>
         <option value="javascript">JavaScript</option>
         <option value="typescript">TypeScript</option>
+        <option value="javascript_test">JavaScript (playwright/test)</option>
+        <option value="typescript_test">TypeScript (playwright/test)</option>
       </select>
     </div>
     <div class="form-group">
@@ -1598,6 +1600,8 @@ async function createScriptModal() {
         <option value="python" selected>Python</option>
         <option value="javascript">JavaScript</option>
         <option value="typescript">TypeScript</option>
+        <option value="javascript_test">JavaScript (playwright/test)</option>
+        <option value="typescript_test">TypeScript (playwright/test)</option>
       </select>
     </div>
     <div class="form-group">
@@ -1722,7 +1726,7 @@ async function editScriptModal(id) {
   const envsRes = await api('GET', '/envs')
   const envs = envsRes.environments || []
   const lang = s.language || 'python'
-  const langLabel = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript' }[lang] || lang
+  const langLabel = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript', javascript_test: 'JavaScript (playwright/test)', typescript_test: 'TypeScript (playwright/test)' }[lang] || lang
   showModal('Edit Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
