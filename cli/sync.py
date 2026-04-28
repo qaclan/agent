@@ -158,20 +158,37 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None):
-    """Sync a script. IDs are LOCAL IDs (optional)."""
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None, language=None):
+    """Sync a script. IDs are LOCAL IDs (optional).
+
+    ``language`` falls back to the stored column when the caller doesn't pass
+    one, so callers that only know the script id still send an accurate value.
+    """
     key = get_auth_key()
     if not key:
         return None
-    if not channel:
-        from cli.db import get_conn
-        row = get_conn().execute("SELECT channel, created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
-        channel = row["channel"] if row else "web"
+    from cli.db import get_conn
+    if not channel or not language:
+        row = get_conn().execute(
+            "SELECT channel, language, created_by FROM scripts WHERE id = ?",
+            (script_id,),
+        ).fetchone()
+        if not channel:
+            channel = row["channel"] if row else "web"
+        if not language:
+            language = row["language"] if row else "python"
     else:
-        from cli.db import get_conn
-        row = get_conn().execute("SELECT created_by FROM scripts WHERE id = ?", (script_id,)).fetchone()
+        row = get_conn().execute(
+            "SELECT created_by FROM scripts WHERE id = ?", (script_id,)
+        ).fetchone()
     cloud_id = _get_cloud_id("scripts", script_id)
-    payload = {"cli_script_id": script_id, "cloud_id": cloud_id, "name": name, "channel": channel}
+    payload = {
+        "cli_script_id": script_id,
+        "cloud_id": cloud_id,
+        "name": name,
+        "channel": channel,
+        "language": language,
+    }
     if row and row["created_by"]:
         payload["created_by"] = row["created_by"]
     if start_url_key:

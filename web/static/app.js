@@ -18,11 +18,11 @@ if (typeof window !== 'undefined') {
 //   2. CM6 init threw → textarea fallback + toast
 //   3. state.settings.editor_mode === 'text' → textarea
 
-function _createScriptEditor(hostEl, initialContent, { readOnly = false } = {}) {
+function _createScriptEditor(hostEl, initialContent, { readOnly = false, language = 'python' } = {}) {
   const wantCode = (state.settings.editor_mode || 'code') === 'code'
   if (wantCode && window.CM6 && window.CM6.EditorView) {
     try {
-      return _createCM6ScriptEditor(hostEl, initialContent || '', { readOnly })
+      return _createCM6ScriptEditor(hostEl, initialContent || '', { readOnly, language })
     } catch (e) {
       console.warn('[qaclan] CM6 init failed, falling back to textarea:', e)
       toast('Code editor unavailable, using plain text', 'warning')
@@ -31,9 +31,84 @@ function _createScriptEditor(hostEl, initialContent, { readOnly = false } = {}) 
   return _createTextareaScriptEditor(hostEl, initialContent || '', { readOnly })
 }
 
-function _createCM6ScriptEditor(hostEl, initialContent, { readOnly }) {
-  const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
-  const extensions = [basicSetup(), python(), oneDark]
+//============ harness template scafolding =============================
+function _findActionRanges(text) {
+  const beginRe = /(^[ \t]*(#|\/\/)\s*BEGIN ACTIONS[^\n]*\n?)/m
+  const endRe   = /(^[ \t]*(#|\/\/)\s*END ACTIONS[^\n]*\n?)/m
+
+  const begin = beginRe.exec(text)
+  const end = endRe.exec(text)
+
+  if (!begin || !end) return null
+
+  const beginLineEnd = begin.index + begin[0].length
+  const endLineStart = end.index
+
+  if (beginLineEnd > endLineStart) return null
+
+  return {
+    editableFrom: beginLineEnd,
+    editableTo: endLineStart,
+  }
+}
+
+function _createScaffoldDimExtension(initialContent) {
+  const { Decoration, ViewPlugin, RangeSetBuilder } = window.CM6
+  const dimMark = Decoration.mark({ class: 'cm-scaffold-dim' })
+
+  return ViewPlugin.fromClass(class {
+    constructor(view) {
+      this.decorations = this.buildDeco(view)
+    }
+
+    update(update) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = this.buildDeco(update.view)
+      }
+    }
+
+    buildDeco(view) {
+      const text = view.state.doc.toString()
+      const range = _findActionRanges(text)
+      const builder = new RangeSetBuilder()
+
+      if (!range) return builder.finish()
+
+      if (range.editableFrom > 0) {
+        builder.add(0, range.editableFrom, dimMark)
+      }
+
+      if (range.editableTo < text.length) {
+        builder.add(range.editableTo, text.length, dimMark)
+      }
+
+      return builder.finish()
+    }
+  }, {
+    decorations: v => v.decorations
+  })
+}
+
+function _createCM6ScriptEditor(hostEl, initialContent, { readOnly, language = 'python' }) {
+  // const { EditorState, EditorView, basicSetup, python, oneDark } = window.CM6
+  // const extensions = [basicSetup(), python(), oneDark]
+  // if (readOnly) extensions.push(EditorView.editable.of(false))
+  const { EditorState, EditorView, basicSetup, python, javascript, oneDark } = window.CM6
+
+  const extensions = [basicSetup(), oneDark]
+
+  if (language === 'python') {
+    extensions.push(python())
+  } else if (language === 'typescript' || language === 'typescript_test') {
+    extensions.push(javascript({ typescript: true }))
+  } else {
+    extensions.push(javascript())
+  }
+
+  if(!readOnly) {
+    extensions.push(_createScaffoldDimExtension(initialContent))
+  }
+
   if (readOnly) extensions.push(EditorView.editable.of(false))
   // Host styling: border, rounded, themed to match the rest of the UI
   hostEl.style.border = '1px solid var(--border-default)'
@@ -915,6 +990,16 @@ async function recordScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Language</label>
+      <select id="rec-language">
+        <option value="python" selected>Python</option>
+        <option value="javascript">JavaScript</option>
+        <option value="typescript">TypeScript</option>
+        <option value="javascript_test">JavaScript (playwright/test)</option>
+        <option value="typescript_test">TypeScript (playwright/test)</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label class="form-label">Environment (optional)</label>
       <select id="rec-env" onchange="_onRecordEnvChange()">
         <option value="">— No environment —</option>
@@ -939,6 +1024,7 @@ async function recordScriptModal() {
     { label: 'Start Recording', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('rec-name').value.trim()
       const feature_id = document.getElementById('rec-feature').value
+      const language = document.getElementById('rec-language').value
       const env_name = document.getElementById('rec-env').value
       const url_key = document.getElementById('rec-url-key')?.value || ''
       const path_suffix = document.getElementById('rec-path')?.value.trim() || ''
@@ -952,7 +1038,7 @@ async function recordScriptModal() {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const payload = { name, feature_id }
+      const payload = { name, feature_id, language }
       if (env_name && url_key) {
         payload.env_name = env_name
         payload.url_key = url_key
@@ -1509,6 +1595,16 @@ async function createScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Language</label>
+      <select id="script-language">
+        <option value="python" selected>Python</option>
+        <option value="javascript">JavaScript</option>
+        <option value="typescript">TypeScript</option>
+        <option value="javascript_test">JavaScript (playwright/test)</option>
+        <option value="typescript_test">TypeScript (playwright/test)</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label class="form-label">Insert Variable</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
         <select id="insert-var-env" style="flex:1;min-width:150px" onchange="_loadEnvKeysForInsert()">
@@ -1531,9 +1627,10 @@ async function createScriptModal() {
     { label: 'Create Script', cls: 'btn-primary', action: async () => {
       const name = document.getElementById('script-name').value.trim()
       const feature_id = document.getElementById('script-feature').value
+      const language = document.getElementById('script-language').value
       const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
       if (!name || !feature_id) { toast('Name and feature required', 'error'); return }
-      const res = await api('POST', '/scripts', { name, feature_id, content })
+      const res = await api('POST', '/scripts', { name, feature_id, language, content })
       if (res.ok === false) { toast(res.error, 'error'); return }
       closeModal(); toast('Script "' + name + '" created')
       renderScriptsPage()
@@ -1548,6 +1645,33 @@ async function createScriptModal() {
       editor.destroy()
       if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
     }
+
+    const langSelect = document.getElementById('script-language')
+    let lastTemplate = ''
+
+    const loadTemplate = async (lang) => {
+      const res = await api('GET', '/scripts/starter-template?language=' + encodeURIComponent(lang))
+      if (res && res.ok !== false && typeof res.content === 'string') {
+        return res.content
+      }
+      return ''
+    }
+
+    loadTemplate(langSelect.value).then(tpl => {
+      lastTemplate = tpl
+      if (editor.getValue() === '') editor.setValue(tpl)
+    })
+
+    langSelect.addEventListener('change', async () => {
+      const current = editor.getValue()
+      const newTpl = await loadTemplate(langSelect.value)
+      if (current === '' || current === lastTemplate) {
+        editor.setValue(newTpl)
+      } else {
+        toast('Language changed — existing content kept. Clear the editor to use the new starter template.')
+      }
+      lastTemplate = newTpl
+    })
   }
 }
 
@@ -1586,7 +1710,7 @@ async function viewScriptModal(id) {
   // Render the editor after the modal is in the DOM
   const host = document.getElementById('view-script-editor-host')
   if (host) {
-    const editor = _createScriptEditor(host, s.content || '', { readOnly: true })
+    const editor = _createScriptEditor(host, s.content || '', { readOnly: true, language: s.language || 'python' })
     window._qcCurrentEditor = editor
     window._qcModalCleanupHook = () => {
       editor.destroy()
@@ -1601,10 +1725,19 @@ async function editScriptModal(id) {
   const s = sRes.script || sRes
   const envsRes = await api('GET', '/envs')
   const envs = envsRes.environments || []
+  const lang = s.language || 'python'
+  const langLabel = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript', javascript_test: 'JavaScript (playwright/test)', typescript_test: 'TypeScript (playwright/test)' }[lang] || lang
   showModal('Edit Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
       <input type="text" id="edit-script-name" value="${escHtml(s.name)}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Language</label>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="badge badge-neutral">${escHtml(langLabel)}</span>
+        <span class="form-hint" style="margin:0">Language is set at creation time.</span>
+      </div>
     </div>
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">
@@ -1640,7 +1773,7 @@ async function editScriptModal(id) {
 
   const host = document.getElementById('edit-script-editor-host')
   if (host) {
-    const editor = _createScriptEditor(host, s.content || '')
+    const editor = _createScriptEditor(host, s.content || '', { readOnly: false, language: s.language || 'python' })
     window._qcCurrentEditor = editor
     window._qcModalCleanupHook = () => {
       editor.destroy()

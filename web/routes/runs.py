@@ -1,111 +1,45 @@
 import json
 import os
-import re
-import sys
-import shutil
+import subprocess
 import time
 import logging
 import traceback
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from pathlib import Path
+
 from cli.db import get_conn, generate_id
-from cli.config import get_active_project_id
+from cli.config import get_active_project_id, QACLAN_DIR
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
 from cli.crypto import decrypt
+from cli.script_strategies import get_strategy
+from cli.script_strategies._shared import substitute_template_vars
 
 logger = logging.getLogger("qaclan.runs")
 
 bp = Blueprint('runs', __name__)
+
+RUNS_DIR = Path(QACLAN_DIR) / "runs"
+SCREENSHOTS_DIR = Path(QACLAN_DIR) / "screenshots"
+PER_SCRIPT_TIMEOUT_SEC = 300  # 5 minutes per script before kill
 
 
 def _require_active_project():
     return get_active_project_id()
 
 
-def _extract_test_actions(script_path):
-    """Extract test action lines from a Playwright codegen script."""
-    with open(script_path, "r") as f:
-        lines = f.readlines()
-
-    actions = []
-    capturing = False
-    base_indent = None
-
-    for line in lines:
-        stripped = line.strip()
-
-        if stripped.startswith("page = context.new_page()"):
-            capturing = True
-            continue
-
-        if capturing and stripped.startswith("page.close()"):
-            break
-
-        if capturing:
-            if not stripped or stripped.startswith("# ---"):
-                continue
-            if "_qc_state" in stripped or "context.storage_state" in stripped:
-                continue
-            if base_indent is None:
-                base_indent = len(line) - len(line.lstrip())
-            current_indent = len(line) - len(line.lstrip())
-            relative_indent = max(0, current_indent - base_indent)
-            actions.append(" " * relative_indent + stripped)
-
-    return "\n".join(actions)
-
-
-def _substitute_template_vars(source, var_keys, env_vars, fallback_key, fallback_value):
-    """Resolve {{KEY}} placeholders in a script body.
-
-    For each key in var_keys:
-      - If present in env_vars, substitute with the env value
-      - Else if it matches the script's fallback_key, substitute with fallback_value
-        and log a warning
-      - Else raise ValueError (caller fails the script)
-    """
-    warnings = []
-    for key in var_keys:
-        placeholder = "{{" + key + "}}"
-        if key in env_vars:
-            value = env_vars[key]
-        elif key == fallback_key and fallback_value:
-            value = fallback_value
-            warnings.append(f"Variable '{key}' not in env, using recorded fallback")
-        else:
-            raise ValueError(
-                f"Script requires variable '{key}' but it's not in the selected environment "
-                f"and no fallback is available."
-            )
-        source = source.replace(placeholder, value)
-    return source, warnings
-
-
-def _patch_actions(actions_src):
-    """Apply runtime patches: resilient goto wait strategy.
-
-    Rewrites page.goto(url) -> page.goto(url, wait_until="domcontentloaded")
-    so SPAs with long-tail network activity (analytics, websockets, polling)
-    don't stall navigation. Only matches bare goto(url) calls; any goto that
-    already specifies wait_until / timeout / other kwargs is left untouched.
-    """
-    actions_src = re.sub(
-        r'page\.goto\(\s*(["\'][^"\']+["\'])\s*\)',
-        r'page.goto(\1, wait_until="domcontentloaded")',
-        actions_src,
-    )
-
-    # Optional: post-click wait. Disabled by default — re-enable if specific
-    # scripts need it. Uses "domcontentloaded" instead of "networkidle" because
-    # modern SPAs (websockets, polling, analytics) rarely hit true network idle.
-    # actions_src = re.sub(
-    #     r'(\.click\(\))',
-    #     r'\1\npage.wait_for_load_state("domcontentloaded")',
-    #     actions_src,
-    # )
-
-    return actions_src
+def _read_artifacts(path: Path):
+    """Read the artifacts JSON a script writes on exit. Missing or malformed
+    files degrade gracefully to empty lists — a crashed script may not have
+    written anything."""
+    if not path.exists():
+        return [], []
+    try:
+        data = json.loads(path.read_text())
+        return data.get("console_errors", []) or [], data.get("network_failures", []) or []
+    except Exception as e:
+        logger.warning("Failed to read artifacts at %s: %s", path, e)
+        return [], []
 
 
 @bp.route('/api/runs', methods=['GET'])
@@ -164,7 +98,6 @@ def get_run(run_id):
 
         run = dict(row)
 
-        # Load script results
         script_rows = conn.execute(
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
             "scr.console_errors, scr.network_failures, scr.error_message, "
@@ -204,7 +137,6 @@ def execute_run():
 
         conn = get_conn()
 
-        # 1. Load suite and validate
         suite = conn.execute(
             "SELECT * FROM suites WHERE id = ? AND project_id = ?",
             (suite_id, project_id),
@@ -218,10 +150,9 @@ def execute_run():
                 "error": f"Suite {suite_id} is a {suite['channel'].upper()} suite, not a WEB suite"
             }), 400
 
-        # 2. Load suite items with scripts (ordered)
         items = conn.execute(
             "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.start_url_key, sc.start_url_value, sc.var_keys "
+            "sc.source, sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -231,10 +162,18 @@ def execute_run():
             return jsonify({"ok": False, "error": "Suite has no scripts"}), 400
 
         logger.info("execute_run: loaded %d scripts for suite %s (%s)", len(items), suite_id, suite["name"])
-        for item in items:
-            logger.debug("  script: %s (%s) -> %s", item["script_id"], item["script_name"], item["file_path"])
 
-        # 3. Load env vars if env_name provided
+        # Pre-flight: every language present in the suite must have a working runtime.
+        languages_in_suite = {item["language"] or "python" for item in items}
+        for lang in languages_in_suite:
+            try:
+                get_strategy(lang).validate_runtime()
+            except (ValueError, RuntimeError) as e:
+                logger.error("execute_run: runtime check failed for language %s: %s", lang, e)
+                return jsonify({"ok": False, "error": str(e)}), 400
+
+        # Load env vars for substitution. These are passed to subprocesses via
+        # the `env` param only — we never mutate os.environ of the Flask process.
         env_vars_dict = {}
         environment_id = None
         if env_name:
@@ -257,11 +196,6 @@ def execute_run():
                 env_vars_dict[v["key"]] = val
             logger.info("execute_run: loaded %d env vars from environment '%s'", len(env_vars_dict), env_name)
 
-        # Inject env vars into current process
-        for k, v in env_vars_dict.items():
-            os.environ[k] = v
-
-        # 4. Create suite_run record
         run_id = generate_id("run")
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
@@ -272,6 +206,18 @@ def execute_run():
         conn.commit()
         logger.info("execute_run: created run %s at %s", run_id, now)
 
+        # Per-run working directory: holds the rendered scripts, the shared
+        # storage-state JSON, and per-script artifact files. 0o700 so cookies
+        # and decrypted env values aren't world-readable on multi-user hosts.
+        run_dir = RUNS_DIR / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        state_file = run_dir / "state.json"  # created on first script's exit
+
         total = len(items)
         passed = 0
         failed = 0
@@ -280,240 +226,224 @@ def execute_run():
         script_results = []
         run_start = time.time()
 
-        # In Nuitka binary builds, the bundled Node driver segfaults — use system node instead
+        # In Nuitka binary builds the bundled Node driver segfaults; set
+        # PLAYWRIGHT_BROWSERS_PATH so subprocesses find system-installed browsers.
         default_browsers = get_default_playwright_browsers_path()
         is_frozen = is_frozen_binary()
-        logger.info("execute_run: is_frozen=%s sys.executable=%s", is_frozen, sys.executable)
+        logger.info("execute_run: is_frozen=%s", is_frozen)
+        pw_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        if is_frozen and not pw_browsers_path and os.path.isdir(default_browsers):
+            pw_browsers_path = default_browsers
+            logger.info("execute_run: using PLAYWRIGHT_BROWSERS_PATH=%s (binary-mode default)", pw_browsers_path)
 
-        if is_frozen and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-            # Binary mode: force browser path to system location
-            if os.path.isdir(default_browsers):
-                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = default_browsers
-                logger.info("execute_run: set PLAYWRIGHT_BROWSERS_PATH=%s", default_browsers)
-            else:
-                logger.warning("execute_run: no browser dir found at %s", default_browsers)
+        for idx, item in enumerate(items):
+            srun_id = generate_id("srun")
+            script_now = datetime.now(timezone.utc).isoformat()
+            language = item["language"] or "python"
 
-        logger.info("execute_run: PLAYWRIGHT_BROWSERS_PATH=%s", os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
+            if stopped:
+                logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item["script_name"])
+                conn.execute(
+                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
+                    (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
+                )
+                skipped += 1
+                script_results.append({
+                    "script_id": item["script_id"],
+                    "name": item["script_name"],
+                    "status": "SKIPPED",
+                    "duration_ms": 0,
+                    "error_message": None,
+                })
+                continue
 
-        if is_frozen:
-            node_path = shutil.which("node")
-            logger.info("execute_run: binary mode — node_path=%s", node_path)
-            if not node_path:
-                logger.error("execute_run: Node.js not found in PATH")
-                return jsonify({"error": "Node.js is required to run tests in binary mode. Install Node.js and try again."}), 500
+            logger.info("execute_run: [%d/%d] running '%s' (%s, %s)...",
+                        idx + 1, total, item["script_name"], item["script_id"], language)
+            script_start = time.time()
+            screenshot_path = SCREENSHOTS_DIR / f"{srun_id}.png"
+            artifacts_path = run_dir / f"{srun_id}.artifacts.json"
+
             try:
-                import playwright._impl._driver as _drv
-                _orig_compute = _drv.compute_driver_executable
-                def _patched_compute():
-                    _node, cli = _orig_compute()
-                    logger.debug("execute_run: patched driver — node=%s cli=%s (original node=%s)", node_path, cli, _node)
-                    return node_path, cli
-                _drv.compute_driver_executable = _patched_compute
-                logger.info("execute_run: patched Playwright driver to use system node")
-            except Exception as e:
-                logger.error("execute_run: failed to patch Playwright driver: %s", e, exc_info=True)
-
-        from playwright.sync_api import sync_playwright, expect as pw_expect
-        logger.info("execute_run: starting Playwright...")
-
-        with sync_playwright() as playwright:
-            browser_engine = getattr(playwright, browser_type)
-            logger.info("execute_run: Playwright started, launching %s (headless=%s)...", browser_type, headless)
-            browser_inst = browser_engine.launch(headless=headless)
-            logger.info("execute_run: browser launched, creating context...")
-            context_opts = {}
-            if resolution:
-                w, h = resolution.split("x")
-                context_opts["viewport"] = {"width": int(w), "height": int(h)}
-            context = browser_inst.new_context(**context_opts)
-            logger.info("execute_run: browser context created (resolution=%s)", resolution or "default")
-
-            # 6. Loop through scripts
-            for idx, item in enumerate(items):
-                srun_id = generate_id("srun")
-                script_now = datetime.now(timezone.utc).isoformat()
-
-                if stopped:
-                    logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item["script_name"])
-                    conn.execute(
-                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
-                        "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
-                        (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
-                    )
-                    skipped += 1
-                    script_results.append({
-                        "script_id": item["script_id"],
-                        "name": item["script_name"],
-                        "status": "SKIPPED",
-                        "duration_ms": 0,
-                        "error_message": None,
-                    })
-                    continue
-
-                logger.info("execute_run: [%d/%d] running '%s' (%s)...", idx + 1, total, item["script_name"], item["script_id"])
-                script_start = time.time()
-                console_errors = []
-                network_failures = []
-
-                try:
-                    # Extract and patch test actions
+                strategy = get_strategy(language)
+                db_source = item["source"] or ""
+                if db_source and db_source not in ("WEB_CREATED", "CLI_RECORDED"):
+                    source = db_source
+                else:
+                    # Legacy rows pre-date source storage — fall back to file.
                     script_path = item["file_path"]
                     if not os.path.exists(script_path):
                         raise FileNotFoundError(f"Script file not found: {script_path}")
-                    logger.debug("execute_run: reading script from %s", script_path)
+                    with open(script_path, "r") as f:
+                        source = f.read()
 
-                    actions_src = _extract_test_actions(script_path)
-                    if not actions_src.strip():
-                        logger.warning("execute_run: extracted empty actions from %s", script_path)
-                    else:
-                        logger.debug("execute_run: extracted %d chars of actions:\n%s", len(actions_src), actions_src[:500])
+                # Resolve {{KEY}} placeholders against the selected env (with
+                # recorded start-URL fallback). Values are escaped for the
+                # target language so a "-containing value can't break out of
+                # the string literal and inject code.
+                try:
+                    script_var_keys = json.loads(item["var_keys"] or "[]")
+                except (TypeError, ValueError):
+                    script_var_keys = []
+                if script_var_keys:
+                    source, subs_warnings = substitute_template_vars(
+                        source, script_var_keys, env_vars_dict,
+                        item["start_url_key"], item["start_url_value"],
+                        escape_fn=strategy.escape_for_literal,
+                    )
+                    for w in subs_warnings:
+                        logger.warning("execute_run: %s — %s", item["script_name"], w)
 
-                    # Resolve {{KEY}} placeholders against the selected env (with start URL fallback)
-                    try:
-                        script_var_keys = json.loads(item["var_keys"] or "[]")
-                    except (TypeError, ValueError):
-                        script_var_keys = []
-                    if script_var_keys:
-                        actions_src, subs_warnings = _substitute_template_vars(
-                            actions_src,
-                            script_var_keys,
-                            env_vars_dict,
-                            item["start_url_key"],
-                            item["start_url_value"],
-                        )
-                        for w in subs_warnings:
-                            logger.warning("execute_run: %s — %s", item["script_name"], w)
+                # Write the rendered, substituted script into the run directory
+                # so the subprocess executes a known file with no {{KEY}} left.
+                rendered_path = run_dir / f"{srun_id}{strategy.file_extension}"
+                rendered_path.write_text(source)
+                try:
+                    os.chmod(rendered_path, 0o600)
+                except OSError:
+                    pass
 
-                    actions_src = _patch_actions(actions_src)
-                    logger.debug("execute_run: patched actions (%d chars)", len(actions_src))
+                # Build the subprocess env from scratch — copy the parent env,
+                # overlay env_vars_dict (so scripts can read their own secrets
+                # via os.environ inside the child), then the QACLAN_* contract
+                # vars. Secrets never land in the parent's os.environ.
+                child_env = os.environ.copy()
+                child_env.update(env_vars_dict)
+                child_env["QACLAN_STORAGE_STATE"] = str(state_file)
+                child_env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
+                child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
+                child_env["QACLAN_BROWSER"] = browser_type
+                child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
+                child_env["QACLAN_VIEWPORT"] = resolution or ""
+                if pw_browsers_path:
+                    child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 
-                    # Create a new page in the shared context
-                    logger.debug("execute_run: creating new page...")
-                    page = context.new_page()
-                    page.set_default_timeout(30000)
+                child_env.update(strategy.extra_env())
+                cmd = strategy.build_run_command(str(rendered_path))
+                logger.debug("execute_run: spawning %s", cmd)
 
-                    # Hook console and network error listeners
-                    page.on("console", lambda msg: console_errors.append(
-                        {"type": msg.type, "text": msg.text}
-                    ) if msg.type in ("error", "warning") else None)
-                    page.on("pageerror", lambda err: console_errors.append(
-                        {"type": "pageerror", "text": str(err)}
-                    ))
-                    page.on("requestfailed", lambda req: network_failures.append(
-                        {"url": req.url, "method": req.method, "failure": req.failure}
-                    ))
+                proc = subprocess.run(
+                    cmd,
+                    env=child_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=PER_SCRIPT_TIMEOUT_SEC,
+                )
 
-                    logger.debug("execute_run: page created, executing actions...")
+                duration_ms = int((time.time() - script_start) * 1000)
+                finished_at = datetime.now(timezone.utc).isoformat()
+                console_errors, network_failures = _read_artifacts(artifacts_path)
 
-                    # Execute test actions with page, context, and expect in scope
-                    exec(actions_src, {
-                        "page": page,
-                        "context": context,
-                        "expect": pw_expect,
-                        "re": re,
-                        "os": os,
-                    })
-
-                    logger.debug("execute_run: actions executed, waiting 2s for JS persistence...")
-                    page.wait_for_timeout(2000)  # Allow JS to persist session to localStorage
-                    page.close()
-
-                    duration_ms = int((time.time() - script_start) * 1000)
-                    finished_at = datetime.now(timezone.utc).isoformat()
-
+                if proc.returncode == 0:
                     status = "PASSED"
-                    passed += 1
                     error_msg = None
+                    passed += 1
+                    saved_screenshot = None
                     logger.info("execute_run: [%d/%d] %s — PASSED (%dms) console_errors=%d network_failures=%d",
                                 idx + 1, total, item["script_name"], duration_ms,
                                 len(console_errors), len(network_failures))
-
-                    conn.execute(
-                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                        "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
-                        "started_at, finished_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (srun_id, run_id, item["script_id"], item["order_index"],
-                         status, duration_ms, error_msg,
-                         len(console_errors), len(network_failures),
-                         json.dumps(console_errors) if console_errors else None,
-                         json.dumps(network_failures) if network_failures else None,
-                         script_now, finished_at),
-                    )
-
-                    script_results.append({
-                        "script_id": item["script_id"],
-                        "name": item["script_name"],
-                        "status": status,
-                        "duration_ms": duration_ms,
-                        "error_message": error_msg,
-                        "console_errors": len(console_errors),
-                        "network_failures": len(network_failures),
-                        "console_log": json.dumps(console_errors) if console_errors else None,
-                        "network_log": json.dumps(network_failures) if network_failures else None,
-                    })
-                except Exception as e:
-                    # Capture screenshot before closing page
-                    screenshot_path = None
-                    try:
-                        screenshots_dir = Path(os.path.expanduser("~/.qaclan/screenshots"))
-                        screenshots_dir.mkdir(parents=True, exist_ok=True)
-                        screenshot_path = str(screenshots_dir / f"{srun_id}.png")
-                        page.screenshot(path=screenshot_path)
-                    except Exception:
-                        screenshot_path = None
-
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-
-                    duration_ms = int((time.time() - script_start) * 1000)
-                    finished_at = datetime.now(timezone.utc).isoformat()
+                else:
+                    status = "FAILED"
+                    error_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
                     failed += 1
-                    error_msg = traceback.format_exc()
-                    logger.error("execute_run: [%d/%d] %s — FAILED (%dms): %s", idx + 1, total, item["script_name"], duration_ms, e)
-                    logger.debug("execute_run: full traceback:\n%s", error_msg)
+                    saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
+                    logger.error("execute_run: [%d/%d] %s — FAILED (%dms, exit=%d): %s",
+                                 idx + 1, total, item["script_name"], duration_ms, proc.returncode,
+                                 error_msg[:500])
                     if stop_on_fail:
                         stopped = True
                         logger.info("execute_run: stop-on-fail triggered, remaining scripts will be skipped")
 
-                    conn.execute(
-                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                        "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
-                        "screenshot_path, started_at, finished_at) "
-                        "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (srun_id, run_id, item["script_id"], item["order_index"],
-                         duration_ms, error_msg,
-                         len(console_errors), len(network_failures),
-                         json.dumps(console_errors) if console_errors else None,
-                         json.dumps(network_failures) if network_failures else None,
-                         screenshot_path, script_now, finished_at),
-                    )
+                conn.execute(
+                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                    "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
+                    "screenshot_path, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (srun_id, run_id, item["script_id"], item["order_index"], status,
+                     duration_ms, error_msg,
+                     len(console_errors), len(network_failures),
+                     json.dumps(console_errors) if console_errors else None,
+                     json.dumps(network_failures) if network_failures else None,
+                     saved_screenshot, script_now, finished_at),
+                )
 
-                    script_results.append({
-                        "script_id": item["script_id"],
-                        "name": item["script_name"],
-                        "status": "FAILED",
-                        "duration_ms": duration_ms,
-                        "error_message": error_msg,
-                        "screenshot_path": screenshot_path,
-                        "console_errors": len(console_errors),
-                        "network_failures": len(network_failures),
-                        "console_log": json.dumps(console_errors) if console_errors else None,
-                        "network_log": json.dumps(network_failures) if network_failures else None,
-                    })
+                script_results.append({
+                    "script_id": item["script_id"],
+                    "name": item["script_name"],
+                    "status": status,
+                    "duration_ms": duration_ms,
+                    "error_message": error_msg,
+                    "screenshot_path": saved_screenshot,
+                    "console_errors": len(console_errors),
+                    "network_failures": len(network_failures),
+                    "console_log": json.dumps(console_errors) if console_errors else None,
+                    "network_log": json.dumps(network_failures) if network_failures else None,
+                })
 
-            # Close shared browser
-            logger.info("execute_run: closing browser...")
-            context.close()
-            browser_inst.close()
+            except subprocess.TimeoutExpired:
+                duration_ms = int((time.time() - script_start) * 1000)
+                finished_at = datetime.now(timezone.utc).isoformat()
+                failed += 1
+                error_msg = f"Script timed out after {PER_SCRIPT_TIMEOUT_SEC}s"
+                saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
+                logger.error("execute_run: [%d/%d] %s — TIMEOUT (%dms)",
+                             idx + 1, total, item["script_name"], duration_ms)
+                if stop_on_fail:
+                    stopped = True
+                console_errors, network_failures = _read_artifacts(artifacts_path)
+                conn.execute(
+                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                    "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
+                    "screenshot_path, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (srun_id, run_id, item["script_id"], item["order_index"],
+                     duration_ms, error_msg,
+                     len(console_errors), len(network_failures),
+                     json.dumps(console_errors) if console_errors else None,
+                     json.dumps(network_failures) if network_failures else None,
+                     saved_screenshot, script_now, finished_at),
+                )
+                script_results.append({
+                    "script_id": item["script_id"],
+                    "name": item["script_name"],
+                    "status": "FAILED",
+                    "duration_ms": duration_ms,
+                    "error_message": error_msg,
+                    "screenshot_path": saved_screenshot,
+                    "console_errors": len(console_errors),
+                    "network_failures": len(network_failures),
+                    "console_log": json.dumps(console_errors) if console_errors else None,
+                    "network_log": json.dumps(network_failures) if network_failures else None,
+                })
 
-        # Clean up injected env vars
-        for k in env_vars_dict:
-            os.environ.pop(k, None)
+            except Exception as e:
+                duration_ms = int((time.time() - script_start) * 1000)
+                finished_at = datetime.now(timezone.utc).isoformat()
+                failed += 1
+                error_msg = traceback.format_exc()
+                logger.error("execute_run: [%d/%d] %s — INTERNAL ERROR (%dms): %s",
+                             idx + 1, total, item["script_name"], duration_ms, e)
+                if stop_on_fail:
+                    stopped = True
+                conn.execute(
+                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                    "duration_ms, error_message, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
+                    (srun_id, run_id, item["script_id"], item["order_index"],
+                     duration_ms, error_msg, script_now, finished_at),
+                )
+                script_results.append({
+                    "script_id": item["script_id"],
+                    "name": item["script_name"],
+                    "status": "FAILED",
+                    "duration_ms": duration_ms,
+                    "error_message": error_msg,
+                })
 
-        # 8. Finalize suite_run
+        # Ensure the env-vars dict is released promptly so decrypted secrets
+        # don't linger in the Flask worker's memory.
+        env_vars_dict.clear()
+
         final_status = "PASSED" if failed == 0 and skipped == 0 else "FAILED"
         finished_at = datetime.now(timezone.utc).isoformat()
         total_duration_ms = int((time.time() - run_start) * 1000)
@@ -525,7 +455,6 @@ def execute_run():
             (final_status, passed, failed, skipped, finished_at, run_id),
         )
 
-        # 9. Update suite metadata
         conn.execute(
             "UPDATE suites SET last_run_at = ?, last_run_status = ? WHERE id = ?",
             (finished_at, final_status, suite_id),
@@ -541,7 +470,6 @@ def execute_run():
         from cli.sync_queue import enqueue
         enqueue("run", run_id, "upsert")
 
-        # 10. Return completed run data
         return jsonify({
             "ok": True,
             "run": {

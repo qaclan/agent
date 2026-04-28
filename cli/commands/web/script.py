@@ -1,7 +1,5 @@
 import json
 import os
-import re
-import shutil
 
 import click
 from datetime import datetime, timezone
@@ -10,21 +8,8 @@ from rich.table import Table
 
 from cli.config import get_active_project, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
-from cli.script_processor import inject_storage_state
-
-_VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
-
-
-def _scan_var_keys(content):
-    """Extract unique {{KEY}} placeholders from a script body."""
-    if not content:
-        return []
-    seen = []
-    for m in _VAR_PLACEHOLDER_RE.finditer(content):
-        key = m.group(1)
-        if key not in seen:
-            seen.append(key)
-    return seen
+from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
+from cli.script_strategies._shared import scan_var_keys as _scan_var_keys
 
 console = Console()
 
@@ -99,8 +84,10 @@ def script_show(script_id):
 @click.argument("file_path", type=click.Path(exists=True))
 @click.option("--name", required=True, help="Name for the script")
 @click.option("--feature", "feature_id", required=True, help="Feature ID")
-def script_import(file_path, name, feature_id):
-    """Import an external script file."""
+@click.option("--language", type=click.Choice(list(SUPPORTED_LANGUAGES)), default="python",
+              help="Playwright binding the script was written against")
+def script_import(file_path, name, feature_id, language):
+    """Import an external Playwright codegen script."""
     proj = get_active_project(console)
     if not proj:
         return
@@ -113,27 +100,27 @@ def script_import(file_path, name, feature_id):
         console.print(f"[red]Feature {feature_id} not found. Run: qaclan web feature list[/red]")
         return
 
+    strategy = get_strategy(language)
     script_id = generate_id("script")
-    dest = os.path.join(SCRIPTS_DIR, f"{script_id}.py")
+    dest = os.path.join(SCRIPTS_DIR, f"{script_id}{strategy.file_extension}")
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
 
-    # Post-process to inject shared session support
     with open(file_path, "r") as f:
         raw_script = f.read()
-    processed = inject_storage_state(raw_script)
+    processed = strategy.post_process_recording(raw_script)
     with open(dest, "w") as f:
         f.write(processed)
 
-    # Scan for {{KEY}} placeholders so imported scripts get var_keys populated
     var_keys_list = _scan_var_keys(processed)
 
     now = datetime.now(timezone.utc).isoformat()
     from cli.config import get_user_name
     created_by = get_user_name()
     conn.execute(
-        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, created_by, var_keys) "
-        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?, ?, ?)",
-        (script_id, feature_id, proj["id"], name, dest, now, created_by, json.dumps(var_keys_list)),
+        "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, "
+        "created_at, created_by, var_keys) "
+        "VALUES (?, ?, ?, 'web', ?, ?, 'UPLOADED', ?, ?, ?, ?)",
+        (script_id, feature_id, proj["id"], name, dest, language, now, created_by, json.dumps(var_keys_list)),
     )
     conn.commit()
     console.print(f"[green]✓[/green] Script imported: {name} [{script_id}]")
@@ -141,40 +128,6 @@ def script_import(file_path, name, feature_id):
     enqueue("script", script_id, "upsert")
     console.print(f"  Feature: {feat['name']}")
     console.print(f"  File: {dest}")
-
-
-@script.command("patch")
-def script_patch():
-    """Patch all existing scripts to support shared browser sessions."""
-    proj = get_active_project(console)
-    if not proj:
-        return
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT id, name, file_path FROM scripts WHERE project_id = ? AND channel = 'web'",
-        (proj["id"],),
-    ).fetchall()
-    if not rows:
-        console.print("No web scripts to patch.")
-        return
-    patched = 0
-    skipped = 0
-    for r in rows:
-        if not os.path.exists(r["file_path"]):
-            console.print(f"[yellow]⚠[/yellow] File missing: {r['name']} [{r['id']}]")
-            skipped += 1
-            continue
-        with open(r["file_path"], "r") as f:
-            content = f.read()
-        if "QACLAN_STORAGE_STATE" in content:
-            skipped += 1
-            continue
-        processed = inject_storage_state(content)
-        with open(r["file_path"], "w") as f:
-            f.write(processed)
-        patched += 1
-        console.print(f"[green]✓[/green] Patched: {r['name']} [{r['id']}]")
-    console.print(f"\nPatched: {patched}  Skipped (already patched or missing): {skipped}")
 
 
 @script.command("delete")

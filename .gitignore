@@ -56,3 +56,4 @@ docker-compose.override.yml
 openspec/
 .venv/
 venv/ 
+test-results/

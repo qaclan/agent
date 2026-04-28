@@ -9,8 +9,12 @@ QAClan Agent is a local-first Playwright test management CLI and web UI. It orga
 ## Commands
 
 ```bash
-# Install dependencies
+# Install Python dependencies
 pip install -r requirements.txt
+
+# Install JS/TS Playwright support (required to record/run JS or TS scripts)
+npm install -g playwright@1.58.0
+npx playwright install
 
 # Run CLI directly
 python qaclan.py --help
@@ -43,9 +47,10 @@ There are no automated tests or linting configured.
 **Cloud sync** (`cli/api.py`, `cli/sync.py`) — Best-effort REST calls to qaclan.com. Sync never blocks CLI operations; failures are silently caught. Tables have `cloud_id` columns for mapping local to remote entities.
 
 **Playwright integration:**
-- `cli/script_processor.py` — Post-processes Playwright codegen output to inject storage state management and network idle waits.
+- `cli/script_strategies/` — One strategy per language (Python and JavaScript; TypeScript pending). Each strategy owns the codegen target, harness template, URL-placeholder rewriting, and subprocess argv used at run time. Scripts are self-contained harnesses that read `QACLAN_*` env vars (state path, artifacts path, browser, headless, viewport) set by the runner.
+- **Runtime requirements:** Python scripts need `playwright` pip package (in `requirements.txt`). JS scripts need Node.js + `playwright` npm package installed globally (`npm install -g playwright@1.58.0`). `validate_runtime()` on each strategy checks these pre-flight and raises a clear error if missing.
 - Scripts stored as files in `~/.qaclan/scripts/` and referenced by the `scripts` table.
-- Test execution runs Playwright in a separate process.
+- Run execution (`web/routes/runs.py`): one subprocess per script under `~/.qaclan/runs/<run_id>/`. Shared `state.json` in that dir carries cookies / localStorage between scripts — the cross-language state mechanism. Per-script timeout is 300s.
 
 **Binary distribution:** Nuitka compiles to standalone binaries. `build.sh` handles platform-specific bundling. GitHub Actions (`.github/workflows/release.yml`) builds Linux/macOS binaries on version tags.
 

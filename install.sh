@@ -114,45 +114,43 @@ if ! command -v npm >/dev/null 2>&1; then
     info "Node.js installed."
 fi
 
-# Step 2: Install Playwright globally via npm
-info "Installing Playwright via npm..."
-npm install -g playwright@1.58.0 || error "Failed to install Playwright. Run manually: npm install -g playwright@1.58.0"
+# Step 2: Install Playwright + tsx globally via npm
+# tsx is required so TypeScript scripts can run via `npx tsx <script>` without
+# triggering a network-download on first run.
+info "Installing Playwright and tsx via npm..."
+# npm install -g playwright@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 tsx"
+npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
+
 
 if ! command -v playwright >/dev/null 2>&1; then
     error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
 fi
-info "Playwright installed."
+info "Playwright and tsx installed."
 
-# Step 3: Install Chromium system dependencies + browser
-info "Installing Chromium browser..."
+# Step 3: Install Chromium browser + system dependencies
+# `playwright install --with-deps` does both in one shot on Debian/Ubuntu:
+# downloads the browser to ~/.cache/ms-playwright AND installs the apt packages
+# Chromium links against (libnss3, libgstcodecparsers, libavif, libxkbcommon, …).
+# On macOS --with-deps is a no-op since Chromium's runtime libs ship with the OS.
+# On non-apt Linux (Fedora/Arch/Alpine) install-deps errors out — we fall back
+# to a plain `playwright install chromium` and warn the user to install libs
+# manually via their package manager.
+info "Installing Chromium browser and system dependencies..."
 
-# Install system deps separately (--with-deps can fail due to apt issues)
-case "$OS" in
-    linux)
-        if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get install -y -qq libnss3 libatk1.0-0 libatk-bridge2.0-0 \
-                libcups2 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-                libpango-1.0-0 libcairo2 libasound2 libxshmfence1 2>/dev/null || true
-        elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y nss atk at-spi2-atk cups-libs libXcomposite \
-                libXdamage libXrandr mesa-libgbm pango cairo alsa-lib 2>/dev/null || true
-        elif command -v yum >/dev/null 2>&1; then
-            sudo yum install -y nss atk at-spi2-atk cups-libs libXcomposite \
-                libXdamage libXrandr mesa-libgbm pango cairo alsa-lib 2>/dev/null || true
-        elif command -v apk >/dev/null 2>&1; then
-            sudo apk add --quiet nss cups-libs libxcomposite libxdamage \
-                libxrandr mesa-gbm pango cairo alsa-lib 2>/dev/null || true
-        elif command -v pacman >/dev/null 2>&1; then
-            sudo pacman -Sy --noconfirm nss cups libxcomposite libxdamage \
-                libxrandr mesa pango cairo alsa-lib 2>/dev/null || true
-        fi
-        ;;
-esac
-
-# Download the browser to default system location (~/.cache/ms-playwright)
-playwright install chromium || \
-    error "Failed to install Chromium. Run manually: playwright install chromium"
-info "Chromium browser installed."
+if [ "$OS" = "linux" ]; then
+    if sudo playwright install --with-deps chromium; then
+        info "Chromium and system dependencies installed."
+    else
+        warn "Could not auto-install system libs (unsupported distro?). Falling back to browser-only install."
+        playwright install chromium || \
+            error "Failed to install Chromium. Run manually: playwright install chromium"
+        warn "If Chromium fails to launch, install the libs reported by the error via your package manager."
+    fi
+else
+    playwright install chromium || \
+        error "Failed to install Chromium. Run manually: playwright install chromium"
+    info "Chromium browser installed."
+fi
 
 # Verify
 if command -v qaclan >/dev/null 2>&1; then
