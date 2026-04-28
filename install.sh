@@ -119,7 +119,7 @@ fi
 # triggering a network-download on first run.
 info "Installing Playwright and tsx via npm..."
 # npm install -g playwright@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 tsx"
-npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
+npm install -g @playwright/test@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
 
 
 if ! command -v playwright >/dev/null 2>&1; then
