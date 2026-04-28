@@ -159,7 +159,8 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "  }\n"
             "}\n"
             "if (_STATE && fs.existsSync(_STATE)) _use.storageState = _STATE;\n"
-            f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use }};\n"
+            f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use, "
+            f"timeout: 60000, expect: {{ timeout: 15000 }} }};\n"
         )
 
     def validate_runtime(self) -> None:
