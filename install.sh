@@ -4,6 +4,7 @@ set -e
 REPO="qaclan/agent"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="qaclan"
+PLAYWRIGHT_VERSION="1.58.0"
 
 # Colors
 RED='\033[0;31m'
@@ -78,83 +79,66 @@ else
 fi
 
 # ── Install Playwright ────────────────────────────────────────────────
-info "Installing Playwright..."
-
-# Step 1: Ensure Node.js + npm are available
-if ! command -v npm >/dev/null 2>&1; then
-    info "Node.js not found. Installing Node.js..."
-    case "$OS" in
-        macos)
-            if command -v brew >/dev/null 2>&1; then
-                brew install node
-            else
-                error "Homebrew is required to install Node.js on macOS. Install it from https://brew.sh then re-run this script."
-            fi
-            ;;
-        linux)
-            if command -v apt-get >/dev/null 2>&1; then
-                sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm
-            elif command -v dnf >/dev/null 2>&1; then
-                sudo dnf install -y nodejs npm
-            elif command -v yum >/dev/null 2>&1; then
-                sudo yum install -y nodejs npm
-            elif command -v apk >/dev/null 2>&1; then
-                sudo apk add --quiet nodejs npm
-            elif command -v pacman >/dev/null 2>&1; then
-                sudo pacman -Sy --noconfirm nodejs npm
-            else
-                error "Could not detect a supported package manager (apt, dnf, yum, apk, pacman). Install Node.js manually and re-run this script."
-            fi
-            ;;
-    esac
-
-    if ! command -v npm >/dev/null 2>&1; then
-        error "Node.js installation failed. Install Node.js manually and re-run this script."
-    fi
-    info "Node.js installed."
+# Hard prerequisites: Node.js (with npm) and Python 3 (with pip). The qaclan
+# binary no longer bundles a Playwright runtime — it shells out to system
+# Node for JS/TS scripts and system Python for Python scripts.
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    error "Node.js (with npm) is required. Install Node.js 18+ from https://nodejs.org or your distro package manager, then re-run."
+fi
+if ! command -v python3 >/dev/null 2>&1; then
+    error "Python 3 is required. Install python3 + pip from your distro package manager, then re-run."
+fi
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    error "pip is required for python3. Install it (e.g. 'sudo apt-get install python3-pip') and re-run."
 fi
 
-# Step 2: Install Playwright + tsx globally via npm
-# tsx is required so TypeScript scripts can run via `npx tsx <script>` without
-# triggering a network-download on first run.
-info "Installing Playwright and tsx via npm..."
-# npm install -g playwright@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 tsx"
-npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx || error "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
-
+# Install npm Playwright + @playwright/test + tsx at the pinned version.
+info "Installing Playwright ${PLAYWRIGHT_VERSION} (npm: playwright + @playwright/test + tsx)..."
+npm install -g \
+    "playwright@${PLAYWRIGHT_VERSION}" \
+    "@playwright/test@${PLAYWRIGHT_VERSION}" \
+    tsx \
+    || error "npm install failed. Run manually: npm install -g playwright@${PLAYWRIGHT_VERSION} @playwright/test@${PLAYWRIGHT_VERSION} tsx"
 
 if ! command -v playwright >/dev/null 2>&1; then
     error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
 fi
-info "Playwright and tsx installed."
 
-# Step 3: Install Chromium browser + system dependencies
-# `playwright install --with-deps` does both in one shot on Debian/Ubuntu:
-# downloads the browser to ~/.cache/ms-playwright AND installs the apt packages
-# Chromium links against (libnss3, libgstcodecparsers, libavif, libxkbcommon, …).
-# On macOS --with-deps is a no-op since Chromium's runtime libs ship with the OS.
-# On non-apt Linux (Fedora/Arch/Alpine) install-deps errors out — we fall back
-# to a plain `playwright install chromium` and warn the user to install libs
-# manually via their package manager.
-info "Installing Chromium browser and system dependencies..."
+# Install pip Playwright at the pinned version. --break-system-packages handles
+# PEP 668 distros (Debian 12+, Ubuntu 24.04+); fall back to plain --user on
+# older pip that doesn't recognize the flag.
+info "Installing Playwright ${PLAYWRIGHT_VERSION} (pip)..."
+if ! python3 -m pip install --user --break-system-packages "playwright==${PLAYWRIGHT_VERSION}" 2>/dev/null; then
+    python3 -m pip install --user "playwright==${PLAYWRIGHT_VERSION}" \
+        || error "pip install failed. Run manually: pip install --user playwright==${PLAYWRIGHT_VERSION}"
+fi
+info "Playwright (npm + pip) and tsx installed."
+
+# Install all browsers + system dependencies. One install via the npm
+# Playwright populates ~/.cache/ms-playwright; Python's pip-installed
+# Playwright reads from the same cache, so no second download.
+info "Installing all Playwright browsers (chromium, firefox, webkit) and system dependencies..."
 
 if [ "$OS" = "linux" ]; then
-    if sudo playwright install --with-deps chromium; then
-        info "Chromium and system dependencies installed."
+    if sudo playwright install --with-deps chromium firefox webkit; then
+        info "Browsers + system dependencies installed."
     else
         warn "Could not auto-install system libs (unsupported distro?). Falling back to browser-only install."
-        playwright install chromium || \
-            error "Failed to install Chromium. Run manually: playwright install chromium"
-        warn "If Chromium fails to launch, install the libs reported by the error via your package manager."
+        playwright install chromium firefox webkit || \
+            error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
+        warn "If a browser fails to launch, install the libs reported in the error via your package manager."
     fi
 else
-    playwright install chromium || \
-        error "Failed to install Chromium. Run manually: playwright install chromium"
-    info "Chromium browser installed."
+    playwright install chromium firefox webkit || \
+        error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
+    info "Browsers installed."
 fi
 
 # Verify
 if command -v qaclan >/dev/null 2>&1; then
     info "qaclan installed successfully!"
+    echo ""
+    echo "  Prerequisites: Node.js 18+ and Python 3.8+ (verified above)."
     echo ""
     echo "  Get started:"
     echo "    qaclan login          # Authenticate with your API key"

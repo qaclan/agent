@@ -20,40 +20,40 @@ Create an account at [qaclan.com](https://qaclan.com) and copy your auth key fro
 
 ### 2. Install the agent
 
-**Linux / macOS:**
+**Linux / macOS (one-liner — installs everything):**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/qaclan/agent/master/install.sh | sh
 ```
 
-Supports Linux (amd64) and macOS (arm64).
+The installer downloads the `qaclan` binary **and** sets up Playwright end-to-end:
+
+- npm: `playwright`, `@playwright/test`, `tsx` (for JS / TS scripts)
+- pip: `playwright` (for Python scripts)
+- All three browsers: **Chromium, Firefox, WebKit** + Linux system libraries
+
+Prerequisites it expects already on your machine: **Node.js 18+** (with `npm`) and **Python 3.8+** (with `pip`). Install those first if missing. Supports Linux (amd64) and macOS (arm64).
 
 **Windows (amd64 / arm64):**
 
-QAClan ships a standalone `.exe` — no Python required. Pick the build that matches your CPU:
+QAClan ships a standalone `.exe`. Pick the build that matches your CPU:
 
 - Intel/AMD 64-bit → [`qaclan-windows-amd64.exe`](https://github.com/qaclan/agent/releases/latest/download/qaclan-windows-amd64.exe)
 - ARM64 (Surface Pro X, Copilot+ PCs) → [`qaclan-windows-arm64.exe`](https://github.com/qaclan/agent/releases/latest/download/qaclan-windows-arm64.exe)
 
-Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest).
+Or grab the latest from the [releases page](https://github.com/qaclan/agent/releases/latest). After downloading, open **PowerShell** in the folder containing the `.exe`.
 
-After downloading, open **PowerShell** in the folder containing the `.exe` and run the commands below from there.
-
-**Install Playwright:**
-
-The Windows binary uses your system-installed Playwright instead of bundling it. Install Node.js from [nodejs.org](https://nodejs.org/) (LTS), then in PowerShell:
+The Windows binary uses your system-installed Playwright. Install [Node.js LTS](https://nodejs.org/) and [Python 3.8+](https://www.python.org/downloads/), then in PowerShell:
 
 ```powershell
-npm install -g playwright@1.58.0
-playwright install chromium
-```
+# JS / TS support
+npm install -g playwright@1.58.0 "@playwright/test@1.58.0" tsx
 
-**Recording or running JavaScript / TypeScript scripts** requires Node.js and the Playwright npm package regardless of OS:
+# Python support
+pip install playwright==1.58.0
 
-```bash
-# Install Node.js from https://nodejs.org (LTS), then:
-npm install -g playwright@1.58.0
-npx playwright install
+# All browsers (Chromium, Firefox, WebKit)
+playwright install
 ```
 
 > **SmartScreen note:** Windows may warn that the binary is from an unknown publisher the first time you run it. Click **More info → Run anyway**, or unblock it with `Unblock-File .\qaclan.exe` in PowerShell.
