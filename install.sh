@@ -100,8 +100,16 @@ npm install -g \
     tsx \
     || error "npm install failed. Run manually: npm install -g playwright@${PLAYWRIGHT_VERSION} @playwright/test@${PLAYWRIGHT_VERSION} tsx"
 
-if ! command -v playwright >/dev/null 2>&1; then
-    error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
+# Resolve a runner for the playwright CLI: prefer the bin on PATH, fall back
+# to `npx playwright` (works even when the global npm bin dir isn't on PATH,
+# which is common under sudo + nvm).
+if command -v playwright >/dev/null 2>&1; then
+    PW_RUN="playwright"
+elif command -v npx >/dev/null 2>&1; then
+    PW_RUN="npx --no-install playwright"
+    warn "playwright bin not on PATH; using 'npx playwright' instead."
+else
+    error "Neither 'playwright' nor 'npx' is available. Check your Node.js install."
 fi
 
 # Install pip Playwright at the pinned version. --break-system-packages handles
@@ -120,17 +128,19 @@ info "Playwright (npm + pip) and tsx installed."
 info "Installing all Playwright browsers (chromium, firefox, webkit) and system dependencies..."
 
 if [ "$OS" = "linux" ]; then
-    if sudo playwright install --with-deps chromium firefox webkit; then
+    # sudo strips PATH; pass it through so $PW_RUN (which may be `npx ...`)
+    # can locate node/npx/playwright via nvm or other PATH setups.
+    if sudo env "PATH=$PATH" $PW_RUN install --with-deps chromium firefox webkit; then
         info "Browsers + system dependencies installed."
     else
         warn "Could not auto-install system libs (unsupported distro?). Falling back to browser-only install."
-        playwright install chromium firefox webkit || \
-            error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
+        $PW_RUN install chromium firefox webkit || \
+            error "Failed to install browsers. Run manually: npx playwright install chromium firefox webkit"
         warn "If a browser fails to launch, install the libs reported in the error via your package manager."
     fi
 else
-    playwright install chromium firefox webkit || \
-        error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
+    $PW_RUN install chromium firefox webkit || \
+        error "Failed to install browsers. Run manually: npx playwright install chromium firefox webkit"
     info "Browsers installed."
 fi
 
