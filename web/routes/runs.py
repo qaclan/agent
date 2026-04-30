@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import time
 import logging
@@ -114,8 +115,21 @@ def get_run(run_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _cleanup_run_dir(run_dir):
+    """Remove the per-run working directory once data has been persisted to DB.
+    Errors are swallowed — a stale run_dir is a disk-space issue, not a
+    correctness issue, and the user already has the result they care about."""
+    if not run_dir:
+        return
+    try:
+        shutil.rmtree(run_dir, ignore_errors=True)
+    except Exception as e:
+        logger.warning("Failed to cleanup run_dir %s: %s", run_dir, e)
+
+
 @bp.route('/api/runs', methods=['POST'])
 def execute_run():
+    run_dir = None
     try:
         project_id = _require_active_project()
         if not project_id:
@@ -152,7 +166,7 @@ def execute_run():
 
         items = conn.execute(
             "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.source, sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
+            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -218,6 +232,14 @@ def execute_run():
         SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
         state_file = run_dir / "state.json"  # created on first script's exit
 
+        # Per-language, per-run setup. _test strategies write a single shared
+        # playwright.config.js here so each script doesn't rewrite it.
+        for lang in languages_in_suite:
+            try:
+                get_strategy(lang).setup_run_dir(str(run_dir))
+            except Exception as e:
+                logger.warning("execute_run: setup_run_dir failed for language %s: %s", lang, e)
+
         total = len(items)
         passed = 0
         failed = 0
@@ -266,16 +288,13 @@ def execute_run():
 
             try:
                 strategy = get_strategy(language)
-                db_source = item["source"] or ""
-                if db_source and db_source not in ("WEB_CREATED", "CLI_RECORDED"):
-                    source = db_source
-                else:
-                    # Legacy rows pre-date source storage — fall back to file.
-                    script_path = item["file_path"]
-                    if not os.path.exists(script_path):
-                        raise FileNotFoundError(f"Script file not found: {script_path}")
-                    with open(script_path, "r") as f:
-                        source = f.read()
+                # File at file_path is the single source of truth for script
+                # body. The DB source column is legacy and may be stale or a
+                # sentinel ("PULLED", "WEB_CREATED", "CLI_RECORDED").
+                script_path = item["file_path"]
+                if not script_path or not os.path.exists(script_path):
+                    raise FileNotFoundError(f"Script file not found: {script_path}")
+                source = Path(script_path).read_text()
 
                 # Resolve {{KEY}} placeholders against the selected env (with
                 # recorded start-URL fallback). Values are escaped for the
@@ -283,7 +302,8 @@ def execute_run():
                 # the string literal and inject code.
                 try:
                     script_var_keys = json.loads(item["var_keys"] or "[]")
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
+                    print("execute_run: %s — invalid var_keys: %s -  error: %s", item["script_name"], item["var_keys"], e)
                     script_var_keys = []
                 if script_var_keys:
                     source, subs_warnings = substitute_template_vars(
@@ -489,3 +509,9 @@ def execute_run():
     except Exception as e:
         logger.error("execute_run: top-level exception: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        # All console_errors / network_failures / screenshots already in DB
+        # or SCREENSHOTS_DIR. Run_dir contents (rendered scripts, state.json,
+        # *.artifacts.json, playwright.config.js) are disposable. Drop the
+        # directory regardless of success/failure path.
+        _cleanup_run_dir(run_dir)

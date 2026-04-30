@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from typing import List
 
+from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 
 
@@ -30,8 +31,9 @@ _HARNESS_TEMPLATE = """\
 const { test, expect } = require('@playwright/test');
 const fs = require('fs');
 
-const _STATE     = process.env.QACLAN_STORAGE_STATE || '';
-const _ARTIFACTS = process.env.QACLAN_ARTIFACTS_PATH || '';
+const _STATE      = process.env.QACLAN_STORAGE_STATE || '';
+const _ARTIFACTS  = process.env.QACLAN_ARTIFACTS_PATH || '';
+const _SCREENSHOT = process.env.QACLAN_SCREENSHOT_PATH || '';
 
 const _consoleErrors = [];
 const _networkFailures = [];
@@ -53,6 +55,11 @@ test('qaclan', async ({ page, context }) => {
   });
   try {
 {ACTIONS}
+  } catch (err) {
+    if (_SCREENSHOT) {
+      try { await page.screenshot({ path: _SCREENSHOT }); } catch (_) {}
+    }
+    throw err;
   } finally {
     if (_STATE) {
       try { await context.storageState({ path: _STATE }); } catch (_) {}
@@ -89,14 +96,24 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         actions = self._patch_goto_wait(actions)
         return self._render_harness(actions)
 
+    def setup_run_dir(self, run_dir: str) -> None:
+        # Drop one shared playwright.config.js for the whole run. Content is
+        # identical across scripts in the run (same testDir, same _use
+        # template) so writing it per-script wastes I/O. Called once per
+        # unique strategy from web/routes/runs.py before the script loop.
+        config_path = os.path.join(run_dir, "playwright.config.js")
+        with open(config_path, "w") as f:
+            f.write(self._render_config(run_dir))
+
     def build_run_command(self, script_path: str) -> List[str]:
         # playwright test treats the path argument as a regex filter against
         # discovered files. It scans testDir (default: CWD) so the script
         # living in ~/.qaclan/runs/<id>/ is never found unless we point
         # testDir at its directory via a minimal config written alongside it.
-        # The same config carries browserName / headless / viewport /
-        # storageState so the harness does not need test.use() at module
-        # scope (which is fragile under multi-instance module resolution).
+        # The shared config (written once by setup_run_dir) carries
+        # browserName / headless / viewport / storageState so the harness
+        # does not need test.use() at module scope (which is fragile under
+        # multi-instance module resolution).
         #
         # We invoke @playwright/test's cli.js directly via `node` instead of
         # `npx playwright test`. Both `playwright` and `@playwright/test`
@@ -111,8 +128,6 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         # instance the spec resolves to.
         script_dir = os.path.dirname(os.path.abspath(script_path))
         config_path = os.path.join(script_dir, "playwright.config.js")
-        with open(config_path, "w") as f:
-            f.write(self._render_config(script_dir))
         cli_path = self._resolve_pwtest_cli()
         return ["node", cli_path, "test", script_path, "--reporter=line", "--config", config_path]
 
@@ -150,7 +165,7 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "const _HEADLESS = process.env.QACLAN_HEADLESS !== '0';\n"
             "const _VIEWPORT = process.env.QACLAN_VIEWPORT || '';\n"
             "const _STATE    = process.env.QACLAN_STORAGE_STATE || '';\n"
-            "const _use = { browserName: _BROWSER, headless: _HEADLESS };\n"
+            "const _use = { browserName: _BROWSER, headless: _HEADLESS, channel: 'chromium' };\n"
             "if (_VIEWPORT) {\n"
             "  const _vp = _VIEWPORT.split('x');\n"
             "  if (_vp.length === 2) {\n"
@@ -160,7 +175,7 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "}\n"
             "if (_STATE && fs.existsSync(_STATE)) _use.storageState = _STATE;\n"
             f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use, "
-            f"timeout: 60000, expect: {{ timeout: 15000 }} }};\n"
+            f"timeout: 60000, expect: {{ timeout: {ScriptStrategy.expect_timeout} }} }};\n"
         )
 
     def validate_runtime(self) -> None:

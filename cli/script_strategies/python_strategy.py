@@ -91,7 +91,7 @@ def run():
         context = browser.new_context(**_context_opts())
         page = context.new_page()
         page.set_default_timeout(30000)
-        expect.set_options(timeout=15000)
+        expect.set_options(timeout={expect_timeout})
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
         page.on("requestfailed", _on_requestfailed)
@@ -134,8 +134,10 @@ if __name__ == "__main__":
     finally:
         _write_artifacts()
     sys.exit(exit_code)
-'''
-
+'''.replace(
+    "{expect_timeout}",
+    str(ScriptStrategy.expect_timeout)
+)
 
 class PythonStrategy(ScriptStrategy):
     language = "python"
