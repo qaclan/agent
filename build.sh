@@ -40,10 +40,11 @@ python -m nuitka $ONEFILE_FLAG \
   --output-filename="$OUTPUT_NAME" \
   --output-dir=dist \
   --jobs="$JOBS" \
-  --lto=no \
+  --lto=yes \
   --assume-yes-for-downloads \
-  --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle \
-  --noinclude-data-files='playwright/driver/**' \
+  --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle,playwright,pygments,markdown_it,mdurl,IPython,docutils,babel,asyncio,_codecs_cn,_codecs_hk,_codecs_iso2022,_codecs_jp,_codecs_kr,_codecs_tw,_multibytecodec \
+  --noinclude-data-files='playwright/**' \
+  --noinclude-data-files='pygments/**' \
   --include-package=rich \
   --include-data-dir=web/static=web/static \
   qaclan.py

@@ -19,7 +19,8 @@ echo ""
 echo "This will remove:"
 echo "  - qaclan binary from ${INSTALL_DIR}/${BINARY_NAME}"
 echo "  - qaclan data directory: ${DATA_DIR}"
-echo "  - Playwright (global npm package)"
+echo "  - Playwright npm packages (playwright, @playwright/test, tsx)"
+echo "  - Playwright pip package"
 echo "  - Playwright browsers (~/.cache/ms-playwright)"
 echo ""
 printf "Continue? [y/N] "
@@ -61,17 +62,33 @@ else
     warn "Playwright browser cache not found at ${PW_CACHE}, skipping."
 fi
 
-# ── Uninstall Playwright npm package ─────────────────────────────────
+# ── Uninstall Playwright npm packages ────────────────────────────────
 if command -v npm >/dev/null 2>&1; then
-    if npm list -g playwright >/dev/null 2>&1; then
-        info "Uninstalling Playwright (npm global)..."
-        npm uninstall -g playwright
-        info "Playwright uninstalled."
+    for pkg in playwright @playwright/test tsx; do
+        if npm list -g "$pkg" >/dev/null 2>&1; then
+            info "Uninstalling ${pkg} (npm global)..."
+            npm uninstall -g "$pkg" || warn "Failed to uninstall ${pkg}, continuing."
+        else
+            warn "${pkg} not found globally, skipping."
+        fi
+    done
+else
+    warn "npm not found, skipping npm package removal."
+fi
+
+# ── Uninstall Playwright pip package ─────────────────────────────────
+if command -v python3 >/dev/null 2>&1 && python3 -m pip --version >/dev/null 2>&1; then
+    if python3 -m pip show playwright >/dev/null 2>&1; then
+        info "Uninstalling Playwright (pip)..."
+        if ! python3 -m pip uninstall -y --break-system-packages playwright >/dev/null 2>&1; then
+            python3 -m pip uninstall -y playwright || warn "Failed to uninstall pip playwright, continuing."
+        fi
+        info "pip Playwright uninstalled."
     else
-        warn "Playwright npm package not found globally, skipping."
+        warn "pip Playwright not installed, skipping."
     fi
 else
-    warn "npm not found, skipping Playwright package removal."
+    warn "python3/pip not found, skipping pip package removal."
 fi
 
 echo ""
