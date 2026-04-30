@@ -6,6 +6,7 @@ from rich.console import Console
 from cli.config import get_auth_key, set_active_project_id, get_active_project_id, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli import api
+from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 
 console = Console()
 
@@ -96,10 +97,23 @@ def pull_workspace():
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
     for s in data.get("scripts", []):
         cloud_id = s["id"]
+        # Pulled scripts inherit the cloud row's language. Default to python
+        # for back-compat with older cloud rows that pre-date the column.
+        language = (s.get("language") or "python").strip()
+        if language not in SUPPORTED_LANGUAGES:
+            console.print(f"  [yellow]⚠[/yellow] Script skipped (unsupported language '{language}'): {s['name']}")
+            continue
+        start_url_key: str = s.get("start_url_key")
+        start_url_value: str = s.get("start_url_value")
+        # var_keys: list[str] = s.get("var_keys") or []
+        var_keys: str =  "[" + ",".join(s.get("var_keys") or []) + "]"
+
+        ext = get_strategy(language).file_extension
         existing = conn.execute("SELECT id, file_path FROM scripts WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
-            # Update name and file content
-            conn.execute("UPDATE scripts SET name = ? WHERE id = ?", (s["name"], existing["id"]))
+            # Update name and file content and start_url_key, start_url_value and var_keys also.
+            conn.execute("UPDATE scripts SET name = ?, start_url_key= ?, start_url_value = ?, var_keys = ? WHERE id = ?", 
+                         (s["name"], start_url_key, start_url_value, var_keys, existing["id"]))
             file_content = s.get("file_content")
             if file_content and existing["file_path"]:
                 with open(existing["file_path"], "w") as fp:
@@ -116,14 +130,14 @@ def pull_workspace():
                 console.print(f"  [yellow]⚠[/yellow] Script skipped (no content): {s['name']}")
                 continue
             local_id = generate_id("script")
-            file_path = os.path.join(SCRIPTS_DIR, f"{local_id}.py")
+            file_path = os.path.join(SCRIPTS_DIR, f"{local_id}{ext}")
             with open(file_path, "w") as fp:
                 fp.write(file_content)
             created_by = s.get("created_by")
             conn.execute(
-                "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, created_at, cloud_id, created_by) "
-                "VALUES (?, ?, ?, 'web', ?, ?, 'PULLED', ?, ?, ?)",
-                (local_id, local_feature_id, local_project_id, s["name"], file_path, now, cloud_id, created_by),
+                "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, created_at, cloud_id, created_by, start_url_key, start_url_value, var_keys) "
+                "VALUES (?, ?, ?, 'web', ?, ?, 'PULLED', ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_feature_id, local_project_id, s["name"], file_path, language, now, cloud_id, created_by, start_url_key, start_url_value, var_keys),
             )
             script_map[s.get("cli_script_id", cloud_id)] = local_id
             counts["scripts"] += 1
