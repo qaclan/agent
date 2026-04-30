@@ -22,6 +22,7 @@ class ScriptStrategy(ABC):
     language: str = ""
     codegen_target: str = ""
     file_extension: str = ""
+    expect_timeout: int = 7000
 
     @abstractmethod
     def post_process_recording(self, raw: str) -> str:
@@ -59,6 +60,13 @@ class ScriptStrategy(ABC):
         """Return extra environment variables to inject into the script subprocess.
         Override in language strategies that need runtime-specific env (e.g. NODE_PATH)."""
         return {}
+
+    def setup_run_dir(self, run_dir: str) -> None:
+        """Per-suite-run, per-language setup. Called once after run_dir is
+        created, before any script in that language runs. Override to drop
+        shared files (e.g. playwright.config.js) that all scripts in the run
+        will share."""
+        return None
 
     def escape_for_literal(self, value: str) -> str:
         """Escape ``value`` so it can be safely spliced into a string literal

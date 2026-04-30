@@ -23,8 +23,9 @@ _HARNESS_TEMPLATE = """\
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 
-const _STATE     = process.env['QACLAN_STORAGE_STATE'] ?? '';
-const _ARTIFACTS = process.env['QACLAN_ARTIFACTS_PATH'] ?? '';
+const _STATE      = process.env['QACLAN_STORAGE_STATE'] ?? '';
+const _ARTIFACTS  = process.env['QACLAN_ARTIFACTS_PATH'] ?? '';
+const _SCREENSHOT = process.env['QACLAN_SCREENSHOT_PATH'] ?? '';
 
 const _consoleErrors: Array<{ type: string; text: string }> = [];
 const _networkFailures: Array<{ url: string; method: string; failure: string | null }> = [];
@@ -46,6 +47,11 @@ test('qaclan', async ({ page, context }) => {
   });
   try {
 {ACTIONS}
+  } catch (err) {
+    if (_SCREENSHOT) {
+      try { await page.screenshot({ path: _SCREENSHOT }); } catch (_) {}
+    }
+    throw err;
   } finally {
     if (_STATE) {
       try { await context.storageState({ path: _STATE }); } catch (_) {}
