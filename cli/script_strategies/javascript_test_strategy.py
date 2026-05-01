@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from typing import List
 
+from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 
@@ -132,6 +133,12 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         return ["node", cli_path, "test", script_path, "--reporter=line", "--config", config_path]
 
     def _resolve_pwtest_cli(self) -> str:
+        # Prefer isolated runtime cli.js.
+        runtime_cli = runtime_setup.resolve_pwtest_cli()
+        if runtime_cli is not None:
+            return str(runtime_cli)
+        # Fallback: global. Warn deprecation.
+        runtime_setup.emit_deprecation_warning()
         npm = shutil.which("npm")
         if not npm:
             raise RuntimeError(
@@ -148,7 +155,8 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         if not os.path.exists(cli):
             raise RuntimeError(
                 f"@playwright/test cli.js not found at {cli}. "
-                "Install it globally: npm install -g @playwright/test@1.58.0"
+                "Run: qaclan setup --runtime-only "
+                "(or install globally: npm install -g @playwright/test@1.58.0)"
             )
         return cli
 
@@ -184,17 +192,11 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
                 "Node.js is required to run playwright/test scripts. "
                 "Install Node.js from https://nodejs.org and ensure 'node' is on PATH."
             )
-        result = subprocess.run(
-            ["node", "-e", "require('@playwright/test')"],
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "The '@playwright/test' npm package is not installed or not reachable "
-                "from Node.js. Install it globally: npm install -g @playwright/test\n"
-                "Then install browser binaries: npx playwright install"
-            )
+        # node's require() does not search npm's global root by default —
+        # `node -e "require('@playwright/test')"` returns non-zero even when
+        # the package is correctly installed via `npm install -g`. Resolve
+        # the absolute cli.js path instead (same lookup used at run time).
+        self._resolve_pwtest_cli()
 
     # ---- internals ----
 

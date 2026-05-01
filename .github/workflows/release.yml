@@ -145,6 +145,7 @@ jobs:
             --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle `
             --include-package=rich `
             --include-data-dir=web/static=web/static `
+            --include-data-dir=cli/runtime_assets=cli/runtime_assets `
             --windows-console-mode=force `
             qaclan.py
 
@@ -192,6 +193,7 @@ jobs:
             --nofollow-import-to=tkinter,unittest,test,setuptools,pip,distutils,pydoc,doctest,xmlrpc,lib2to3,ensurepip,idlelib,turtle `
             --include-package=rich `
             --include-data-dir=web/static=web/static `
+            --include-data-dir=cli/runtime_assets=cli/runtime_assets `
             --windows-console-mode=force `
             qaclan.py
 

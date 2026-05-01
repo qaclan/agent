@@ -4,7 +4,6 @@ set -e
 REPO="qaclan/agent"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="qaclan"
-PLAYWRIGHT_VERSION="1.58.0"
 
 # Colors
 RED='\033[0;31m'
@@ -78,18 +77,17 @@ else
     sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 fi
 
-# ── Install Playwright ────────────────────────────────────────────────
-# Hard prerequisites: Node.js (with npm) and Python 3 (with pip). The qaclan
-# binary no longer bundles a Playwright runtime — it shells out to system
-# Node for JS/TS scripts and system Python for Python scripts.
+# ── Provision isolated runtime ────────────────────────────────────────
+# qaclan provisions an isolated runtime under ~/.qaclan/runtime/ (Node deps +
+# Python venv + Chromium). Hard prerequisites: Node.js (with npm) + Python 3.
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     error "Node.js (with npm) is required. Install Node.js 18+ from https://nodejs.org or your distro package manager, then re-run."
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-    error "Python 3 is required. Install python3 + pip from your distro package manager, then re-run."
+    error "Python 3 is required. Install python3 + venv from your distro package manager, then re-run."
 fi
-if ! python3 -m pip --version >/dev/null 2>&1; then
-    error "pip is required for python3. Install it (e.g. 'sudo apt-get install python3-pip') and re-run."
+if ! python3 -m venv --help >/dev/null 2>&1; then
+    error "python3 venv module missing. Install it (e.g. 'sudo apt-get install python3-venv') and re-run."
 fi
 
 # Install npm Playwright + @playwright/test + tsx at the pinned version.
@@ -143,6 +141,11 @@ else
         error "Failed to install browsers. Run manually: npx playwright install chromium firefox webkit"
     info "Browsers installed."
 fi
+
+# Hand off to binary: provision ~/.qaclan/runtime/ (npm install + venv + Chromium).
+info "Initializing qaclan runtime (npm install + venv + Chromium)..."
+qaclan setup --runtime-only \
+    || error "Runtime setup failed. Re-run manually: qaclan setup --runtime-only"
 
 # Verify
 if command -v qaclan >/dev/null 2>&1; then
