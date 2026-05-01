@@ -7,14 +7,18 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
+import sys
 from typing import List
 
 from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
+
+logger = logging.getLogger("qaclan.script_strategies.javascript")
 
 
 _BEGIN_MARKER = "// BEGIN ACTIONS"

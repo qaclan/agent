@@ -12,6 +12,7 @@ from pathlib import Path
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, QACLAN_DIR
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
+from cli.runtime_setup import RUNTIME_DIR
 from cli.crypto import decrypt
 from cli.script_strategies import get_strategy
 from cli.script_strategies._shared import substitute_template_vars
@@ -20,7 +21,7 @@ logger = logging.getLogger("qaclan.runs")
 
 bp = Blueprint('runs', __name__)
 
-RUNS_DIR = Path(QACLAN_DIR) / "runs"
+RUNS_DIR = RUNTIME_DIR / "runs"
 SCREENSHOTS_DIR = Path(QACLAN_DIR) / "screenshots"
 PER_SCRIPT_TIMEOUT_SEC = 300  # 5 minutes per script before kill
 
