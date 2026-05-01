@@ -15,6 +15,7 @@ import sys
 from typing import List
 
 from cli.runtime import is_frozen_binary
+from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
 
 
@@ -192,7 +193,12 @@ class PythonStrategy(ScriptStrategy):
     # ---- internals ----
 
     def _resolve_python_executable(self) -> str:
+        # Prefer isolated runtime venv first.
+        venv_py = runtime_setup.resolve_venv_python()
+        if venv_py is not None:
+            return str(venv_py)
         if is_frozen_binary():
+            runtime_setup.emit_deprecation_warning()
             # Windows: prefer `py` launcher first. Reasons:
             #   1. Many Windows installs leave the real `python.exe` off PATH
             #      (installer's "Add to PATH" checkbox is opt-in).

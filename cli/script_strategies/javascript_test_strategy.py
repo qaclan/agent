@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from typing import List
 
+from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 
@@ -132,6 +133,12 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         return ["node", cli_path, "test", script_path, "--reporter=line", "--config", config_path]
 
     def _resolve_pwtest_cli(self) -> str:
+        # Prefer isolated runtime cli.js.
+        runtime_cli = runtime_setup.resolve_pwtest_cli()
+        if runtime_cli is not None:
+            return str(runtime_cli)
+        # Fallback: global. Warn deprecation.
+        runtime_setup.emit_deprecation_warning()
         npm = shutil.which("npm")
         if not npm:
             raise RuntimeError(
@@ -148,7 +155,8 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         if not os.path.exists(cli):
             raise RuntimeError(
                 f"@playwright/test cli.js not found at {cli}. "
-                "Install it globally: npm install -g @playwright/test@1.58.0"
+                "Run: qaclan setup --runtime-only "
+                "(or install globally: npm install -g @playwright/test@1.58.0)"
             )
         return cli
 

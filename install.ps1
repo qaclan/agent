@@ -86,10 +86,10 @@ if ($userPath -notlike "*$InstallDir*") {
     Warn "Restart your terminal for PATH changes to take effect."
 }
 
-# ── Install Node.js ──────────────────────────────────────────────────
+# ── Ensure Node.js + Python3 ─────────────────────────────────────────
 function Test-Cmd { param($name) [bool](Get-Command $name -ErrorAction SilentlyContinue) }
 
-$skipPlaywright = $false
+$skipRuntime = $false
 
 if (-not (Test-Cmd 'npm')) {
     Warn "Node.js not found. Required for Playwright JS/TS script support."
@@ -103,47 +103,46 @@ if (-not (Test-Cmd 'npm')) {
         } else {
             Fail "Neither winget nor choco found. Install Node.js manually from https://nodejs.org and re-run this script."
         }
-        # Refresh PATH so npm visible in current session
         $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
         if (-not (Test-Cmd 'npm')) {
-            Warn "Node.js installed but npm not on PATH yet. Open a new terminal and re-run to install Playwright."
-            $skipPlaywright = $true
+            Warn "Node.js installed but npm not on PATH yet. Open a new terminal and re-run."
+            $skipRuntime = $true
         }
     } else {
-        Warn "Skipping Node.js. Playwright JS/TS scripts will not run until Node.js is installed."
-        $skipPlaywright = $true
+        Warn "Skipping Node.js. Playwright JS/TS scripts will not run until Node.js installed."
+        $skipRuntime = $true
     }
 }
 
-# ── Install Playwright + tsx ─────────────────────────────────────────
-if (-not $skipPlaywright) {
-    if (Confirm-YesNo "Install Playwright 1.58.0 + tsx globally via npm?" 'yes') {
-        Info "Installing Playwright and tsx..."
-        npm install -g playwright@1.58.0 '@playwright/test@1.58.0' tsx
-        if ($LASTEXITCODE -ne 0) {
-            Fail "Failed to install Playwright/tsx. Run manually: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
-        }
-
-        if (-not (Test-Cmd 'playwright')) {
-            Warn "Playwright installed but not found on PATH. Check npm global bin: npm bin -g"
+if (-not (Test-Cmd 'python') -and -not (Test-Cmd 'py')) {
+    Warn "Python 3 not found. Required for Python Playwright scripts."
+    if (Confirm-YesNo "Install Python 3 now?" 'yes') {
+        if (Test-Cmd 'winget') {
+            Info "Installing Python via winget..."
+            winget install --silent --accept-source-agreements --accept-package-agreements -e --id Python.Python.3.12
+        } elseif (Test-Cmd 'choco') {
+            Info "Installing Python via Chocolatey..."
+            choco install python -y
         } else {
-            Info "Playwright and tsx installed."
-
-            # ── Install Chromium ─────────────────────────────────────
-            if (Confirm-YesNo "Install Chromium browser for Playwright?" 'yes') {
-                Info "Installing Chromium..."
-                playwright install chromium
-                if ($LASTEXITCODE -ne 0) {
-                    Warn "Failed to install Chromium. Run manually: playwright install chromium"
-                } else {
-                    Info "Chromium installed."
-                }
-            } else {
-                Warn "Skipped Chromium. Run later: playwright install chromium"
-            }
+            Fail "Neither winget nor choco found. Install Python 3 manually from https://www.python.org/downloads/ and re-run."
+        }
+        $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')
+        if (-not (Test-Cmd 'python') -and -not (Test-Cmd 'py')) {
+            Warn "Python installed but not on PATH. Open new terminal and re-run."
+            $skipRuntime = $true
         }
     } else {
-        Warn "Skipped Playwright. Run later: npm install -g playwright@1.58.0 @playwright/test@1.58.0 tsx"
+        Warn "Skipping Python 3. Python scripts will not run until installed."
+        $skipRuntime = $true
+    }
+}
+
+# ── Provision isolated runtime via qaclan setup --runtime-only ───────
+if (-not $skipRuntime) {
+    Info "Initializing qaclan runtime (npm install + venv + Chromium)..."
+    & $targetPath setup --runtime-only
+    if ($LASTEXITCODE -ne 0) {
+        Warn "Runtime setup failed. Re-run manually: qaclan setup --runtime-only"
     }
 }
 

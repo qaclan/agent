@@ -3,6 +3,7 @@ load_dotenv()
 
 import click
 import os
+import subprocess
 import sys
 
 from cli.db import init_db
@@ -181,6 +182,91 @@ def serve(port, host, no_browser):
     if not no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     app.run(host=host, port=port, debug=False)
+
+
+@qaclan.command()
+@click.option("--path-only", is_flag=True, help="Move binary + add to PATH only, skip runtime deps")
+@click.option("--runtime-only", is_flag=True, help="Install runtime deps only, skip PATH/binary move")
+@click.option("--no-path", is_flag=True, help="Skip PATH step (binary already on PATH)")
+@click.option("--no-move", is_flag=True, help="Don't relocate binary, only add current location to PATH")
+@click.option("--no-chromium", is_flag=True, help="Skip Chromium install (faster, for CI)")
+@click.option("--force", is_flag=True, help="Re-run all steps even if already initialized")
+def setup(path_only, runtime_only, no_path, no_move, no_chromium, force):
+    """Provision isolated runtime under ~/.qaclan/runtime/ and add binary to PATH."""
+    from rich.console import Console
+    from cli import runtime_setup as rs
+
+    console = Console()
+
+    if path_only and runtime_only:
+        console.print("[red]Cannot combine --path-only and --runtime-only.[/red]")
+        sys.exit(2)
+
+    do_path = not (runtime_only or no_path)
+    do_runtime = not path_only
+
+    if do_path:
+        console.print("[bold]Configuring PATH...[/bold]")
+        try:
+            target = rs.move_binary_to_bin_dir() if not no_move else None
+            if target:
+                console.print(f"  Copied binary to: {target}")
+            elif not no_move:
+                console.print("  Binary already in place (skip move).")
+
+            if sys.platform == "win32":
+                changed = rs.add_to_path_windows()
+                if changed:
+                    console.print(f"  Added {rs.BIN_DIR} to user PATH (HKCU). Restart terminal.")
+                else:
+                    console.print("  PATH already contains ~/.qaclan/bin (skip).")
+            else:
+                changed = rs.add_to_path_unix()
+                rc = rs.detect_rc_file()
+                if changed:
+                    console.print(f"  Appended PATH export to {rc}. Run: source {rc}")
+                else:
+                    console.print(f"  {rc} already references ~/.qaclan/bin (skip).")
+        except Exception as e:
+            console.print(f"[red]PATH setup failed:[/red] {e}")
+            sys.exit(1)
+
+    if do_runtime:
+        console.print("[bold]Initializing runtime (Node + Python deps)...[/bold]")
+        try:
+            if rs.write_package_json():
+                console.print(f"  Wrote {rs.PACKAGE_JSON_PATH}")
+            else:
+                console.print("  package.json already current (skip).")
+
+            if rs.npm_install(force=force):
+                console.print(f"  Installed Node deps in {rs.NODE_MODULES}")
+            else:
+                console.print("  node_modules already present (skip).")
+
+            if rs.create_venv(force=force):
+                console.print(f"  Created venv at {rs.VENV_DIR}")
+            else:
+                console.print("  venv already present (skip).")
+
+            if rs.venv_pip_install(force=force):
+                console.print(f"  Installed playwright=={rs.PINNED_PLAYWRIGHT_VERSION} into venv")
+            else:
+                console.print(f"  playwright=={rs.PINNED_PLAYWRIGHT_VERSION} already in venv (skip).")
+
+            if not no_chromium:
+                if rs.install_chromium(force=force):
+                    console.print(f"  Installed Chromium to {rs.BROWSERS_DIR}")
+                else:
+                    console.print("  Chromium already present (skip).")
+        except subprocess.CalledProcessError as e:
+            console.print(f"[red]Runtime setup failed:[/red] command exited {e.returncode}")
+            sys.exit(1)
+        except Exception as e:
+            console.print(f"[red]Runtime setup failed:[/red] {e}")
+            sys.exit(1)
+
+    console.print("[green]✓ Setup complete.[/green]")
 
 
 @qaclan.command("_pw-install", hidden=True)
