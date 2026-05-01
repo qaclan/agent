@@ -12,6 +12,7 @@ from cli.config import get_active_project, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 from cli.runtime import is_frozen_binary, is_path_in_temp, get_default_playwright_browsers_path
+from cli import runtime_setup
 from datetime import datetime, timezone
 
 console = Console()
@@ -50,38 +51,75 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
                 default_browsers, os.path.isdir(default_browsers),
                 os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "<not set>"))
 
-    # Resolve Playwright driver: prefer Python package, fall back to npx.
-    # Nuitka binary builds segfault on the bundled Node driver — skip it.
-    use_npx = False
+    # Resolve Playwright codegen driver. Resolution order:
+    #   1. Isolated runtime node bin (~/.qaclan/runtime/node_modules/.bin/playwright)
+    #   2. Isolated runtime venv (`venv_python -m playwright`)
+    #   3. System global `playwright` CLI on PATH (cross-platform: pip or npm install)
+    #   4. System Python `playwright` package (skipped in frozen binary)
+    #   5. System `npx --no-install playwright` (fail-fast, no hang on missing pkg)
+    # Codegen is a single Node tool — `--target python` only changes output template.
     is_frozen = is_frozen_binary()
-    try:
-        if is_frozen:
-            raise RuntimeError("Skipping bundled driver in binary build")
-        from playwright._impl._driver import compute_driver_executable, get_driver_env
-        driver_executable, driver_cli = compute_driver_executable()
-        logger.info("Python driver resolved: executable=%s (exists=%s), cli=%s",
-                     driver_executable, os.path.exists(driver_executable), driver_cli)
-        if is_path_in_temp(driver_executable):
-            raise RuntimeError("Skipping bundled driver extracted to Nuitka temp dir")
-        if not os.path.exists(driver_executable):
-            raise FileNotFoundError(f"Driver executable not found at {driver_executable}")
-        run_env = get_driver_env()
-    except Exception as e:
-        logger.warning("Python Playwright driver not available: %s", e)
+    cmd_prefix = None
+    run_env = os.environ.copy()
+    resolution_source = None
+
+    # 1. runtime node bin
+    pw_node_bin = runtime_setup.resolve_node_bin("playwright")
+    if pw_node_bin and pw_node_bin.exists():
+        cmd_prefix = [str(pw_node_bin)]
+        resolution_source = f"runtime node bin: {pw_node_bin}"
+
+    # 2. runtime venv python -m playwright
+    if cmd_prefix is None:
+        venv_py = runtime_setup.resolve_venv_python()
+        if venv_py and venv_py.exists():
+            cmd_prefix = [str(venv_py), "-m", "playwright"]
+            resolution_source = f"runtime venv: {venv_py}"
+
+    # Apply runtime browsers path if either runtime resolver matched
+    if cmd_prefix is not None:
+        bp = runtime_setup.browsers_path_if_present()
+        if bp:
+            run_env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
+
+    # 3. system global `playwright` on PATH
+    if cmd_prefix is None:
+        sys_pw = shutil.which("playwright")
+        if sys_pw:
+            runtime_setup.emit_deprecation_warning()
+            cmd_prefix = [sys_pw]
+            resolution_source = f"system playwright CLI: {sys_pw}"
+
+    # 4. system Python playwright package (driver_executable). Skip in frozen binary.
+    if cmd_prefix is None and not is_frozen:
+        try:
+            from playwright._impl._driver import compute_driver_executable, get_driver_env
+            driver_executable, driver_cli = compute_driver_executable()
+            if is_path_in_temp(driver_executable):
+                raise RuntimeError("Skipping bundled driver extracted to Nuitka temp dir")
+            if not os.path.exists(driver_executable):
+                raise FileNotFoundError(f"Driver executable not found at {driver_executable}")
+            runtime_setup.emit_deprecation_warning()
+            cmd_prefix = [driver_executable, driver_cli]
+            run_env = get_driver_env()
+            resolution_source = f"system Python playwright: {driver_executable}"
+        except Exception as e:
+            logger.info("System Python playwright not usable: %s", e)
+
+    # 5. npx with --no-install (fail-fast — never hangs on stdin prompt)
+    if cmd_prefix is None:
         npx_path = shutil.which("npx")
-        logger.info("npx lookup: %s", npx_path or "NOT FOUND")
         if npx_path:
-            use_npx = True
-            run_env = os.environ.copy()
-        else:
-            pw_path = shutil.which("playwright")
-            if pw_path:
-                use_npx = "playwright_cli"
-                run_env = os.environ.copy()
-                logger.info("Using global playwright CLI: %s", pw_path)
-            else:
-                logger.error("No Playwright driver found. npx=%s, playwright=%s", npx_path, pw_path)
-                raise RuntimeError("Playwright not found. Install via: npm i -g playwright OR pip install playwright && playwright install chromium")
+            runtime_setup.emit_deprecation_warning()
+            cmd_prefix = [npx_path, "--no-install", "playwright"]
+            resolution_source = f"system npx (no-install): {npx_path}"
+
+    if cmd_prefix is None:
+        raise RuntimeError(
+            "Playwright runtime not found. Run: qaclan setup --runtime-only"
+        )
+
+    logger.info("Playwright codegen resolved via %s", resolution_source)
 
     is_docker = os.path.exists("/.dockerenv") or os.environ.get("container")
     display = os.environ.get("DISPLAY")
@@ -98,12 +136,7 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
 
     try:
         codegen_args = ["codegen", "--output", tmp_path, "--target", strategy.codegen_target]
-        if use_npx == "playwright_cli":
-            cmd = [shutil.which("playwright"), *codegen_args]
-        elif use_npx:
-            cmd = [npx_path, "playwright", *codegen_args]
-        else:
-            cmd = [driver_executable, driver_cli, *codegen_args]
+        cmd = [*cmd_prefix, *codegen_args]
         if url:
             cmd.append(url)
 
