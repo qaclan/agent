@@ -184,17 +184,11 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
                 "Node.js is required to run playwright/test scripts. "
                 "Install Node.js from https://nodejs.org and ensure 'node' is on PATH."
             )
-        result = subprocess.run(
-            ["node", "-e", "require('@playwright/test')"],
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(
-                "The '@playwright/test' npm package is not installed or not reachable "
-                "from Node.js. Install it globally: npm install -g @playwright/test\n"
-                "Then install browser binaries: npx playwright install"
-            )
+        # node's require() does not search npm's global root by default —
+        # `node -e "require('@playwright/test')"` returns non-zero even when
+        # the package is correctly installed via `npm install -g`. Resolve
+        # the absolute cli.js path instead (same lookup used at run time).
+        self._resolve_pwtest_cli()
 
     # ---- internals ----
 
