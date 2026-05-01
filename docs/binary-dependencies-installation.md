@@ -1,8 +1,14 @@
 # Binary Dependencies Installation Plan
 
-Status: **planning** — not yet implemented.
-Owner: TBD.
+Status: **Phases 1–4 + 6 shipped.** Phase 5 (remove global fallback) held for a major-version bump.
 Target: replace global `npm install -g` and global pip installs with isolated per-user runtime under `~/.qaclan/runtime/`.
+
+Implementation entry points:
+- `cli/runtime_setup.py` — paths, install steps, PATH injection, resolution helpers
+- `cli/runtime_assets/package.json` — pinned versions (single source of truth, bundled into binary)
+- `qaclan setup` / `qaclan reset-runtime` — orchestration in `qaclan.py`
+- `cli/script_strategies/*` — `validate_runtime`, `_resolve_*`, `extra_env` prefer runtime, fall back to global with deprecation warning
+- `web/routes/runs.py` — runs return `needs_setup: true` when runtime missing
 
 ---
 
@@ -127,13 +133,17 @@ Shell rc file detected from `$SHELL` (`zsh` → `~/.zshrc`, `bash` → `~/.bashr
 
 1. **PATH / binary move** (unless `--runtime-only` or `--no-path`).
 2. **Create `~/.qaclan/runtime/`**.
-3. **Write `package.json`** from hardcoded dict embedded in binary.
-4. **Run `npm install`** inside `runtime/`.
-5. **Create venv**: `python3 -m venv runtime/venv`.
-6. **Install Playwright pip pkg into venv**: `runtime/venv/bin/pip install playwright==<pinned>`.
-7. **Install Chromium**: `PLAYWRIGHT_BROWSERS_PATH=~/.qaclan/runtime/browsers runtime/node_modules/.bin/playwright install chromium` (unless `--no-chromium`).
+3. **Copy bundled `package.json`** from `cli/runtime_assets/package.json` (shipped data file inside the binary) into `runtime/package.json`. Skip when content unchanged.
+4. **Run `npm install`** inside `runtime/`. Sentinel `runtime/.package.sha256` skips re-install when template hash unchanged.
+5. **Create venv**: `python3 -m venv runtime/venv`. Skip when `venv/bin/python` already exists.
+6. **Install Playwright pip pkg into venv**: `runtime/venv/bin/pip install playwright==<pinned>`. Skip when version matches.
+7. **Install Chromium**: `PLAYWRIGHT_BROWSERS_PATH=~/.qaclan/runtime/browsers runtime/node_modules/.bin/playwright install chromium` (unless `--no-chromium`). Skip when `browsers/chromium-*` already present.
 
-Each step idempotent — detects already-done state and skips.
+Each step idempotent. `--force` bypasses every skip.
+
+### 4.4 `qaclan reset-runtime`
+
+Sibling command: `rmtree(~/.qaclan/runtime/)`. Wipes node_modules, venv, browsers, package.json, hash sentinel. Does NOT touch DB, scripts, config, or binary. Use when the runtime is corrupt or after a Playwright bump where the user wants a clean rebuild (`qaclan setup --runtime-only` afterwards).
 
 ---
 
@@ -189,33 +199,48 @@ User-scope only (HKCU). Never write HKLM, even if running as admin.
 
 ---
 
-## 6. Hardcoded `package.json`
+## 6. Bundled `package.json` (shipped data file)
 
-`package.json` content lives as a Python dict inside the binary, written to disk at runtime by `qaclan setup`:
+`package.json` lives at `cli/runtime_assets/package.json` in the source tree — a real JSON file, not a Python dict. At install time `runtime_setup.write_package_json()` reads the bundled template and copies it to `~/.qaclan/runtime/package.json`.
 
-```python
-PACKAGE_JSON = {
-    "name": "qaclan-runtime",
-    "version": "1.0.0",
-    "private": True,
-    "dependencies": {
-        "playwright": "1.58.0",
-        "@playwright/test": "1.58.0",
-        "tsx": "^4.0.0"
-    }
+```jsonc
+// cli/runtime_assets/package.json
+{
+  "name": "qaclan-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "playwright": "1.58.0",
+    "@playwright/test": "1.58.0",
+    "tsx": "^4.0.0"
+  }
 }
 ```
 
-### Why hardcode
+`PINNED_PLAYWRIGHT_VERSION` in `runtime_setup.py` is **derived** from this file — single source of truth. Bump the JSON, both the npm install and the pip pin track it.
 
-| Approach | Direct-download user (no installer)? |
-|---|---|
-| **Hardcode (recommended)** | works — string lives in `.exe` |
-| Nuitka `--include-data-file=package.json` | also works, extra build step, file extracted at runtime |
-| Ship `package.json` next to binary | breaks — user only downloads `.exe`, no sidecar |
-| Fetch from GitHub at runtime | breaks offline use, version skew if repo updated |
+### Why a shipped data file (not a Python dict)
 
-Same approach for any other config files (e.g. `requirements.txt` for venv → embedded as Python list).
+Considered both at design time. Settled on the data file:
+
+| Approach | Direct-download user? | Renovate / Dependabot scan? | Git diff readable? | Build step |
+|---|---|---|---|---|
+| **Shipped data file (chosen)** | works — bundled inside `.exe` via Nuitka | yes (real `package.json`) | yes | one Nuitka flag |
+| Hardcoded Python dict | works | **no** (invisible to dep bots) | yes (in .py) | none |
+| Sidecar `package.json` next to binary | breaks — user only downloads `.exe` | n/a | n/a | n/a |
+| Fetch from GitHub at runtime | breaks offline / air-gapped | n/a | n/a | n/a |
+
+Decisive factor: dependabot/security-advisory tooling matches by `package.json` location. Embedded Python strings are invisible — manual bumps forever. With the shipped file, normal Node-ecosystem tooling works.
+
+### Nuitka bundling
+
+`build.sh` and the inline Nuitka calls in `.github/workflows/release.yml` (Windows amd64 + arm64 builds) all include:
+
+```
+--include-data-dir=cli/runtime_assets=cli/runtime_assets
+```
+
+Nuitka resolves it via `Path(__file__).resolve().parent / "runtime_assets" / "package.json"` — works in dev (`__file__` = source path), Nuitka standalone (`__file__` = compiled module path next to extracted data), and Nuitka onefile (extracts to temp; `__file__` resolves inside extraction). Missing flag → clear `RuntimeError` on first call, easy to debug.
 
 ---
 
@@ -355,7 +380,8 @@ Same for Python: prior `pip install playwright` global stays; qaclan uses its ow
 
 ## 15. Open Questions (resolved)
 
-1. **Bundle `package.json` template in binary or hardcode?** → Hardcode as Python dict, write at runtime. Simpler, no Nuitka data flag, works for direct-download users.
+1. **Bundle `package.json` template in binary or hardcode?** → Ship as a real data file under `cli/runtime_assets/package.json`, bundle into Nuitka via `--include-data-dir`. Hardcoding as a Python dict was the original plan, but it would have hidden the pinned versions from Renovate/Dependabot/security-advisory scanners. The data-file approach keeps Node-ecosystem tooling working and makes `PINNED_PLAYWRIGHT_VERSION` a derived value (single source of truth).
 2. **Pin Node version?** → No. Require ≥18 at runtime check, accept whatever system Node user has.
 3. **Pin Python version?** → Require ≥3.9 (venv module stable, f-string support).
-4. **Auto-run setup after installer, or manual?** → Auto. Add `--no-setup` opt-out flag for air-gapped envs.
+4. **Auto-run setup after installer, or manual?** → Auto. Installers (`install.sh` / `install.ps1`) call `qaclan setup --runtime-only` at the end (binary placement + PATH already done by the installer itself, so the full `qaclan setup` would duplicate work).
+5. **What if the runtime gets corrupted?** → `qaclan reset-runtime` wipes `~/.qaclan/runtime/` only (DB, scripts, config, binary preserved). User then re-runs `qaclan setup --runtime-only`. `--force` on `setup` also re-runs every step, but `reset-runtime` is the cleaner option when state is questionable.

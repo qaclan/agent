@@ -269,6 +269,39 @@ def setup(path_only, runtime_only, no_path, no_move, no_chromium, force):
     console.print("[green]✓ Setup complete.[/green]")
 
 
+@qaclan.command("reset-runtime")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def reset_runtime(yes):
+    """Remove ~/.qaclan/runtime/ so `qaclan setup` can rebuild from scratch.
+
+    Wipes Node deps, Python venv, and Chromium. Keeps DB, scripts, config,
+    and binary. Useful when runtime is corrupted or after a Playwright bump.
+    """
+    import shutil
+    from rich.console import Console
+    from cli import runtime_setup as rs
+
+    console = Console()
+
+    if not rs.RUNTIME_DIR.exists():
+        console.print("[yellow]Nothing to remove — ~/.qaclan/runtime/ does not exist.[/yellow]")
+        return
+
+    if not yes:
+        console.print("[bold red]This will permanently delete the isolated runtime:[/bold red]")
+        console.print(f"  • Node deps ({rs.NODE_MODULES})")
+        console.print(f"  • Python venv ({rs.VENV_DIR})")
+        console.print(f"  • Chromium ({rs.BROWSERS_DIR})")
+        console.print(f"  • Path: {rs.RUNTIME_DIR}")
+        console.print("[dim]DB, scripts, config, and binary are kept.[/dim]")
+        if not click.confirm("\nProceed?"):
+            console.print("[dim]Cancelled.[/dim]")
+            return
+
+    shutil.rmtree(rs.RUNTIME_DIR)
+    console.print("[green]✓ Runtime removed.[/green] Run [bold]qaclan setup --runtime-only[/bold] to rebuild.")
+
+
 @qaclan.command("_pw-install", hidden=True)
 def pw_install():
     """Install Playwright browsers (used by install script)."""

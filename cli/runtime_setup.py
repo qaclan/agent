@@ -16,18 +16,23 @@ from typing import Optional
 from cli.config import QACLAN_DIR
 
 
-PINNED_PLAYWRIGHT_VERSION = "1.58.0"
+# package.json shipped as data file under cli/runtime_assets/. Bundled into
+# Nuitka binary via build.sh --include-data-dir; resolved via __file__ in dev too.
+# Single source of truth — pinned versions live in JSON, scannable by Renovate/Dependabot.
+PACKAGE_JSON_TEMPLATE_PATH = Path(__file__).resolve().parent / "runtime_assets" / "package.json"
 
-PACKAGE_JSON = {
-    "name": "qaclan-runtime",
-    "version": "1.0.0",
-    "private": True,
-    "dependencies": {
-        "playwright": PINNED_PLAYWRIGHT_VERSION,
-        "@playwright/test": PINNED_PLAYWRIGHT_VERSION,
-        "tsx": "^4.0.0",
-    },
-}
+
+def _load_package_template() -> dict:
+    if not PACKAGE_JSON_TEMPLATE_PATH.exists():
+        raise RuntimeError(
+            f"Bundled package.json missing at {PACKAGE_JSON_TEMPLATE_PATH}. "
+            "Build issue: ensure build.sh passes "
+            "--include-data-dir=cli/runtime_assets=cli/runtime_assets to Nuitka."
+        )
+    return json.loads(PACKAGE_JSON_TEMPLATE_PATH.read_text())
+
+
+PINNED_PLAYWRIGHT_VERSION = _load_package_template()["dependencies"]["playwright"]
 
 REQUIREMENTS = [f"playwright=={PINNED_PLAYWRIGHT_VERSION}"]
 
@@ -70,14 +75,6 @@ def _which_or_raise(name: str, hint: str) -> str:
     return path
 
 
-def _check_node() -> str:
-    return _which_or_raise(
-        "node",
-        "Install Node.js >=18 (https://nodejs.org/). On Linux: apt/dnf install nodejs. "
-        "On macOS: brew install node. On Windows: winget install OpenJS.NodeJS.",
-    )
-
-
 def _check_npm() -> str:
     return _which_or_raise(
         "npm",
@@ -86,28 +83,64 @@ def _check_npm() -> str:
 
 
 def _check_python3() -> str:
-    name = "python" if sys.platform == "win32" else "python3"
-    return _which_or_raise(
-        name,
-        "Install Python >=3.9 (https://www.python.org/downloads/).",
+    """Locate a usable Python 3 interpreter.
+
+    Windows: try `py` launcher first, then `python3`, then `python`. The Microsoft
+    Store stub at %LOCALAPPDATA%\\Microsoft\\WindowsApps\\python.exe is a
+    zero-byte alias that opens the Store — skip it.
+    """
+    if sys.platform == "win32":
+        candidates = ["py", "python3", "python"]
+    else:
+        candidates = ["python3", "python"]
+    for name in candidates:
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        if sys.platform == "win32":
+            norm = os.path.normcase(os.path.normpath(resolved))
+            if os.path.join("microsoft", "windowsapps") in norm:
+                continue
+        return resolved
+    raise RuntimeError(
+        "Python 3 not found on PATH. "
+        "Install Python >=3.9 (https://www.python.org/downloads/) and ensure "
+        "it is on PATH (or `py` launcher available on Windows)."
     )
 
 
 # ---- Steps ----
 
 def write_package_json() -> bool:
-    """Write package.json. Returns True if written/changed."""
+    """Copy bundled package.json template to runtime/. Returns True if changed."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    desired = json.dumps(PACKAGE_JSON, indent=2) + "\n"
+    desired = PACKAGE_JSON_TEMPLATE_PATH.read_text()
     if PACKAGE_JSON_PATH.exists() and PACKAGE_JSON_PATH.read_text() == desired:
         return False
     PACKAGE_JSON_PATH.write_text(desired)
     return True
 
 
+_PKG_HASH_PATH = RUNTIME_DIR / ".package.sha256"
+
+
+def _package_hash() -> str:
+    """Hash bundled template (sort keys = stable across formatting changes)."""
+    import hashlib
+    return hashlib.sha256(
+        json.dumps(_load_package_template(), sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
 def npm_install(force: bool = False) -> bool:
-    """Run `npm install` in runtime/. Skip if node_modules already present."""
-    if NODE_MODULES.exists() and not force:
+    """Run `npm install` in runtime/. Skip when node_modules matches current package.json hash."""
+    current_hash = _package_hash()
+    if (
+        not force
+        and NODE_MODULES.exists()
+        and _PKG_HASH_PATH.exists()
+        and _PKG_HASH_PATH.read_text().strip() == current_hash
+    ):
         return False
     npm = _check_npm()
     subprocess.run(
@@ -115,6 +148,7 @@ def npm_install(force: bool = False) -> bool:
         cwd=str(RUNTIME_DIR),
         check=True,
     )
+    _PKG_HASH_PATH.write_text(current_hash)
     return True
 
 
@@ -165,22 +199,31 @@ def install_chromium(force: bool = False) -> bool:
 
 # ---- PATH injection ----
 
+_PATH_MARKER = "# qaclan-managed-path"
+
+
 def detect_rc_file() -> Path:
+    """Pick shell rc file. macOS bash logs in via `.bash_profile` — prefer it
+    when it exists; fall back to `.bashrc` for Linux bash users."""
     shell = Path(os.environ.get("SHELL", "")).name
     home = Path.home()
+    if shell == "bash":
+        bash_profile = home / ".bash_profile"
+        if bash_profile.exists() or sys.platform == "darwin":
+            return bash_profile
+        return home / ".bashrc"
     return {
         "zsh": home / ".zshrc",
-        "bash": home / ".bashrc",
         "fish": home / ".config" / "fish" / "config.fish",
     }.get(shell, home / ".profile")
 
 
 def add_to_path_unix() -> bool:
-    """Append PATH export to shell rc. Returns True if changed."""
+    """Append PATH export to shell rc. Idempotent via marker comment."""
     rc = detect_rc_file()
-    line = f'export PATH="$HOME/.qaclan/bin:$PATH"  # qaclan'
+    line = f'export PATH="$HOME/.qaclan/bin:$PATH"  {_PATH_MARKER}'
     content = rc.read_text() if rc.exists() else ""
-    if "/.qaclan/bin" in content:
+    if _PATH_MARKER in content:
         return False
     rc.parent.mkdir(parents=True, exist_ok=True)
     with rc.open("a") as f:
@@ -196,6 +239,7 @@ def add_to_path_windows() -> bool:
     import winreg
 
     target = str(BIN_DIR)
+    target_norm = os.path.normcase(os.path.normpath(target))
     key = winreg.OpenKey(
         winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
     )
@@ -204,9 +248,15 @@ def add_to_path_windows() -> bool:
             current, reg_type = winreg.QueryValueEx(key, "Path")
         except FileNotFoundError:
             current, reg_type = "", winreg.REG_EXPAND_SZ
-        if target.lower() in current.lower():
+        # Windows PATH is `;`-separated. Split into entries and exact-match
+        # each one against target. A substring check on the joined string
+        # would falsely match e.g. `C:\foo\.qaclan\bin` against an existing
+        # `C:\foo\.qaclan\bin\backup` entry, and we'd never add our path.
+        entries = [e for e in (current or "").split(";") if e]
+        if any(os.path.normcase(os.path.normpath(e)) == target_norm for e in entries):
             return False
-        new = f"{current};{target}" if current else target
+        entries.append(target)
+        new = ";".join(entries)
         winreg.SetValueEx(key, "Path", 0, reg_type or winreg.REG_EXPAND_SZ, new)
     finally:
         winreg.CloseKey(key)

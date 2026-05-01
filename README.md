@@ -62,6 +62,7 @@ Skip the installer, download the binary, then run `qaclan setup` once. The binar
 | `qaclan setup --path-only` | binary move + PATH only |
 | `qaclan setup --no-chromium` | skip Chromium download (CI / pre-staged browsers) |
 | `qaclan setup --force` | re-run all steps even if already initialized |
+| `qaclan reset-runtime` | wipe `~/.qaclan/runtime/` only (keeps DB, scripts, config) — re-run `setup --runtime-only` to rebuild |
 ### 3. Log in and launch the web UI
 
 **Linux / macOS:**
@@ -105,10 +106,16 @@ All data is stored locally in your home directory:
 ├── scripts/       <- Recorded/imported script files
 ├── runs/          <- Run artifacts (screenshots, JSON)
 ├── runtime/       <- Isolated Playwright runtime (Node deps + venv + Chromium)
+│   ├── package.json
+│   ├── node_modules/
+│   ├── venv/
+│   └── browsers/
 └── config.json    <- Active project setting
 ```
 
-To wipe everything (binary, runtime, data): `qaclan uninstall`.
+Cleanup:
+- `qaclan reset-runtime` — wipe just the runtime so `qaclan setup --runtime-only` can rebuild it (keeps DB, scripts, config, binary).
+- `qaclan uninstall` — wipe everything (binary, runtime, data).
 
 ## Upgrading from older releases
 

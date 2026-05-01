@@ -255,7 +255,6 @@ def execute_run():
 
         # In Nuitka binary builds the bundled Node driver segfaults; set
         # PLAYWRIGHT_BROWSERS_PATH so subprocesses find system-installed browsers.
-        from cli import runtime_setup
         default_browsers = get_default_playwright_browsers_path()
         is_frozen = is_frozen_binary()
         logger.info("execute_run: is_frozen=%s", is_frozen)

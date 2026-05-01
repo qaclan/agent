@@ -64,6 +64,17 @@ qaclan serve
 # Run a script — should work without warnings.
 ```
 
+### Stuck? Reset and retry
+
+If the runtime ends up half-installed or corrupted (e.g. `npm install` got killed mid-way, venv broken after a system Python upgrade), wipe just the runtime and rebuild:
+
+```bash
+qaclan reset-runtime          # removes ~/.qaclan/runtime/ only
+qaclan setup --runtime-only   # rebuild from scratch
+```
+
+DB, scripts, config, and the binary are kept.
+
 ## Transition fallback (current releases)
 
 If the runtime is missing, QAClan **falls back to globally-installed Playwright** with a one-time deprecation warning to stderr:
