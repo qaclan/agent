@@ -90,22 +90,56 @@ if ! python3 -m venv --help >/dev/null 2>&1; then
     error "python3 venv module missing. Install it (e.g. 'sudo apt-get install python3-venv') and re-run."
 fi
 
-# Install Linux system libs needed by Playwright Chromium. We don't have
-# Playwright on PATH yet (it lives in the runtime we're about to build),
-# so use the binary's hidden _pw-install hook only after runtime exists.
-# For Linux system libs we still need apt-installable deps.
+# Install npm Playwright + @playwright/test + tsx at the pinned version.
+info "Installing Playwright ${PLAYWRIGHT_VERSION} (npm: playwright + @playwright/test + tsx)..."
+npm install -g \
+    "playwright@${PLAYWRIGHT_VERSION}" \
+    "@playwright/test@${PLAYWRIGHT_VERSION}" \
+    tsx \
+    || error "npm install failed. Run manually: npm install -g playwright@${PLAYWRIGHT_VERSION} @playwright/test@${PLAYWRIGHT_VERSION} tsx"
+
+# Resolve a runner for the playwright CLI: prefer the bin on PATH, fall back
+# to `npx playwright` (works even when the global npm bin dir isn't on PATH,
+# which is common under sudo + nvm).
+if command -v playwright >/dev/null 2>&1; then
+    PW_RUN="playwright"
+elif command -v npx >/dev/null 2>&1; then
+    PW_RUN="npx --no-install playwright"
+    warn "playwright bin not on PATH; using 'npx playwright' instead."
+else
+    error "Neither 'playwright' nor 'npx' is available. Check your Node.js install."
+fi
+
+# Install pip Playwright at the pinned version. --break-system-packages handles
+# PEP 668 distros (Debian 12+, Ubuntu 24.04+); fall back to plain --user on
+# older pip that doesn't recognize the flag.
+info "Installing Playwright ${PLAYWRIGHT_VERSION} (pip)..."
+if ! python3 -m pip install --user --break-system-packages "playwright==${PLAYWRIGHT_VERSION}" 2>/dev/null; then
+    python3 -m pip install --user "playwright==${PLAYWRIGHT_VERSION}" \
+        || error "pip install failed. Run manually: pip install --user playwright==${PLAYWRIGHT_VERSION}"
+fi
+info "Playwright (npm + pip) and tsx installed."
+
+# Install all browsers + system dependencies. One install via the npm
+# Playwright populates ~/.cache/ms-playwright; Python's pip-installed
+# Playwright reads from the same cache, so no second download.
+info "Installing all Playwright browsers (chromium, firefox, webkit) and system dependencies..."
+
 if [ "$OS" = "linux" ]; then
-    info "Installing Linux libs required by Chromium (sudo)..."
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -qq || true
-        sudo apt-get install -y --no-install-recommends \
-            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
-            libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
-            2>/dev/null || warn "apt-get install of Chromium libs failed (unsupported distro?). Browser may not launch."
+    # sudo strips PATH; pass it through so $PW_RUN (which may be `npx ...`)
+    # can locate node/npx/playwright via nvm or other PATH setups.
+    if sudo env "PATH=$PATH" $PW_RUN install --with-deps chromium firefox webkit; then
+        info "Browsers + system dependencies installed."
     else
-        warn "Non-apt distro: install Chromium runtime libs manually if browser fails to launch."
+        warn "Could not auto-install system libs (unsupported distro?). Falling back to browser-only install."
+        $PW_RUN install chromium firefox webkit || \
+            error "Failed to install browsers. Run manually: npx playwright install chromium firefox webkit"
+        warn "If a browser fails to launch, install the libs reported in the error via your package manager."
     fi
+else
+    $PW_RUN install chromium firefox webkit || \
+        error "Failed to install browsers. Run manually: npx playwright install chromium firefox webkit"
+    info "Browsers installed."
 fi
 
 # Hand off to binary: provision ~/.qaclan/runtime/ (npm install + venv + Chromium).
