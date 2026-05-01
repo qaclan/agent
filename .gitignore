@@ -57,3 +57,5 @@ openspec/
 .venv/
 venv/ 
 test-results/
+node_modules/
+dist/
