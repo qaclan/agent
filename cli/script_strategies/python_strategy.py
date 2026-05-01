@@ -7,6 +7,7 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -175,27 +176,57 @@ class PythonStrategy(ScriptStrategy):
             result = subprocess.run(
                 [py, "-c", "import playwright"],
                 capture_output=True,
+                text=True,
                 timeout=10,
             )
             if result.returncode != 0:
+                stderr = (result.stderr or "").strip()
                 raise RuntimeError(
-                    "The 'playwright' Python package is not installed for the system Python. "
-                    "Install it: pip install playwright==1.58.0\n"
-                    "Then install browser binaries: playwright install"
+                    f"The 'playwright' Python package is not importable from {py}. "
+                    "Install it for the SAME Python interpreter:\n"
+                    "  Windows:  py -m pip install playwright==1.58.0 && py -m playwright install\n"
+                    "  Linux:    python3 -m pip install playwright==1.58.0 && python3 -m playwright install\n"
+                    f"Underlying error: {stderr}"
                 )
 
     # ---- internals ----
 
     def _resolve_python_executable(self) -> str:
         if is_frozen_binary():
-            py = shutil.which("python3") or shutil.which("python") or shutil.which("py")
-            if not py:
-                raise RuntimeError(
-                    "Python 3 is required to run Python scripts in binary mode. "
-                    "Install Python 3 and ensure it's on PATH."
-                )
-            return py
+            # Windows: prefer `py` launcher first. Reasons:
+            #   1. Many Windows installs leave the real `python.exe` off PATH
+            #      (installer's "Add to PATH" checkbox is opt-in).
+            #   2. Microsoft ships a stub at
+            #      %LOCALAPPDATA%\Microsoft\WindowsApps\python.exe that IS on
+            #      PATH by default. The stub redirects to the Store and has
+            #      no site-packages, so `import playwright` always fails
+            #      even when the user installed playwright via `py -m pip`.
+            # Linux/macOS: `py` does not exist; fall through to python3/python.
+            if sys.platform == "win32":
+                candidates = ["py", "python3", "python"]
+            else:
+                candidates = ["python3", "python"]
+            for name in candidates:
+                resolved = shutil.which(name)
+                if resolved and not self._is_windows_store_stub(resolved):
+                    return resolved
+            raise RuntimeError(
+                "Python 3 is required to run Python scripts in binary mode. "
+                "Install Python 3 (https://www.python.org/downloads/) and ensure "
+                "it's on PATH, or that the `py` launcher is available on Windows."
+            )
         return sys.executable
+
+    @staticmethod
+    def _is_windows_store_stub(path: str) -> bool:
+        # The Microsoft Store python.exe shim lives under
+        # %LOCALAPPDATA%\Microsoft\WindowsApps. It is a zero-byte
+        # AppExecutionAlias that opens the Store when run from a child
+        # process — never the real interpreter.
+        if sys.platform != "win32":
+            return False
+        norm = os.path.normcase(os.path.normpath(path))
+        return os.path.join("microsoft", "windowsapps") in norm
 
     def _extract_actions(self, raw: str) -> str:
         """Pull the action body out of Playwright codegen ougtput.
