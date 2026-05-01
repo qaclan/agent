@@ -15,6 +15,7 @@ import sys
 from typing import List
 
 from cli.runtime import is_frozen_binary
+from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
 
 
@@ -172,27 +173,47 @@ class PythonStrategy(ScriptStrategy):
 
     def validate_runtime(self) -> None:
         py = self._resolve_python_executable()
-        if is_frozen_binary():
-            result = subprocess.run(
-                [py, "-c", "import playwright"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode != 0:
-                stderr = (result.stderr or "").strip()
+        # Validate when:
+        #  - frozen binary (system Python — must verify playwright importable), OR
+        #  - resolved python is the runtime venv (catch broken venv early in dev too).
+        # Skip only in plain dev mode where py == sys.executable — assume the
+        # developer's own venv is sane.
+        runtime_py = runtime_setup.resolve_venv_python()
+        is_runtime_py = runtime_py is not None and str(runtime_py) == py
+        if not (is_frozen_binary() or is_runtime_py):
+            return
+        result = subprocess.run(
+            [py, "-c", "import playwright"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            if is_runtime_py:
                 raise RuntimeError(
-                    f"The 'playwright' Python package is not importable from {py}. "
-                    "Install it for the SAME Python interpreter:\n"
-                    "  Windows:  py -m pip install playwright==1.58.0 && py -m playwright install\n"
-                    "  Linux:    python3 -m pip install playwright==1.58.0 && python3 -m playwright install\n"
+                    f"Runtime venv at {py} is missing the 'playwright' package. "
+                    "Re-run: qaclan setup --runtime-only --force\n"
                     f"Underlying error: {stderr}"
                 )
+            raise RuntimeError(
+                f"The 'playwright' Python package is not importable from {py}. "
+                "Run: qaclan setup --runtime-only "
+                "(or install for the SAME interpreter):\n"
+                "  Windows:  py -m pip install playwright==1.58.0\n"
+                "  Linux:    python3 -m pip install playwright==1.58.0\n"
+                f"Underlying error: {stderr}"
+            )
 
     # ---- internals ----
 
     def _resolve_python_executable(self) -> str:
+        # Prefer isolated runtime venv first.
+        venv_py = runtime_setup.resolve_venv_python()
+        if venv_py is not None:
+            return str(venv_py)
         if is_frozen_binary():
+            runtime_setup.emit_deprecation_warning()
             # Windows: prefer `py` launcher first. Reasons:
             #   1. Many Windows installs leave the real `python.exe` off PATH
             #      (installer's "Add to PATH" checkbox is opt-in).

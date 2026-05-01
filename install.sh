@@ -4,7 +4,6 @@ set -e
 REPO="qaclan/agent"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="qaclan"
-PLAYWRIGHT_VERSION="1.58.0"
 
 # Colors
 RED='\033[0;31m'
@@ -78,61 +77,41 @@ else
     sudo chmod +x "${INSTALL_DIR}/${BINARY_NAME}"
 fi
 
-# ── Install Playwright ────────────────────────────────────────────────
-# Hard prerequisites: Node.js (with npm) and Python 3 (with pip). The qaclan
-# binary no longer bundles a Playwright runtime — it shells out to system
-# Node for JS/TS scripts and system Python for Python scripts.
+# ── Provision isolated runtime ────────────────────────────────────────
+# qaclan provisions an isolated runtime under ~/.qaclan/runtime/ (Node deps +
+# Python venv + Chromium). Hard prerequisites: Node.js (with npm) + Python 3.
 if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
     error "Node.js (with npm) is required. Install Node.js 18+ from https://nodejs.org or your distro package manager, then re-run."
 fi
 if ! command -v python3 >/dev/null 2>&1; then
-    error "Python 3 is required. Install python3 + pip from your distro package manager, then re-run."
+    error "Python 3 is required. Install python3 + venv from your distro package manager, then re-run."
 fi
-if ! python3 -m pip --version >/dev/null 2>&1; then
-    error "pip is required for python3. Install it (e.g. 'sudo apt-get install python3-pip') and re-run."
-fi
-
-# Install npm Playwright + @playwright/test + tsx at the pinned version.
-info "Installing Playwright ${PLAYWRIGHT_VERSION} (npm: playwright + @playwright/test + tsx)..."
-npm install -g \
-    "playwright@${PLAYWRIGHT_VERSION}" \
-    "@playwright/test@${PLAYWRIGHT_VERSION}" \
-    tsx \
-    || error "npm install failed. Run manually: npm install -g playwright@${PLAYWRIGHT_VERSION} @playwright/test@${PLAYWRIGHT_VERSION} tsx"
-
-if ! command -v playwright >/dev/null 2>&1; then
-    error "Playwright installed but not found in PATH. Check your npm global bin path (npm bin -g)."
+if ! python3 -m venv --help >/dev/null 2>&1; then
+    error "python3 venv module missing. Install it (e.g. 'sudo apt-get install python3-venv') and re-run."
 fi
 
-# Install pip Playwright at the pinned version. --break-system-packages handles
-# PEP 668 distros (Debian 12+, Ubuntu 24.04+); fall back to plain --user on
-# older pip that doesn't recognize the flag.
-info "Installing Playwright ${PLAYWRIGHT_VERSION} (pip)..."
-if ! python3 -m pip install --user --break-system-packages "playwright==${PLAYWRIGHT_VERSION}" 2>/dev/null; then
-    python3 -m pip install --user "playwright==${PLAYWRIGHT_VERSION}" \
-        || error "pip install failed. Run manually: pip install --user playwright==${PLAYWRIGHT_VERSION}"
-fi
-info "Playwright (npm + pip) and tsx installed."
-
-# Install all browsers + system dependencies. One install via the npm
-# Playwright populates ~/.cache/ms-playwright; Python's pip-installed
-# Playwright reads from the same cache, so no second download.
-info "Installing all Playwright browsers (chromium, firefox, webkit) and system dependencies..."
-
+# Install Linux system libs needed by Playwright Chromium. We don't have
+# Playwright on PATH yet (it lives in the runtime we're about to build),
+# so use the binary's hidden _pw-install hook only after runtime exists.
+# For Linux system libs we still need apt-installable deps.
 if [ "$OS" = "linux" ]; then
-    if sudo playwright install --with-deps chromium firefox webkit; then
-        info "Browsers + system dependencies installed."
+    info "Installing Linux libs required by Chromium (sudo)..."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq || true
+        sudo apt-get install -y --no-install-recommends \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 \
+            libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
+            2>/dev/null || warn "apt-get install of Chromium libs failed (unsupported distro?). Browser may not launch."
     else
-        warn "Could not auto-install system libs (unsupported distro?). Falling back to browser-only install."
-        playwright install chromium firefox webkit || \
-            error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
-        warn "If a browser fails to launch, install the libs reported in the error via your package manager."
+        warn "Non-apt distro: install Chromium runtime libs manually if browser fails to launch."
     fi
-else
-    playwright install chromium firefox webkit || \
-        error "Failed to install browsers. Run manually: playwright install chromium firefox webkit"
-    info "Browsers installed."
 fi
+
+# Hand off to binary: provision ~/.qaclan/runtime/ (npm install + venv + Chromium).
+info "Initializing qaclan runtime (npm install + venv + Chromium)..."
+qaclan setup --runtime-only \
+    || error "Runtime setup failed. Re-run manually: qaclan setup --runtime-only"
 
 # Verify
 if command -v qaclan >/dev/null 2>&1; then

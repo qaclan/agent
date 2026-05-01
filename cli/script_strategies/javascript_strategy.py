@@ -7,11 +7,13 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
 from typing import List
 
+from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
 
 
@@ -147,19 +149,43 @@ class JavaScriptStrategy(ScriptStrategy):
                 "Node.js is required to run JavaScript scripts. "
                 "Install Node.js from https://nodejs.org and ensure 'node' is on PATH."
             )
+        # Try runtime first.
+        if runtime_setup.resolve_node_module("playwright") is not None:
+            env = os.environ.copy()
+            env["NODE_PATH"] = str(runtime_setup.NODE_MODULES)
+            result = subprocess.run(
+                ["node", "-e", "require('playwright')"],
+                capture_output=True, timeout=10, env=env,
+            )
+            if result.returncode == 0:
+                return
+            # Runtime present but broken — surface the error rather than silently falling back.
+            raise RuntimeError(
+                f"Runtime playwright at {runtime_setup.NODE_MODULES}/playwright is broken. "
+                "Re-run: qaclan setup --runtime-only --force"
+            )
+        # Fallback: global.
+        runtime_setup.emit_deprecation_warning()
+        env = os.environ.copy()
+        env.update(self._global_node_path_env())
         result = subprocess.run(
             ["node", "-e", "require('playwright')"],
-            capture_output=True,
-            timeout=10,
+            capture_output=True, timeout=10, env=env,
         )
         if result.returncode != 0:
             raise RuntimeError(
-                "The 'playwright' npm package is not installed or not reachable from Node.js. "
-                "Install it globally: npm install -g playwright@1.58.0\n"
-                "Then install browser binaries: npx playwright install"
+                "The 'playwright' npm package is not available. "
+                "Run: qaclan setup --runtime-only "
+                "(or install globally: npm install -g playwright@1.58.0)"
             )
 
     def extra_env(self) -> dict:
+        rt_modules = runtime_setup.NODE_MODULES
+        if rt_modules.exists():
+            return {"NODE_PATH": str(rt_modules)}
+        return self._global_node_path_env()
+
+    def _global_node_path_env(self) -> dict:
         npm = shutil.which("npm")
         if not npm:
             return {}

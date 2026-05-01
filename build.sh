@@ -46,6 +46,7 @@ python -m nuitka $ONEFILE_FLAG \
   --noinclude-data-files='playwright/driver/**' \
   --include-package=rich \
   --include-data-dir=web/static=web/static \
+  --include-data-dir=cli/runtime_assets=cli/runtime_assets \
   qaclan.py
 
 echo "Built: dist/${OUTPUT_NAME}"

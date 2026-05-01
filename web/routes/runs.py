@@ -178,13 +178,18 @@ def execute_run():
         logger.info("execute_run: loaded %d scripts for suite %s (%s)", len(items), suite_id, suite["name"])
 
         # Pre-flight: every language present in the suite must have a working runtime.
+        from cli import runtime_setup
         languages_in_suite = {item["language"] or "python" for item in items}
         for lang in languages_in_suite:
             try:
                 get_strategy(lang).validate_runtime()
             except (ValueError, RuntimeError) as e:
                 logger.error("execute_run: runtime check failed for language %s: %s", lang, e)
-                return jsonify({"ok": False, "error": str(e)}), 400
+                payload = {"ok": False, "error": str(e)}
+                if not runtime_setup.runtime_initialized():
+                    payload["needs_setup"] = True
+                    payload["setup_command"] = "qaclan setup --runtime-only"
+                return jsonify(payload), 400
 
         # Load env vars for substitution. These are passed to subprocesses via
         # the `env` param only — we never mutate os.environ of the Flask process.
@@ -254,7 +259,12 @@ def execute_run():
         is_frozen = is_frozen_binary()
         logger.info("execute_run: is_frozen=%s", is_frozen)
         pw_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-        if is_frozen and not pw_browsers_path and os.path.isdir(default_browsers):
+        # Prefer isolated runtime browsers dir.
+        rt_browsers = runtime_setup.browsers_path_if_present()
+        if not pw_browsers_path and rt_browsers is not None:
+            pw_browsers_path = str(rt_browsers)
+            logger.info("execute_run: using PLAYWRIGHT_BROWSERS_PATH=%s (runtime)", pw_browsers_path)
+        elif is_frozen and not pw_browsers_path and os.path.isdir(default_browsers):
             pw_browsers_path = default_browsers
             logger.info("execute_run: using PLAYWRIGHT_BROWSERS_PATH=%s (binary-mode default)", pw_browsers_path)
 
