@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from cli.config import QACLAN_DIR
+from cli.runtime import is_path_in_temp
 
 
 # package.json shipped as data file under cli/runtime_assets/. Bundled into
@@ -276,13 +277,40 @@ def add_to_path_windows() -> bool:
     return True
 
 
+def _self_binary_path() -> Path:
+    """Resolve path to the running qaclan binary.
+
+    Nuitka onefile extracts to /tmp/onefile_*/ and sys.executable points
+    inside that ephemeral dir (often a path that doesn't even exist as a
+    standalone file). The user-facing binary path is exported via
+    NUITKA_ONEFILE_BINARY (Nuitka >=1.6). Fallbacks for older Nuitka:
+    resolve sys.argv[0] against cwd, then sys.executable as last resort.
+    """
+    onefile = os.environ.get("NUITKA_ONEFILE_BINARY")
+    if onefile:
+        return Path(onefile).resolve()
+    if sys.argv and sys.argv[0]:
+        argv0 = Path(sys.argv[0])
+        if not argv0.is_absolute():
+            argv0 = Path.cwd() / argv0
+        argv0 = argv0.resolve()
+        if argv0.exists() and not is_path_in_temp(str(argv0)):
+            return argv0
+    return Path(sys.executable).resolve()
+
+
 def move_binary_to_bin_dir() -> Optional[Path]:
     """Copy current binary to ~/.qaclan/bin/. Returns target path if copied."""
     from cli.runtime import is_frozen_binary
 
     if not is_frozen_binary():
         return None
-    src = Path(sys.executable).resolve()
+    src = _self_binary_path()
+    if not src.exists():
+        raise RuntimeError(
+            f"Cannot locate self binary for copy. Resolved {src} (does not exist). "
+            "If you got here from a Nuitka build, NUITKA_ONEFILE_BINARY may be unset."
+        )
     BIN_DIR.mkdir(parents=True, exist_ok=True)
     name = "qaclan.exe" if sys.platform == "win32" else "qaclan"
     target = BIN_DIR / name
