@@ -116,12 +116,12 @@ qaclan setup --runtime-only \
 if command -v qaclan >/dev/null 2>&1; then
     info "qaclan installed successfully!"
     echo ""
-    echo "  Prerequisites: Node.js 18+ and Python 3.8+ (verified above)."
+    echo "  Prerequisites: Node.js 18+ and Python 3.9+ (verified above)."
     echo ""
     echo "  Get started:"
-    echo "    qaclan login          # Authenticate with your API key"
-    echo "    qaclan serve          # Launch the web UI"
-    echo "    qaclan --help         # See all commands"
+    echo "    qaclan login --key <your_auth_key>   # Authenticate (key from qaclan.com Settings)"
+    echo "    qaclan serve                         # Launch the web UI"
+    echo "    qaclan --help                        # See all commands"
     echo ""
 else
     warn "Installed to ${INSTALL_DIR}/${BINARY_NAME} but it's not in your PATH."
