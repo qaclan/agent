@@ -109,7 +109,7 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
     def build_run_command(self, script_path: str) -> List[str]:
         # playwright test treats the path argument as a regex filter against
         # discovered files. It scans testDir (default: CWD) so the script
-        # living in ~/.qaclan/runs/<id>/ is never found unless we point
+        # living in ~/.qaclan/runtime/runs/<id>/ is never found unless we point
         # testDir at its directory via a minimal config written alongside it.
         # The shared config (written once by setup_run_dir) carries
         # browserName / headless / viewport / storageState so the harness
