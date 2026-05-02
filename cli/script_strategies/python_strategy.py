@@ -24,6 +24,9 @@ _END_MARKER = "# END ACTIONS"
 
 
 _HARNESS_TEMPLATE = '''\
+# Ensure the correct Python encoding for all file operations, regardless of
+# the user's locale settings. Playwright scripts often include non-ASCII text,
+# and we want to avoid encoding issues when writing artifacts or screenshots.
 # -*- coding: utf-8 -*-
 # QAClan Playwright harness - do not edit the scaffolding.
 # Only edit the lines between the BEGIN / END action markers.
