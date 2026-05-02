@@ -134,6 +134,13 @@ jobs:
           key: nuitka-windows-amd64-${{ hashFiles('qaclan.py', 'cli/**', 'web/**') }}
           restore-keys: nuitka-windows-amd64-
 
+      - name: Bake version
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { $version = "0.0.0+dev" }
+          Write-Host "Baking version: $version"
+          Set-Content -Path cli/_version.py -Value "__version__ = `"$version`"" -Encoding utf8
+
       - name: Build binary
         run: |
           python -m nuitka --onefile `
@@ -181,6 +188,13 @@ jobs:
           path: ~\AppData\Local\Nuitka\Nuitka\Cache
           key: nuitka-windows-arm64-${{ hashFiles('qaclan.py', 'cli/**', 'web/**') }}
           restore-keys: nuitka-windows-arm64-
+
+      - name: Bake version
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if (-not $version) { $version = "0.0.0+dev" }
+          Write-Host "Baking version: $version"
+          Set-Content -Path cli/_version.py -Value "__version__ = `"$version`"" -Encoding utf8
 
       - name: Build binary
         run: |
