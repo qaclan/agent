@@ -130,7 +130,14 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         script_dir = os.path.dirname(os.path.abspath(script_path))
         config_path = os.path.join(script_dir, "playwright.config.js")
         cli_path = self._resolve_pwtest_cli()
-        return ["node", cli_path, "test", script_path, "--reporter=line", "--config", config_path]
+        # Pass basename, not full path. Playwright treats the positional arg
+        # as a regex filter against discovered file paths. Windows absolute
+        # paths contain `\` and `:` (regex meta) -> regex compiles to nothing
+        # matchable -> "No tests found". Discovery itself uses config.testDir
+        # (set to script_dir), so a basename like `srun_xxx.spec.js` is
+        # enough to substring-match the discovered absolute path on every OS.
+        script_filter = os.path.basename(script_path)
+        return ["node", cli_path, "test", script_filter, "--reporter=line", "--config", config_path]
 
     def _resolve_pwtest_cli(self) -> str:
         # Prefer isolated runtime cli.js.
