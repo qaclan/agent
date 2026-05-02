@@ -145,7 +145,7 @@ def _dispatch(row):
                 import json as _json
                 try:
                     var_keys = _json.loads(r["var_keys"] or "[]")
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as e:
                     var_keys = []
                 file_content = None
                 if r["file_path"]:
