@@ -37,7 +37,7 @@ def _read_artifacts(path: Path):
     if not path.exists():
         return [], []
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data.get("console_errors", []) or [], data.get("network_failures", []) or []
     except Exception as e:
         logger.warning("Failed to read artifacts at %s: %s", path, e)
@@ -305,7 +305,7 @@ def execute_run():
                 script_path = item["file_path"]
                 if not script_path or not os.path.exists(script_path):
                     raise FileNotFoundError(f"Script file not found: {script_path}")
-                source = Path(script_path).read_text()
+                source = Path(script_path).read_text(encoding="utf-8")
 
                 # Resolve {{KEY}} placeholders against the selected env (with
                 # recorded start-URL fallback). Values are escaped for the
@@ -328,7 +328,7 @@ def execute_run():
                 # Write the rendered, substituted script into the run directory
                 # so the subprocess executes a known file with no {{KEY}} left.
                 rendered_path = run_dir / f"{srun_id}{strategy.file_extension}"
-                rendered_path.write_text(source)
+                rendered_path.write_text(source, encoding="utf-8")
                 try:
                     os.chmod(rendered_path, 0o600)
                 except OSError:

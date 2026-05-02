@@ -61,7 +61,7 @@ def _write_artifacts():
     if not _ARTIFACTS:
         return
     try:
-        with open(_ARTIFACTS, "w") as f:
+        with open(_ARTIFACTS, "w", encoding="utf-8") as f:
             json.dump({
                 "console_errors": _console_errors,
                 "network_failures": _network_failures,

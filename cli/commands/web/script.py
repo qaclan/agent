@@ -76,7 +76,7 @@ def script_show(script_id):
     if not os.path.exists(row["file_path"]):
         console.print(f"[red]Script file not found at {row['file_path']}[/red]")
         return
-    with open(row["file_path"], "r") as f:
+    with open(row["file_path"], "r", encoding="utf-8", errors="replace") as f:
         console.print(f.read())
 
 
@@ -105,10 +105,10 @@ def script_import(file_path, name, feature_id, language):
     dest = os.path.join(SCRIPTS_DIR, f"{script_id}{strategy.file_extension}")
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
 
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         raw_script = f.read()
     processed = strategy.post_process_recording(raw_script)
-    with open(dest, "w") as f:
+    with open(dest, "w", encoding="utf-8") as f:
         f.write(processed)
 
     var_keys_list = _scan_var_keys(processed)

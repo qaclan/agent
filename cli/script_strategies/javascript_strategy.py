@@ -153,13 +153,17 @@ class JavaScriptStrategy(ScriptStrategy):
                 "Node.js is required to run JavaScript scripts. "
                 "Install Node.js from https://nodejs.org and ensure 'node' is on PATH."
             )
-        # Try runtime first.
+        # Try runtime first. cwd=RUNTIME_DIR so Node's parent-dir module walk
+        # starts inside runtime/ and finds runtime/node_modules first — a
+        # stray ~/node_modules with an older playwright otherwise shadows
+        # the runtime install (NODE_PATH is consulted only after the walk).
         if runtime_setup.resolve_node_module("playwright") is not None:
             env = os.environ.copy()
             env["NODE_PATH"] = str(runtime_setup.NODE_MODULES)
             result = subprocess.run(
                 ["node", "-e", "require('playwright')"],
                 capture_output=True, timeout=10, env=env,
+                cwd=str(runtime_setup.RUNTIME_DIR),
             )
             if result.returncode == 0:
                 return

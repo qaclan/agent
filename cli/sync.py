@@ -393,7 +393,7 @@ def sync_all(project_id=None):
             file_content = None
             if sc["file_path"]:
                 try:
-                    with open(sc["file_path"], "r") as f:
+                    with open(sc["file_path"], "r", encoding="utf-8", errors="replace") as f:
                         file_content = f.read()
                 except Exception:
                     pass

@@ -14,13 +14,13 @@ def ensure_dirs():
 def _read_config():
     if not os.path.exists(CONFIG_PATH):
         return {}
-    with open(CONFIG_PATH, "r") as f:
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def _write_config(data):
     ensure_dirs()
-    with open(CONFIG_PATH, "w") as f:
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
