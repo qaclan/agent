@@ -1,3 +1,4 @@
+import json
 import os
 import click
 from datetime import datetime, timezone
@@ -106,7 +107,8 @@ def pull_workspace():
         start_url_key: str = s.get("start_url_key")
         start_url_value: str = s.get("start_url_value")
         # var_keys: list[str] = s.get("var_keys") or []
-        var_keys: str =  "[" + ",".join(s.get("var_keys") or []) + "]"
+        # var_keys: str =  "[" + ",".join(s.get("var_keys") or []) + "]"
+        var_keys: str = json.dumps(s.get("var_keys") or [], separators=(",", ":"))
 
         ext = get_strategy(language).file_extension
         existing = conn.execute("SELECT id, file_path FROM scripts WHERE cloud_id = ?", (cloud_id,)).fetchone()
