@@ -19,6 +19,20 @@ esac
 
 OUTPUT_NAME="qaclan-${OS_NAME}-${ARCH_NAME}"
 
+# Bake version into cli/_version.py before compile.
+# Priority: $QACLAN_VERSION env > exact tag > git describe > placeholder.
+if [[ -n "$QACLAN_VERSION" ]]; then
+    VERSION="$QACLAN_VERSION"
+elif VERSION="$(git describe --tags --exact-match 2>/dev/null)"; then
+    VERSION="${VERSION#v}"
+elif VERSION="$(git describe --tags --always --dirty 2>/dev/null)"; then
+    VERSION="${VERSION#v}"
+else
+    VERSION="0.0.0+dev"
+fi
+echo "Baking version: $VERSION"
+printf '__version__ = "%s"\n' "$VERSION" > cli/_version.py
+
 # Suggest ccache for faster rebuilds
 if ! command -v ccache &>/dev/null; then
     echo "Tip: install ccache for much faster rebuilds (sudo apt install ccache)"

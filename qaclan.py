@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 
+from cli._version import __version__ as _BAKED_VERSION
 from cli.db import init_db
 from cli.commands.project import project
 from cli.commands.env import env_group
@@ -17,10 +18,39 @@ from cli.commands.auth import login, logout, require_auth
 from cli.commands.pull import pull
 
 
+def _get_version():
+    """Return baked version; fall back to `git describe` in dev mode."""
+    if _BAKED_VERSION != "0.0.0+dev":
+        return _BAKED_VERSION
+    try:
+        repo_root = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "-C", repo_root, "describe", "--tags", "--always", "--dirty"],
+            capture_output=True, text=True, timeout=2,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            v = out.stdout.strip()
+            return v[1:] if v.startswith("v") else v
+    except Exception:
+        pass
+    return _BAKED_VERSION
+
+
 @click.group()
+@click.version_option(
+    version=_get_version(),
+    prog_name="qaclan",
+    message="%(prog)s %(version)s",
+)
 def qaclan():
     """QAClan — QA test management and execution CLI."""
     init_db()
+
+
+@qaclan.command()
+def version():
+    """Print the qaclan version."""
+    click.echo(f"qaclan {_get_version()}")
 
 
 qaclan.add_command(login, "login")
