@@ -527,9 +527,9 @@ def execute_run():
     except Exception as e:
         logger.error("execute_run: top-level exception: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
-    # finally:
+    finally:
         # All console_errors / network_failures / screenshots already in DB
         # or SCREENSHOTS_DIR. Run_dir contents (rendered scripts, state.json,
         # *.artifacts.json, playwright.config.js) are disposable. Drop the
         # directory regardless of success/failure path.
-        # _cleanup_run_dir(run_dir)
+        _cleanup_run_dir(run_dir)
