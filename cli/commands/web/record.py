@@ -166,7 +166,7 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
             raise RuntimeError(f"Nothing was recorded. Codegen did not produce output ({detail}). "
                                "Close the browser only after interacting with the app.")
 
-        with open(tmp_path, "r") as f:
+        with open(tmp_path, "r", encoding="utf-8") as f:
             raw_script = f.read()
 
         processed = strategy.post_process_recording(raw_script)
@@ -180,7 +180,7 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
         script_id = generate_id("script")
         dest = os.path.join(SCRIPTS_DIR, f"{script_id}{strategy.file_extension}")
         os.makedirs(SCRIPTS_DIR, exist_ok=True)
-        with open(dest, "w") as f:
+        with open(dest, "w", encoding="utf-8") as f:
             f.write(processed)
 
         now = datetime.now(timezone.utc).isoformat()

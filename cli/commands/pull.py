@@ -116,7 +116,7 @@ def pull_workspace():
                          (s["name"], start_url_key, start_url_value, var_keys, existing["id"]))
             file_content = s.get("file_content")
             if file_content and existing["file_path"]:
-                with open(existing["file_path"], "w") as fp:
+                with open(existing["file_path"], "w", encoding="utf-8") as fp:
                     fp.write(file_content)
             script_map[s.get("cli_script_id", cloud_id)] = existing["id"]
         else:
@@ -131,7 +131,7 @@ def pull_workspace():
                 continue
             local_id = generate_id("script")
             file_path = os.path.join(SCRIPTS_DIR, f"{local_id}{ext}")
-            with open(file_path, "w") as fp:
+            with open(file_path, "w", encoding="utf-8") as fp:
                 fp.write(file_content)
             created_by = s.get("created_by")
             conn.execute(

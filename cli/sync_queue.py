@@ -150,7 +150,7 @@ def _dispatch(row):
                 file_content = None
                 if r["file_path"]:
                     try:
-                        with open(r["file_path"], "r") as f:
+                        with open(r["file_path"], "r", encoding="utf-8", errors="replace") as f:
                             file_content = f.read()
                     except Exception:
                         pass

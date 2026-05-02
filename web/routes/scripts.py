@@ -127,7 +127,7 @@ def get_script(script_id):
         content = ""
         file_path = script.get("file_path", "")
         if file_path and os.path.exists(file_path):
-            with open(file_path, "r") as f:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
         script["content"] = content
 
@@ -177,7 +177,7 @@ def create_script():
         scripts_dir = Path(SCRIPTS_DIR)
         scripts_dir.mkdir(parents=True, exist_ok=True)
         file_path = str(scripts_dir / f"{script_id}{strategy.file_extension}")
-        with open(file_path, "w") as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         from cli.config import get_user_name
@@ -258,7 +258,7 @@ def update_script(script_id):
 
         if content is not None:
             if file_path:
-                with open(file_path, "w") as f:
+                with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
             # Re-scan {{KEY}} placeholders so var_keys stays in sync with the body
             new_var_keys = _scan_var_keys(content)

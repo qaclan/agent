@@ -103,7 +103,7 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         # template) so writing it per-script wastes I/O. Called once per
         # unique strategy from web/routes/runs.py before the script loop.
         config_path = os.path.join(run_dir, "playwright.config.js")
-        with open(config_path, "w") as f:
+        with open(config_path, "w", encoding="utf-8") as f:
             f.write(self._render_config(run_dir))
 
     def build_run_command(self, script_path: str) -> List[str]:

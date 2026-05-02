@@ -26,7 +26,7 @@ def _extract_test_actions(script_path):
     Returns the lines between 'page = context.new_page()' and 'page.close()'
     (exclusive), dedented to top level.
     """
-    with open(script_path, "r") as f:
+    with open(script_path, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
     actions = []
