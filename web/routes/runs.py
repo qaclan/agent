@@ -375,12 +375,19 @@ def execute_run():
                                 len(console_errors), len(network_failures))
                 else:
                     status = "FAILED"
-                    error_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+                    stderr_txt = (proc.stderr or "").strip()
+                    stdout_txt = (proc.stdout or "").strip()
+                    parts = []
+                    if stderr_txt:
+                        parts.append(f"[stderr]\n{stderr_txt}")
+                    if stdout_txt:
+                        parts.append(f"[stdout]\n{stdout_txt}")
+                    error_msg = "\n\n".join(parts) or f"exit code {proc.returncode}"
                     failed += 1
                     saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
                     logger.error("execute_run: [%d/%d] %s — FAILED (%dms, exit=%d): %s",
                                  idx + 1, total, item["script_name"], duration_ms, proc.returncode,
-                                 error_msg[:500])
+                                 error_msg[:1000])
                     if stop_on_fail:
                         stopped = True
                         logger.info("execute_run: stop-on-fail triggered, remaining scripts will be skipped")
@@ -520,9 +527,9 @@ def execute_run():
     except Exception as e:
         logger.error("execute_run: top-level exception: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": str(e)}), 500
-    finally:
+    # finally:
         # All console_errors / network_failures / screenshots already in DB
         # or SCREENSHOTS_DIR. Run_dir contents (rendered scripts, state.json,
         # *.artifacts.json, playwright.config.js) are disposable. Drop the
         # directory regardless of success/failure path.
-        _cleanup_run_dir(run_dir)
+        # _cleanup_run_dir(run_dir)
