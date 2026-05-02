@@ -24,7 +24,8 @@ _END_MARKER = "# END ACTIONS"
 
 
 _HARNESS_TEMPLATE = '''\
-# QAClan Playwright harness — do not edit the scaffolding.
+# -*- coding: utf-8 -*-
+# QAClan Playwright harness - do not edit the scaffolding.
 # Only edit the lines between the BEGIN / END action markers.
 import json
 import os

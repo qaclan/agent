@@ -30,7 +30,7 @@ def _load_package_template() -> dict:
             "Build issue: ensure build.sh passes "
             "--include-data-dir=cli/runtime_assets=cli/runtime_assets to Nuitka."
         )
-    return json.loads(PACKAGE_JSON_TEMPLATE_PATH.read_text())
+    return json.loads(PACKAGE_JSON_TEMPLATE_PATH.read_text(encoding="utf-8"))
 
 
 PINNED_PLAYWRIGHT_VERSION = _load_package_template()["dependencies"]["playwright"]
@@ -115,10 +115,10 @@ def _check_python3() -> str:
 def write_package_json() -> bool:
     """Copy bundled package.json template to runtime/. Returns True if changed."""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    desired = PACKAGE_JSON_TEMPLATE_PATH.read_text()
-    if PACKAGE_JSON_PATH.exists() and PACKAGE_JSON_PATH.read_text() == desired:
+    desired = PACKAGE_JSON_TEMPLATE_PATH.read_text(encoding="utf-8")
+    if PACKAGE_JSON_PATH.exists() and PACKAGE_JSON_PATH.read_text(encoding="utf-8") == desired:
         return False
-    PACKAGE_JSON_PATH.write_text(desired)
+    PACKAGE_JSON_PATH.write_text(desired, encoding="utf-8")
     return True
 
 
@@ -140,7 +140,7 @@ def npm_install(force: bool = False) -> bool:
         not force
         and NODE_MODULES.exists()
         and _PKG_HASH_PATH.exists()
-        and _PKG_HASH_PATH.read_text().strip() == current_hash
+        and _PKG_HASH_PATH.read_text(encoding="utf-8").strip() == current_hash
     ):
         return False
     npm = _check_npm()
@@ -149,7 +149,7 @@ def npm_install(force: bool = False) -> bool:
         cwd=str(RUNTIME_DIR),
         check=True,
     )
-    _PKG_HASH_PATH.write_text(current_hash)
+    _PKG_HASH_PATH.write_text(current_hash, encoding="utf-8")
     return True
 
 
@@ -185,16 +185,35 @@ def venv_pip_install(force: bool = False) -> bool:
     return True
 
 
+_CHROMIUM_SENTINEL = RUNTIME_DIR / ".chromium.version"
+
+
 def install_chromium(force: bool = False) -> bool:
+    """Install Chromium under runtime/browsers/. Sentinel keyed to pinned
+    playwright version — playwright bump invalidates skip and re-runs the
+    CLI, which fetches the matching Chromium build (or short-circuits if
+    already cached). Globbing `chromium-*` is not enough: an older browser
+    revision satisfies the glob but mismatches a newer playwright."""
     pw = node_bin("playwright")
     if not pw.exists():
         raise RuntimeError(f"playwright CLI not found at {pw}. Run npm_install first.")
-    if BROWSERS_DIR.exists() and any(BROWSERS_DIR.glob("chromium-*")) and not force:
+    desired = PINNED_PLAYWRIGHT_VERSION
+    if (
+        not force
+        and BROWSERS_DIR.exists()
+        and any(BROWSERS_DIR.glob("chromium-*"))
+        and _CHROMIUM_SENTINEL.exists()
+        and _CHROMIUM_SENTINEL.read_text(encoding="utf-8").strip() == desired
+    ):
         return False
     BROWSERS_DIR.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(BROWSERS_DIR)
-    subprocess.run([str(pw), "install", "chromium"], env=env, check=True)
+    args = [str(pw), "install", "chromium"]
+    if force:
+        args.append("--force")
+    subprocess.run(args, env=env, check=True)
+    _CHROMIUM_SENTINEL.write_text(desired, encoding="utf-8")
     return True
 
 

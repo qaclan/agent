@@ -26,7 +26,7 @@ _END_MARKER = "// END ACTIONS"
 
 
 _HARNESS_TEMPLATE = """\
-// QAClan Playwright harness — do not edit the scaffolding.
+// QAClan Playwright harness - do not edit the scaffolding.
 // Only edit the lines between the BEGIN / END action markers.
 'use strict';
 const { chromium, firefox, webkit } = require('playwright');

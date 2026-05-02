@@ -24,7 +24,7 @@ _BEGIN_MARKER = "// BEGIN ACTIONS"
 _END_MARKER = "// END ACTIONS"
 
 _HARNESS_TEMPLATE = """\
-// QAClan Playwright/test harness — do not edit the scaffolding.
+// QAClan Playwright/test harness - do not edit the scaffolding.
 // Only edit the lines between the BEGIN / END action markers.
 // Browser / headless / viewport / storageState are configured by the
 // playwright.config.js written alongside this file.
