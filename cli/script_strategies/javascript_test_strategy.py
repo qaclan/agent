@@ -80,6 +80,118 @@ test.afterAll(() => {
 """
 
 
+# Match ANY async callback shape after `test(...,`:
+#   `async ()`, `async (page)`, `async ({page})`, `async ({page, context})`
+#   `async function()`, `async function named()`
+_TEST_CALLBACK_RE = re.compile(
+    r'\btest\s*\('                               # test(
+    r'[^)]*?,\s*'                                # name argument up to comma
+    r'async\s*'                                  # async
+    r'(?:function(?:\s+[A-Za-z_$][\w$]*)?\s*)?'  # optional `function` or `function name`
+    r'\([^)]*\)'                                 # arg list (...)
+    r'(?:\s*=>)?'                                # optional => (functions don't use it)
+    r'\s*\{',                                    # opening brace
+    re.DOTALL,
+)
+
+
+def _dedent_block_simple(body: str) -> str:
+    body = body.strip("\n").rstrip()
+    lines = body.splitlines()
+    indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+    base = min(indents) if indents else 0
+    return "\n".join(l[base:] if len(l) >= base else l for l in lines)
+
+
+def _slice_test_callback_body(text: str):
+    """Return ``(body, warnings)`` — body is the first test() callback body,
+    or ``None`` if no test() found. Body is the raw text between the callback
+    `{` and matching `}` — caller handles dedent.
+    """
+    from cli.script_strategies._shared import ImportWarning
+    warnings = []
+
+    m = _TEST_CALLBACK_RE.search(text)
+    if not m:
+        return None, warnings
+
+    # Extract destructure if any to surface unsupported_fixture warning.
+    # Look at the matched chunk for `{...}` inside parens.
+    destruct = re.search(r'\(\s*\{([^}]*)\}\s*\)', m.group(0))
+    if destruct:
+        fixtures = {p.strip().split(':')[0].strip() for p in destruct.group(1).split(',') if p.strip()}
+        unsupported = fixtures - {"page", "context"}
+        if unsupported:
+            warnings.append(ImportWarning(
+                severity="warn", code="unsupported_fixture",
+                message=f"Test uses fixtures the harness does not provide: {sorted(unsupported)}.",
+            ))
+
+    # Walk braces from the matched opening `{` (last char of m.group(0)).
+    open_pos = m.end() - 1  # the `{`
+    depth = 0
+    close_pos = None
+    i = open_pos
+    n = len(text)
+    in_str = None  # quote char if inside string literal
+    in_line_comment = False
+    in_block_comment = False
+    while i < n:
+        ch = text[i]
+        nxt = text[i+1] if i + 1 < n else ''
+        if in_line_comment:
+            if ch == '\n':
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if ch == '*' and nxt == '/':
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+            i += 1
+            continue
+        # Not in string/comment.
+        if ch == '/' and nxt == '/':
+            in_line_comment = True
+            i += 2
+            continue
+        if ch == '/' and nxt == '*':
+            in_block_comment = True
+            i += 2
+            continue
+        if ch in ('"', "'", '`'):
+            in_str = ch
+            i += 1
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                close_pos = i
+                break
+        i += 1
+
+    if close_pos is None:
+        warnings.append(ImportWarning(
+            severity="error", code="extraction_failed",
+            message="Could not find matching `}` for the test() callback.",
+        ))
+        return None, warnings
+
+    body = text[open_pos + 1:close_pos]
+    return body, warnings
+
+
 class JavaScriptTestStrategy(JavaScriptStrategy):
     """@playwright/test strategy for JavaScript.
 
@@ -204,6 +316,79 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
         # the package is correctly installed via `npm install -g`. Resolve
         # the absolute cli.js path instead (same lookup used at run time).
         self._resolve_pwtest_cli()
+
+    def extract_actions_freeform(self, raw: str):
+        """Pull action body out of a user-written ``@playwright/test`` spec.
+
+        Steps:
+          1. report sibling-construct warnings (multiple tests, hooks,
+             test.use, test.extend);
+          2. locate the FIRST ``test(...)`` callback — accept any callback
+             shape: ``async ({page})``, ``async (arg)``, ``async ()``,
+             ``async function()``, ``async function name()``;
+          3. slice the callback body via brace-depth counting;
+          4. peel manual ``newPage()``/``close()`` lifecycle out of the body
+             (some users launch their own browser inside the test) by
+             delegating to the plain-JS lifecycle peeler;
+          5. report body-shape warnings.
+        """
+        from cli.script_strategies._shared import ImportWarning
+        from cli.script_strategies.javascript_strategy import (
+            _peel_js_lifecycle, _js_body_warnings,
+        )
+        warnings = []
+
+        text = raw.expandtabs(2)
+        lines = text.splitlines()
+
+        test_count = sum(1 for l in lines if re.match(r'^\s*test\s*\(', l))
+        if test_count > 1:
+            warnings.append(ImportWarning(
+                severity="warn", code="multiple_tests_dropped",
+                message=f"{test_count} test() blocks found; only the first is kept.",
+            ))
+        for code, pattern, msg in (
+            ("test_use_dropped", r'^\s*test\.use\s*\(',
+             "test.use({...}) removed — harness owns config."),
+            ("hook_dropped", r'^\s*test\.(beforeAll|beforeEach|afterAll|afterEach)\s*\(',
+             "test hooks (beforeAll/beforeEach/afterAll/afterEach) removed."),
+            ("fixture_definition_dropped", r'^\s*test\.extend\s*\(',
+             "test.extend({...}) fixture definitions removed."),
+        ):
+            if any(re.match(pattern, l) for l in lines):
+                warnings.append(ImportWarning(severity="warn", code=code, message=msg))
+
+        body, slice_warnings = _slice_test_callback_body(text)
+        warnings.extend(slice_warnings)
+        if body is None:
+            return "", warnings + [ImportWarning(
+                severity="error", code="extraction_failed",
+                message="No `test('name', <async callback>)` block found.",
+            )]
+        if not body.strip():
+            return "", warnings + [ImportWarning(
+                severity="error", code="extraction_failed",
+                message="test() callback body is empty.",
+            )]
+
+        # Some users hand-roll lifecycle inside the test() body. Strip it.
+        peeled, peel_warnings = _peel_js_lifecycle(body)
+        if peeled.strip() and peeled != body.strip():
+            warnings.append(ImportWarning(
+                severity="info", code="manual_lifecycle_in_test",
+                message="Detected manual browser/context/page lifecycle in test body — stripped.",
+            ))
+            actions = peeled
+        else:
+            # No internal lifecycle: keep callback body as-is. Filter the
+            # 'no_lifecycle_found' info warning since fixture-style tests
+            # don't have a lifecycle by design.
+            actions = _dedent_block_simple(body)
+            peel_warnings = [w for w in peel_warnings if w.code != "no_lifecycle_found"]
+        warnings.extend(peel_warnings)
+
+        warnings.extend(_js_body_warnings(actions))
+        return actions, warnings
 
     # ---- internals ----
 

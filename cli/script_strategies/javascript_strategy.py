@@ -118,6 +118,98 @@ run().then(() => {
 """
 
 
+_QACLAN_JS_NAMES = (
+    "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
+    "_SCREENSHOT", "_consoleErrors", "_networkFailures", "_contextOpts",
+    "_writeArtifacts", "_browsers", "_browserType",
+)
+
+
+def _dedent_block(body: str) -> str:
+    lines = body.splitlines()
+    indents = [len(l) - len(l.lstrip()) for l in lines if l.strip()]
+    base = min(indents) if indents else 0
+    return "\n".join(l[base:] if len(l) >= base else l for l in lines)
+
+
+def _peel_js_lifecycle(text: str):
+    """Return ``(actions, warnings)`` after stripping any browser/context
+    lifecycle wrapper around the action body.
+
+    Handles three shapes:
+      1. ``newPage()`` … ``await context.close()/browser.close()`` (incl. inside
+         a test() callback that manually launches its own browser);
+      2. async IIFE wrapper — terminates at ``})();``;
+      3. no lifecycle at all — return the input unchanged with a warning.
+    """
+    from cli.script_strategies._shared import ImportWarning
+    warnings = []
+    lines = text.splitlines()
+
+    new_page_re = re.compile(r'newPage\s*\(\s*\)')
+    # Match any teardown-shaped close call regardless of variable name (users
+    # name them `ctx`, `myBrowser`, etc.). Stops as soon as we see a top-level
+    # `<ident>.close()` — the action body itself shouldn't have any.
+    close_re = re.compile(r'^\s*(?:await\s+)?[A-Za-z_$][\w$]*\.close\s*\(')
+    iife_close_re = re.compile(r'^\s*\}\s*\)\s*\(\s*\)\s*;?\s*$')
+
+    start_idx = None
+    for i, line in enumerate(lines):
+        if new_page_re.search(line):
+            start_idx = i + 1
+            break
+
+    if start_idx is None:
+        # No lifecycle — fall back to whole text. Caller decides whether to
+        # accept (e.g. test() bodies that just await page.* directly).
+        warnings.append(ImportWarning(
+            severity="info", code="no_lifecycle_found",
+            message="No newPage()/close() pair detected; using body as-is.",
+        ))
+        return _dedent_block(text.rstrip()), warnings
+
+    captured = []
+    for j in range(start_idx, len(lines)):
+        line = lines[j]
+        if close_re.match(line):
+            break
+        if iife_close_re.match(line):
+            break
+        captured.append(line)
+
+    body = "\n".join(captured).rstrip()
+    if not body.strip():
+        return "", warnings
+    return _dedent_block(body), warnings
+
+
+def _js_body_warnings(body: str):
+    from cli.script_strategies._shared import ImportWarning
+    warnings = []
+    for name in _QACLAN_JS_NAMES:
+        if re.search(r'^\s*(?:const|let|var)\s+' + re.escape(name) + r'\b', body, re.MULTILINE):
+            warnings.append(ImportWarning(
+                severity="error", code="qaclan_var_collision",
+                message=f"Action body redefines QAClan scaffold variable `{name}`.",
+            ))
+    if re.search(r'\bbrowser\.close\s*\(|\bcontext\.close\s*\(', body):
+        warnings.append(ImportWarning(
+            severity="warn", code="manual_browser_lifecycle",
+            message="Action body calls browser.close()/context.close() — harness owns lifecycle.",
+        ))
+    if re.search(r'\bstorageState\s*[:=]', body):
+        warnings.append(ImportWarning(
+            severity="warn", code="storage_state_override",
+            message="Action body sets storageState — overrides QAClan shared state.",
+        ))
+    if re.search(r'\bpage\.pause\s*\(', body):
+        warnings.append(ImportWarning(
+            severity="warn", code="pause_call_present",
+            message="Action body contains page.pause() — headless runs will hang.",
+        ))
+    return warnings
+
+
 class JavaScriptStrategy(ScriptStrategy):
     language = "javascript"
     codegen_target = "javascript"
@@ -223,6 +315,21 @@ class JavaScriptStrategy(ScriptStrategy):
         )
 
     # ---- internals ----
+
+    def extract_actions_freeform(self, raw: str):
+        """Pull action body out of a hand-written plain-JS Playwright script."""
+        from cli.script_strategies._shared import ImportWarning
+        text = raw.expandtabs(2)
+        actions, peel_warnings = _peel_js_lifecycle(text)
+        warnings = list(peel_warnings)
+        if not actions.strip():
+            warnings.append(ImportWarning(
+                severity="error", code="extraction_failed",
+                message="No `newPage()`/`close()` lifecycle found and no usable body extracted.",
+            ))
+            return "", warnings
+        warnings.extend(_js_body_warnings(actions))
+        return actions, warnings
 
     def _extract_actions(self, raw: str) -> str:
         """Pull the action body out of Playwright JS codegen output.
