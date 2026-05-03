@@ -253,6 +253,92 @@ class PythonStrategy(ScriptStrategy):
         norm = os.path.normcase(os.path.normpath(path))
         return os.path.join("microsoft", "windowsapps") in norm
 
+    def extract_actions_freeform(self, raw: str):
+        """Pull the action body out of a hand-written Python Playwright script.
+
+        Heuristics, in order:
+          1. find ``page = ...new_page()`` (or ``page = await ... new_page()``
+             — sync_playwright doesn't await but be permissive);
+          2. capture lines until ``browser.close()`` / ``page.close()`` /
+             ``playwright.stop()`` / end of enclosing ``with`` block;
+          3. dedent + expand tabs.
+        """
+        from cli.script_strategies._shared import ImportWarning
+        warnings = []
+
+        text = raw.expandtabs(4)
+        lines = text.splitlines()
+
+        # Accept both sync (`page = context.new_page()`) and async
+        # (`page = await context.new_page()`) wrappers.
+        new_page_re = re.compile(r'^\s*page\s*=\s*(?:await\s+)?[^=].*new_page\s*\(')
+        # Stop at any teardown-shaped close, including renamed variables and
+        # `playwright.stop()`. Action body should not contain these.
+        close_re = re.compile(
+            r'^\s*(?:await\s+)?(?:[A-Za-z_][\w]*\.close\s*\(|playwright\.stop\s*\()'
+        )
+
+        start_idx = None
+        for i, line in enumerate(lines):
+            if new_page_re.match(line):
+                start_idx = i + 1
+                break
+        if start_idx is None:
+            return "", [ImportWarning(
+                severity="error", code="extraction_failed",
+                message="No `page = ...new_page()` line found. Cannot locate action body.",
+            )]
+
+        captured = []
+        for j in range(start_idx, len(lines)):
+            line = lines[j]
+            if close_re.match(line):
+                break
+            captured.append(line)
+
+        body = "\n".join(captured).rstrip()
+        if not body.strip():
+            return "", [ImportWarning(
+                severity="error", code="extraction_failed",
+                message="Action body between new_page() and close() is empty.",
+            )]
+
+        # Dedent to smallest common indent so it can be re-rendered.
+        body_lines = body.splitlines()
+        indents = [len(l) - len(l.lstrip()) for l in body_lines if l.strip()]
+        base = min(indents) if indents else 0
+        dedented = "\n".join(l[base:] if len(l) >= base else l for l in body_lines)
+
+        # Surface QAClan scaffold-name collisions inside the action body.
+        for name in (
+            "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
+            "_SCREENSHOT", "_console_errors", "_network_failures", "_context_opts",
+            "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
+        ):
+            if re.search(r'^\s*' + re.escape(name) + r'\s*=', dedented, re.MULTILINE):
+                warnings.append(ImportWarning(
+                    severity="error", code="qaclan_var_collision",
+                    message=f"Action body redefines QAClan scaffold variable `{name}`.",
+                ))
+
+        if re.search(r'\bbrowser\.close\s*\(|\bplaywright\.stop\s*\(', dedented):
+            warnings.append(ImportWarning(
+                severity="warn", code="manual_browser_lifecycle",
+                message="Action body calls browser.close()/playwright.stop() — harness owns lifecycle.",
+            ))
+        if re.search(r'storage_state\s*=', dedented):
+            warnings.append(ImportWarning(
+                severity="warn", code="storage_state_override",
+                message="Action body sets storage_state — overrides QAClan shared state.",
+            ))
+        if re.search(r'\bpage\.pause\s*\(', dedented):
+            warnings.append(ImportWarning(
+                severity="warn", code="pause_call_present",
+                message="Action body contains page.pause() — headless runs will hang.",
+            ))
+
+        return dedented, warnings
+
     def _extract_actions(self, raw: str) -> str:
         """Pull the action body out of Playwright codegen ougtput.
 

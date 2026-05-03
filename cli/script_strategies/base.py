@@ -15,7 +15,7 @@ language speaks the same runtime contract.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Tuple
 
 
 class ScriptStrategy(ABC):
@@ -55,6 +55,23 @@ class ScriptStrategy(ABC):
     def validate_runtime(self) -> None:
         """Raise RuntimeError with a user-facing message if the interpreter or
         required dependencies are not installed."""
+
+    def extract_actions_freeform(self, raw: str) -> Tuple[str, list]:
+        """Best-effort extraction of action body from a user-supplied script
+        that is neither a QAClan harness nor raw codegen output.
+
+        Subclasses override to apply language-specific heuristics. Returns
+        ``(actions, warnings)`` where ``warnings`` is a list of
+        ``cli.script_strategies._shared.ImportWarning`` instances. The
+        default implementation returns the raw text unchanged with a single
+        warning so the user is forced to review.
+        """
+        from cli.script_strategies._shared import ImportWarning
+        return raw, [ImportWarning(
+            severity="error",
+            code="extraction_failed",
+            message="Could not auto-extract action body. Review and rewrite manually.",
+        )]
 
     def extra_env(self) -> dict:
         """Return extra environment variables to inject into the script subprocess.
