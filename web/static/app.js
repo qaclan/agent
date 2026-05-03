@@ -934,6 +934,7 @@ async function renderScriptsPage() {
       </div>
       <div class="flex gap-2">
         <button class="btn btn-ghost" onclick="recordScriptModal()">Record</button>
+        <button class="btn btn-ghost" onclick="importScriptModal()">Import</button>
         <button class="btn btn-primary" onclick="createScriptModal()">+ New Script</button>
       </div>
     </div>
@@ -1673,6 +1674,331 @@ async function createScriptModal() {
       lastTemplate = newTpl
     })
   }
+}
+
+// ── Script Import ──────────────────────────────────────────────
+// Two-step flow:
+//   Modal A (importScriptModal)         — file picker + raw preview + language pick
+//   Modal B (_openImportedScriptEditor) — pre-filled create-script editor with
+//                                          diagnostics banner. "View original"
+//                                          re-opens Modal A.
+//
+// State carried across the two modals lives on window._qcImportRaw so the user
+// can flip back to the original file at any time. Cleared when Modal B closes.
+
+const _LANG_LABELS = {
+  python: 'Python',
+  javascript: 'JavaScript',
+  typescript: 'TypeScript',
+  javascript_test: 'JavaScript (playwright/test)',
+  typescript_test: 'TypeScript (playwright/test)',
+}
+
+function _guessLangFromFilename(name) {
+  const n = (name || '').toLowerCase()
+  if (n.endsWith('.spec.ts') || n.endsWith('.test.ts')) return 'typescript_test'
+  if (n.endsWith('.spec.js') || n.endsWith('.test.js')) return 'javascript_test'
+  if (n.endsWith('.tsx') || n.endsWith('.ts')) return 'typescript'
+  if (n.endsWith('.mjs') || n.endsWith('.cjs') || n.endsWith('.js')) return 'javascript'
+  if (n.endsWith('.py')) return 'python'
+  return ''
+}
+
+async function importScriptModal() {
+  const features = window._features || (await api('GET', '/features')).features || []
+  if (!features || features.length === 0) {
+    toast('Create a feature first', 'error')
+    return
+  }
+
+  // File picker — invisible, triggered programmatically. Cleaner than embedding
+  // it in the modal because the modal needs the file content before it opens.
+  const picker = document.createElement('input')
+  picker.type = 'file'
+  picker.accept = '.py,.js,.mjs,.cjs,.ts,.tsx,text/plain'
+  picker.style.display = 'none'
+  document.body.appendChild(picker)
+
+  picker.addEventListener('change', async () => {
+    const file = picker.files && picker.files[0]
+    picker.remove()
+    if (!file) return
+    let content = ''
+    try {
+      content = await file.text()
+    } catch (e) {
+      toast('Could not read file: ' + e.message, 'error'); return
+    }
+    if (!content.trim()) { toast('File is empty', 'error'); return }
+    if (content.length > 256 * 1024) { toast('File exceeds 256 KB', 'error'); return }
+    _showImportPreviewModal(file.name, content)
+  })
+
+  picker.click()
+}
+
+function _detectGotoUrls(raw) {
+  const re = /\bpage\s*\.\s*goto\s*\(\s*["']([^"']+)["']/g
+  const counts = new Map()
+  let m
+  while ((m = re.exec(raw)) !== null) {
+    const url = (m[1] || '').trim()
+    if (!url || url.includes('{{')) continue
+    counts.set(url, (counts.get(url) || 0) + 1)
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([url, occurrences]) => ({ url, occurrences }))
+}
+
+function _showImportPreviewModal(filename, rawContent) {
+  const guessed = _guessLangFromFilename(filename) || 'python'
+  window._qcImportRaw = { filename, content: rawContent, language: guessed }
+
+  const langOptions = Object.entries(_LANG_LABELS)
+    .map(([v, label]) => `<option value="${v}" ${v === guessed ? 'selected' : ''}>${escHtml(label)}</option>`)
+    .join('')
+
+  const detectedUrls = _detectGotoUrls(rawContent)
+  let urlSection = ''
+  if (detectedUrls.length > 0) {
+    const radios = detectedUrls.map((u, i) => `
+      <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+        <input type="radio" name="import-url-choice" value="${escHtml(u.url)}" ${i === 0 ? 'checked' : ''}>
+        <code style="font-size:12px">${escHtml(u.url)}</code>
+        <span class="text-muted text-sm">(${u.occurrences}×)</span>
+      </label>
+    `).join('')
+    urlSection = `
+      <div class="form-group">
+        <label class="form-label">Start URL</label>
+        <p class="form-hint" style="margin-top:0">Pick a URL to template as a variable so this script can switch environments. Skip if not applicable.</p>
+        <div>
+          ${radios}
+          <label style="display:flex;align-items:center;gap:8px;padding:4px 0">
+            <input type="radio" name="import-url-choice" value="">
+            <span>Skip — leave URLs as literals</span>
+          </label>
+        </div>
+        <label class="form-label" style="margin-top:8px">URL Key</label>
+        <input type="text" id="import-url-key" value="BASE_URL" placeholder="BASE_URL">
+        <p class="form-hint">Variable name placeholder injected into the script (e.g. <code>{{BASE_URL}}</code>). Add the actual value under an environment later.</p>
+      </div>`
+  }
+
+  showModal('Import Script — Preview', `
+    <div class="form-group">
+      <label class="form-label">File</label>
+      <p style="margin:0"><code>${escHtml(filename)}</code> <span class="text-muted text-sm">(${rawContent.length} chars)</span></p>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Language</label>
+      <select id="import-lang">${langOptions}</select>
+      <p class="form-hint">Override only if the filename does not reflect the script type.</p>
+    </div>
+    ${urlSection}
+    <div class="form-group">
+      <label class="form-label">Raw Content</label>
+      <div id="import-raw-host"></div>
+    </div>`, [
+    { label: 'Cancel', cls: 'btn-ghost', action: () => { window._qcImportRaw = null; closeModal() } },
+    { label: 'Process & Open Editor', cls: 'btn-primary', action: async () => {
+      const language = document.getElementById('import-lang').value
+      window._qcImportRaw.language = language
+      const urlChoice = document.querySelector('input[name="import-url-choice"]:checked')
+      const url_value = urlChoice ? urlChoice.value : ''
+      const url_key = (document.getElementById('import-url-key')?.value || '').trim()
+      const payload = { content: rawContent, filename, language }
+      if (url_value && url_key) {
+        payload.url_key = url_key
+        payload.url_value = url_value
+      }
+      const res = await api('POST', '/scripts/import-preview', payload)
+      if (res.ok === false) {
+        toast(res.error || 'Import failed', 'error')
+        return
+      }
+      closeModal()
+      _openImportedScriptEditor(res, filename)
+    }},
+  ], '', 'lg')
+
+  const host = document.getElementById('import-raw-host')
+  if (host) {
+    const editor = _createScriptEditor(host, rawContent, { readOnly: true, language: guessed })
+    window._qcCurrentEditor = editor
+    window._qcModalCleanupHook = () => {
+      editor.destroy()
+      if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+    }
+  }
+}
+
+async function _openImportedScriptEditor(preview, filename) {
+  const features = window._features || (await api('GET', '/features')).features || []
+  const envsRes = await api('GET', '/envs')
+  const envs = envsRes.environments || []
+  const lang = preview.language
+  const langLabel = _LANG_LABELS[lang] || lang
+
+  // Strip extension off filename for the default name.
+  const stem = (filename || '').replace(/\.[^./]+$/, '') || 'Imported script'
+
+  showModal('Import Script — Edit', `
+    <div class="form-group">
+      <label class="form-label">Script Name</label>
+      <input type="text" id="script-name" value="${escHtml(stem)}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Feature</label>
+      <select id="script-feature">
+        ${features.map(f => `<option value="${f.id}">${escHtml(f.name)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Language</label>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="badge badge-neutral">${escHtml(langLabel)}</span>
+        <span class="form-hint" style="margin:0">Detected from <strong>${escHtml(preview.language_source)}</strong>. Layout: <code>${escHtml(preview.layout)}</code>.</span>
+        ${preview.start_url_key && preview.start_url_value ? `<span class="badge badge-neutral">Templated: <code>${escHtml(preview.start_url_value)}</code> → <code>{{${escHtml(preview.start_url_key)}}}</code></span>` : ''}
+      </div>
+    </div>
+    <div id="import-banner-host"></div>
+    <div class="form-group">
+      <label class="form-label">Insert Variable</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="insert-var-env" style="flex:1;min-width:150px" onchange="_loadEnvKeysForInsert()">
+          <option value="">— Select env —</option>
+          ${envs.map(e => `<option value="${escHtml(e.name)}">${escHtml(e.name)}</option>`).join('')}
+        </select>
+        <select id="insert-var-key" style="flex:1;min-width:150px" disabled>
+          <option value="">— Pick env first —</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Script Content</label>
+      <div id="import-script-editor-host"></div>
+    </div>`, [
+    { label: 'View Original', cls: 'btn-ghost', action: () => {
+      const raw = window._qcImportRaw
+      if (!raw) { toast('Original file no longer available', 'error'); return }
+      closeModal()
+      _showImportPreviewModal(raw.filename, raw.content)
+    }},
+    { label: 'Cancel', cls: 'btn-ghost', action: () => { window._qcImportRaw = null; closeModal() } },
+    { label: 'Create Script', cls: 'btn-primary', action: async () => {
+      const name = document.getElementById('script-name').value.trim()
+      const feature_id = document.getElementById('script-feature').value
+      const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
+      if (!name || !feature_id) { toast('Name and feature required', 'error'); return }
+      const payload = { name, feature_id, language: lang, content }
+      if (preview.start_url_key && preview.start_url_value) {
+        payload.start_url_key = preview.start_url_key
+        payload.start_url_value = preview.start_url_value
+      }
+      const res = await api('POST', '/scripts', payload)
+      if (res.ok === false) { toast(res.error, 'error'); return }
+      window._qcImportRaw = null
+      closeModal(); toast('Script "' + name + '" imported')
+      renderScriptsPage()
+    }},
+  ], 'Imported from ' + escHtml(filename), 'lg')
+
+  // Banner with warnings + Scan & Bind shortcut.
+  const bannerHost = document.getElementById('import-banner-host')
+  if (bannerHost) {
+    bannerHost.innerHTML = _renderImportBanner(preview)
+  }
+
+  const host = document.getElementById('import-script-editor-host')
+  if (host) {
+    const editor = _createScriptEditor(host, preview.content || '', { readOnly: false, language: lang })
+    window._qcCurrentEditor = editor
+    window._qcModalCleanupHook = () => {
+      editor.destroy()
+      if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+    }
+
+    // Auto-clear banner on first user edit. CM6 has no direct change event on
+    // our wrapper; poll content once via a microtask listener attached through
+    // the host element. Simpler: stash original normalized content, compare on
+    // first focus-out. Cleanest: tap into CM6 via a transactionExtender — but
+    // we kept the wrapper opaque, so use a content snapshot + interval check
+    // bounded to the modal lifetime.
+    const originalContent = preview.content || ''
+    let dismissed = false
+    const checkEdited = () => {
+      if (dismissed || !window._qcCurrentEditor) return
+      const cur = window._qcCurrentEditor.getValue()
+      if (cur !== originalContent) {
+        dismissed = true
+        const banner = document.getElementById('import-banner-root')
+        if (banner) {
+          banner.innerHTML = `<button class="btn btn-xs btn-ghost" onclick="_restoreImportBanner()">Show import diagnostics</button>`
+        }
+        clearInterval(timer)
+      }
+    }
+    const timer = setInterval(checkEdited, 600)
+    const prevHook = window._qcModalCleanupHook
+    window._qcModalCleanupHook = () => {
+      clearInterval(timer)
+      if (typeof prevHook === 'function') prevHook()
+    }
+    window._qcImportLastPreview = preview
+  }
+}
+
+function _renderImportBanner(preview) {
+  const warnings = preview.warnings || []
+  if (warnings.length === 0) return ''
+
+  const errors = warnings.filter(w => w.severity === 'error')
+  const warns = warnings.filter(w => w.severity === 'warn')
+  const infos = warnings.filter(w => w.severity === 'info')
+
+  const colorFor = (sev) => sev === 'error' ? '#dc2626' : (sev === 'warn' ? '#d97706' : '#2563eb')
+  const labelFor = (sev) => sev === 'error' ? 'ERROR' : (sev === 'warn' ? 'WARN' : 'INFO')
+  const items = [...errors, ...warns, ...infos].map(w => `
+    <li style="margin:0;padding:2px 0;font-size:13px">
+      <span style="display:inline-block;min-width:46px;font-weight:600;color:${colorFor(w.severity)}">${labelFor(w.severity)}</span>
+      <code style="font-size:11px;color:var(--text-secondary)">${escHtml(w.code)}</code>
+      <span style="margin-left:6px">${escHtml(w.message)}</span>
+    </li>
+  `).join('')
+
+  const blocking = errors.length > 0
+  const headerColor = blocking ? '#dc2626' : '#d97706'
+  const headerLabel = blocking ? `Import has ${errors.length} blocking issue${errors.length>1?'s':''}` : `Import diagnostics (${warnings.length})`
+
+  return `
+    <div id="import-banner-root" class="form-group" style="border-left:3px solid ${headerColor};padding:10px 12px;background:var(--bg-base);border-radius:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <strong style="color:var(--text-primary)">${headerLabel}</strong>
+        <div style="display:flex;gap:6px">
+          <button type="button" class="btn btn-xs btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+          <button type="button" class="btn btn-xs btn-ghost" onclick="_dismissImportBanner()">Dismiss</button>
+        </div>
+      </div>
+      <ul style="margin:0;padding-left:0;list-style:none">${items}</ul>
+    </div>
+  `
+}
+
+function _dismissImportBanner() {
+  const banner = document.getElementById('import-banner-root')
+  if (banner) {
+    banner.innerHTML = `<button class="btn btn-xs btn-ghost" onclick="_restoreImportBanner()">Show import diagnostics</button>`
+  }
+}
+
+function _restoreImportBanner() {
+  const host = document.getElementById('import-banner-host')
+  const preview = window._qcImportLastPreview
+  if (host && preview) host.innerHTML = _renderImportBanner(preview)
 }
 
 function _scriptProvenanceHTML(s) {
