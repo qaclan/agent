@@ -223,6 +223,22 @@ const routes = {
   settings: renderSettingsPage,
 }
 
+// Shared resolution presets used by record + run modals.
+// Format: "WIDTHxHEIGHT" (sent to backend as-is; "" = browser default).
+const RESOLUTION_OPTIONS = [
+  { value: '',          label: 'Default' },
+  { value: '1920x1080', label: '1920x1080' },
+  { value: '1366x768',  label: '1366x768' },
+  { value: '1280x720',  label: '1280x720' },
+  { value: '390x844',   label: '390x844 (Mobile)' },
+]
+
+function _renderResolutionOptions(selected = '') {
+  return RESOLUTION_OPTIONS.map(o =>
+    `<option value="${o.value}"${o.value === selected ? ' selected' : ''}>${escHtml(o.label)}</option>`
+  ).join('')
+}
+
 async function navigate(page) {
   state.page = page
   renderSidebar()
@@ -1001,6 +1017,12 @@ async function recordScriptModal() {
       </select>
     </div>
     <div class="form-group">
+      <label class="form-label">Resolution</label>
+      <select id="rec-resolution">
+        ${_renderResolutionOptions()}
+      </select>
+    </div>
+    <div class="form-group">
       <label class="form-label">Environment (optional)</label>
       <select id="rec-env" onchange="_onRecordEnvChange()">
         <option value="">— No environment —</option>
@@ -1026,6 +1048,7 @@ async function recordScriptModal() {
       const name = document.getElementById('rec-name').value.trim()
       const feature_id = document.getElementById('rec-feature').value
       const language = document.getElementById('rec-language').value
+      const resolution = document.getElementById('rec-resolution').value || ''
       const env_name = document.getElementById('rec-env').value
       const url_key = document.getElementById('rec-url-key')?.value || ''
       const path_suffix = document.getElementById('rec-path')?.value.trim() || ''
@@ -1040,6 +1063,7 @@ async function recordScriptModal() {
       document.querySelector('.modal-footer').innerHTML = ''
 
       const payload = { name, feature_id, language }
+      if (resolution) payload.resolution = resolution
       if (env_name && url_key) {
         payload.env_name = env_name
         payload.url_key = url_key
@@ -2472,11 +2496,7 @@ async function runSuiteModal(id, name) {
       <div class="form-group" style="flex:1">
         <label class="form-label">Resolution</label>
         <select id="run-resolution">
-          <option value="">Default</option>
-          <option value="1920x1080">1920x1080</option>
-          <option value="1366x768">1366x768</option>
-          <option value="1280x720">1280x720</option>
-          <option value="390x844">390x844 (Mobile)</option>
+          ${_renderResolutionOptions()}
         </select>
       </div>
     </div>
