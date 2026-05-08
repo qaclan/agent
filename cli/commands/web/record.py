@@ -20,8 +20,12 @@ logger = logging.getLogger("qaclan.record")
 
 SEPARATOR = "─" * 45
 
+# Default viewport for codegen when caller doesn't specify one.
+# Full HD — closest match to "full screen" since codegen has no fullscreen flag.
+DEFAULT_RECORD_RESOLUTION = "1920x1080"
 
-def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_value=None, language="python"):
+
+def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_value=None, language="python", resolution=None):
     """Core recording logic shared by CLI and web UI.
 
     Launches Playwright codegen against the target language, wraps the output
@@ -136,6 +140,13 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
 
     try:
         codegen_args = ["codegen", "--output", tmp_path, "--target", strategy.codegen_target]
+        effective_resolution = resolution or DEFAULT_RECORD_RESOLUTION
+        try:
+            w, h = effective_resolution.lower().split("x")
+            int(w), int(h)
+            codegen_args += [f"--viewport-size={w},{h}"]
+        except (ValueError, AttributeError):
+            logger.warning("Ignoring invalid resolution %r (expected WIDTHxHEIGHT)", effective_resolution)
         cmd = [*cmd_prefix, *codegen_args]
         if url:
             cmd.append(url)
