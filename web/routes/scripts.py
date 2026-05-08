@@ -575,6 +575,7 @@ def record_script_route():
         url_key = data.get("url_key", "").strip() or None
         path_suffix = data.get("path_suffix", "").strip() or ""
         language = (data.get("language") or "python").strip()
+        resolution = (data.get("resolution") or "").strip() or None
 
         if not name:
             return jsonify({"ok": False, "error": "Script name is required"}), 400
@@ -619,6 +620,7 @@ def record_script_route():
             url_key=resolved_url_key,
             url_key_value=resolved_url_key_value,
             language=language,
+            resolution=resolution,
         )
         logger.info("Recording succeeded: script_id=%s, dest=%s", script_id, dest)
         return jsonify({"ok": True, "id": script_id, "name": name}), 201
