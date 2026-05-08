@@ -2051,7 +2051,10 @@ async function viewScriptModal(id) {
     </div>
     ${_scriptProvenanceHTML(s)}
     <div class="form-group">
-      <label class="form-label">Content</label>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="form-label" style="margin:0">Content</label>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+      </div>
       <div id="view-script-editor-host"></div>
     </div>`, [
     { label: 'Close', cls: 'btn-ghost', action: closeModal }
@@ -2106,7 +2109,10 @@ async function editScriptModal(id) {
       <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
     </div>
     <div class="form-group">
-      <label class="form-label">Content</label>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="form-label" style="margin:0">Content</label>
+        <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+      </div>
       <div id="edit-script-editor-host"></div>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
@@ -2321,6 +2327,23 @@ async function copyToClipboard(text, btn) {
       setTimeout(() => btn.classList.remove('copied'), 1200)
     }
     toast('Copied: ' + text, 'success')
+  } catch (e) {
+    toast('Copy failed', 'error')
+  }
+}
+
+async function _copyEditorContent(btn) {
+  const editor = window._qcCurrentEditor
+  const content = editor ? editor.getValue() : ''
+  if (!content) { toast('Nothing to copy', 'error'); return }
+  try {
+    await navigator.clipboard.writeText(content)
+    if (btn) {
+      const orig = btn.innerHTML
+      btn.innerHTML = '✓ Copied'
+      setTimeout(() => { btn.innerHTML = orig }, 1200)
+    }
+    toast('Script content copied', 'success')
   } catch (e) {
     toast('Copy failed', 'error')
   }
