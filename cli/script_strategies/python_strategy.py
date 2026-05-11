@@ -44,6 +44,11 @@ _STATE = os.environ.get("QACLAN_STORAGE_STATE")
 _ARTIFACTS = os.environ.get("QACLAN_ARTIFACTS_PATH")
 _SCREENSHOT = os.environ.get("QACLAN_SCREENSHOT_PATH")
 
+try:
+    _EXPECT_TIMEOUT = int(os.environ.get("QACLAN_EXPECT_TIMEOUT", "7000"))
+except ValueError:
+    _EXPECT_TIMEOUT = 7000
+
 _console_errors = []
 _network_failures = []
 
@@ -97,7 +102,7 @@ def run():
         context = browser.new_context(**_context_opts())
         page = context.new_page()
         page.set_default_timeout(30000)
-        expect.set_options(timeout={expect_timeout})
+        expect.set_options(timeout=_EXPECT_TIMEOUT)
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
         page.on("requestfailed", _on_requestfailed)
@@ -140,10 +145,7 @@ if __name__ == "__main__":
     finally:
         _write_artifacts()
     sys.exit(exit_code)
-'''.replace(
-    "{expect_timeout}",
-    str(ScriptStrategy.expect_timeout)
-)
+'''
 
 class PythonStrategy(ScriptStrategy):
     language = "python"

@@ -226,8 +226,8 @@ const routes = {
 // Shared resolution presets used by record + run modals.
 // Format: "WIDTHxHEIGHT" (sent to backend as-is; "" = browser default).
 const RESOLUTION_OPTIONS = [
-  { value: '',          label: 'Default' },
-  { value: '1920x1080', label: '1920x1080' },
+  { value: '1920x1080',          label: 'Default (1920x1080)' },
+  // { value: '1920x1080', label: '1920x1080' },
   { value: '1366x768',  label: '1366x768' },
   { value: '1280x720',  label: '1280x720' },
   { value: '390x844',   label: '390x844 (Mobile)' },
@@ -2473,8 +2473,28 @@ async function removeSuiteScript(suiteId, scriptId) {
 }
 
 async function runSuiteModal(id, name) {
-  const envsRes = await api('GET', '/envs')
+  const [envsRes, suiteRes] = await Promise.all([
+    api('GET', '/envs'),
+    api('GET', '/suites/' + id),
+  ])
   const envs = envsRes.environments || []
+  const suiteScripts = (suiteRes.suite && suiteRes.suite.scripts) || []
+  const needsExpectTimeout = suiteScripts.some(s =>
+    s.language === 'python' || s.language === 'javascript_test' || s.language === 'typescript_test'
+  )
+
+  const expectTimeoutBlock = needsExpectTimeout ? `
+      <div class="form-group" style="flex:1">
+        <label class="form-label" title="How long expect() waits for assertions (ms).">Assertion timeout</label>
+        <select id="run-expect-timeout">
+          <option value="3000">3s — Fast</option>
+          <option value="5000">5s — Playwright default</option>
+          <option value="7000" selected>7s — Default</option>
+          <option value="10000">10s — Lenient</option>
+          <option value="15000">15s — Slow app</option>
+          <option value="30000">30s — Heavy SPA</option>
+        </select>
+      </div>` : ''
 
   showModal('Run Suite', `
     <div class="form-group">
@@ -2499,6 +2519,7 @@ async function runSuiteModal(id, name) {
           ${_renderResolutionOptions()}
         </select>
       </div>
+      ${expectTimeoutBlock}
     </div>
     <div style="display:flex;gap:16px">
       <label class="checkbox-wrap">
@@ -2517,6 +2538,8 @@ async function runSuiteModal(id, name) {
       const browser = document.getElementById('run-browser').value
       const resolution = document.getElementById('run-resolution').value || undefined
       const headless = document.getElementById('run-headless').checked
+      const expectEl = document.getElementById('run-expect-timeout')
+      const expect_timeout = expectEl ? parseInt(expectEl.value, 10) : undefined
       // Show spinner
       document.querySelector('.modal-body').innerHTML = `
         <div class="loading-state">
@@ -2525,7 +2548,7 @@ async function runSuiteModal(id, name) {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless })
+      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, expect_timeout })
       if (res.ok === false) {
         document.querySelector('.modal-body').innerHTML = `<p style="color:var(--danger)">${escHtml(res.error)}</p>`
         return
