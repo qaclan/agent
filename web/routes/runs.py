@@ -9,6 +9,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cli.commands.web.record import DEFAULT_RECORD_RESOLUTION
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, QACLAN_DIR
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
@@ -144,8 +145,11 @@ def execute_run():
         browser_type = data.get("browser", "chromium")
         resolution = data.get("resolution") or None
         headless = data.get("headless", False)
-        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s",
-                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless)
+        _ALLOWED_EXPECT_TIMEOUTS = {3000, 5000, 7000, 10000, 15000, 30000}
+        _raw_expect = data.get("expect_timeout")
+        expect_timeout = _raw_expect if isinstance(_raw_expect, int) and _raw_expect in _ALLOWED_EXPECT_TIMEOUTS else 7000
+        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s expect_timeout=%s",
+                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless, expect_timeout)
 
         if not suite_id:
             return jsonify({"ok": False, "error": "suite_id is required"}), 400
@@ -345,7 +349,8 @@ def execute_run():
                 child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
                 child_env["QACLAN_BROWSER"] = browser_type
                 child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
-                child_env["QACLAN_VIEWPORT"] = resolution or ""
+                child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
+                child_env["QACLAN_EXPECT_TIMEOUT"] = str(expect_timeout)
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 

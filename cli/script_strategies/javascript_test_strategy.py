@@ -16,7 +16,6 @@ import subprocess
 from typing import List
 
 from cli import runtime_setup
-from cli.script_strategies.base import ScriptStrategy
 from cli.script_strategies.javascript_strategy import JavaScriptStrategy
 
 
@@ -301,8 +300,9 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "  }\n"
             "}\n"
             "if (_STATE && fs.existsSync(_STATE)) _use.storageState = _STATE;\n"
+            "const _EXPECT_TIMEOUT = parseInt(process.env.QACLAN_EXPECT_TIMEOUT || '7000', 10) || 7000;\n"
             f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use, "
-            f"timeout: 60000, expect: {{ timeout: {ScriptStrategy.expect_timeout} }} }};\n"
+            f"timeout: 60000, expect: {{ timeout: _EXPECT_TIMEOUT }} }};\n"
         )
 
     def validate_runtime(self) -> None:
