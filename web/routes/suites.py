@@ -53,7 +53,7 @@ def get_suite(suite_id):
 
         # Load ordered scripts
         items = conn.execute(
-            "SELECT si.script_id, s.name, si.order_index "
+            "SELECT si.script_id, s.name, s.language, si.order_index "
             "FROM suite_items si JOIN scripts s ON si.script_id = s.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
