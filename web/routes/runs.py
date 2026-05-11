@@ -9,6 +9,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cli.commands.web.record import DEFAULT_RECORD_RESOLUTION
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, QACLAN_DIR
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
@@ -345,7 +346,7 @@ def execute_run():
                 child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
                 child_env["QACLAN_BROWSER"] = browser_type
                 child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
-                child_env["QACLAN_VIEWPORT"] = resolution or ""
+                child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 
