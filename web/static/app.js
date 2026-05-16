@@ -2415,6 +2415,7 @@ async function editSuiteModal(id) {
             <span class="suite-script-drag">⠿</span>
             <span class="suite-script-order">${i + 1}</span>
             <span class="suite-script-name">${escHtml(s.name)}</span>
+            <button class="btn btn-xs btn-ghost" onclick="viewScriptModal('${s.script_id}')">View</button>
             <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${s.script_id}')">Remove</button>
           </div>`).join('')}
       </div>
