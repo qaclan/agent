@@ -195,8 +195,8 @@ def _dispatch_run(run_id, conn, sync):
         return
     script_rows = conn.execute(
         "SELECT scr.script_id, s.name AS script_name, scr.status, scr.duration_ms, "
-        "scr.error_message, scr.order_index, scr.console_errors, scr.network_failures, "
-        "scr.console_log, scr.network_log, scr.screenshot_path "
+        "scr.error_message, scr.error_detail, scr.order_index, scr.console_errors, "
+        "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path "
         "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
         "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
         (run_id,)
@@ -219,6 +219,7 @@ def _dispatch_run(run_id, conn, sync):
                 "status": r["status"].lower() if r["status"] else "failed",
                 "duration_ms": r["duration_ms"] or 0,
                 "error_output": r["error_message"],
+                "error_detail": r["error_detail"],
                 "order_index": r["order_index"],
                 "console_errors": r["console_errors"] or 0,
                 "network_failures": r["network_failures"] or 0,
