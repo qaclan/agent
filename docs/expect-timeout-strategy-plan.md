@@ -277,3 +277,6 @@ _Claude: append short dated notes here when finishing tasks._
   `_render_config`. Added Layer 4 (reactive fix-after-failure), dependent on
   `docs/error-reporting-plan.md`.
 - 2026-05-16: Implementing Layers 1–3.
+- 2026-05-16: Error-reporting plan steps 1–5 shipped — Layer 4 Tier A is now
+  unblocked (structured `error` object + `error_detail` column exist). Tier B
+  and Layer 3+ still wait on the phase-2 action manifest.

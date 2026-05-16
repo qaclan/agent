@@ -59,13 +59,17 @@ function _contextOpts() {
   return opts;
 }
 
-function _writeArtifacts() {
+function _writeArtifacts(error) {
   if (!_ARTIFACTS) return;
   try {
-    fs.writeFileSync(_ARTIFACTS, JSON.stringify({
+    const payload = {
       console_errors: _consoleErrors,
       network_failures: _networkFailures,
-    }));
+    };
+    // Structured error — raw exception fields the runner's classifier keys
+    // on. See docs/error-reporting-plan.md (section 2.1).
+    if (error) payload.error = error;
+    fs.writeFileSync(_ARTIFACTS, JSON.stringify(payload));
   } catch (_) {}
 }
 
@@ -113,7 +117,10 @@ run().then(() => {
   process.exit(0);
 }).catch(err => {
   console.error(err);
-  _writeArtifacts();
+  _writeArtifacts({
+    raw_type: (err && err.name) || 'Error',
+    raw_message: (err && err.message) || String(err),
+  });
   process.exit(1);
 });
 """

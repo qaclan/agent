@@ -30,6 +30,9 @@ const _ACTION_TIMEOUT = parseInt(process.env['QACLAN_ACTION_TIMEOUT'] ?? '30000'
 
 const _consoleErrors: Array<{ type: string; text: string }> = [];
 const _networkFailures: Array<{ url: string; method: string; failure: string | null }> = [];
+// Stash the thrown error before re-throwing — test.afterAll has no access to
+// it otherwise. See docs/error-reporting-plan.md (section 2.1).
+let _scriptError: any = null;
 
 test('qaclan', async ({ page, context }) => {
   page.setDefaultTimeout(_ACTION_TIMEOUT);
@@ -52,6 +55,7 @@ test('qaclan', async ({ page, context }) => {
     if (_SCREENSHOT) {
       try { await page.screenshot({ path: _SCREENSHOT }); } catch (_) {}
     }
+    _scriptError = err;
     throw err;
   } finally {
     if (_STATE) {
@@ -63,10 +67,15 @@ test('qaclan', async ({ page, context }) => {
 test.afterAll(() => {
   if (!_ARTIFACTS) return;
   try {
-    fs.writeFileSync(_ARTIFACTS, JSON.stringify({
+    const payload: any = {
       console_errors: _consoleErrors,
       network_failures: _networkFailures,
-    }));
+    };
+    if (_scriptError) payload.error = {
+      raw_type: (_scriptError && _scriptError.name) || 'Error',
+      raw_message: (_scriptError && _scriptError.message) || String(_scriptError),
+    };
+    fs.writeFileSync(_ARTIFACTS, JSON.stringify(payload));
   } catch (_) {}
 });
 """

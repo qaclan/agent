@@ -71,15 +71,20 @@ def _context_opts():
     return opts
 
 
-def _write_artifacts():
+def _write_artifacts(error=None):
     if not _ARTIFACTS:
         return
     try:
+        payload = {
+            "console_errors": _console_errors,
+            "network_failures": _network_failures,
+        }
+        # Structured error — raw exception fields the runner's classifier
+        # keys on. See docs/error-reporting-plan.md (section 2.1).
+        if error is not None:
+            payload["error"] = error
         with open(_ARTIFACTS, "w", encoding="utf-8") as f:
-            json.dump({
-                "console_errors": _console_errors,
-                "network_failures": _network_failures,
-            }, f)
+            json.dump(payload, f)
     except Exception:
         pass
 
@@ -142,13 +147,15 @@ def run():
 
 if __name__ == "__main__":
     exit_code = 0
+    _error = None
     try:
         run()
-    except Exception:
+    except Exception as exc:
         traceback.print_exc()
         exit_code = 1
+        _error = {"raw_type": type(exc).__name__, "raw_message": str(exc)}
     finally:
-        _write_artifacts()
+        _write_artifacts(_error)
     sys.exit(exit_code)
 '''
 

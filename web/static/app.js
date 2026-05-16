@@ -2517,7 +2517,7 @@ async function runSuiteModal(id, name) {
   // A per-script override can supersede this; see the script editor.
   const waitTimeoutBlock = `
       <div class="form-group" style="flex:1">
-        <label class="form-label" title="How long QAClan waits for a component before failing.">Wait limit</label>
+        <label class="form-label">Wait limit</label>
         <select id="run-wait-timeout">
           <option value="5000">5s — Fast</option>
           <option value="10000">10s — Lenient</option>
@@ -2526,6 +2526,7 @@ async function runSuiteModal(id, name) {
           <option value="45000">45s — Heavy SPA</option>
           <option value="60000">60s — Very slow</option>
         </select>
+        <p class="form-hint">How long QAClan waits for a component before failing. Higher = more patient with slow pages.</p>
       </div>`
 
   showModal('Run Suite', `
@@ -2553,8 +2554,7 @@ async function runSuiteModal(id, name) {
       </div>
       ${waitTimeoutBlock}
     </div>
-    <p class="form-hint">How long QAClan waits for a component before failing. Higher = more patient with slow pages; only slows down reporting of genuine failures.</p>
-    <div style="display:flex;gap:16px">
+    <div style="display:flex;gap:16px;margin-top:4px">
       <label class="checkbox-wrap">
         <input type="checkbox" id="run-headless">
         Headless
@@ -2598,6 +2598,24 @@ function showRunResults(run, suiteName) {
     ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
     : '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
 
+  // Group failures by category so the pattern is visible at a glance.
+  const catCounts = {}
+  scripts.forEach(s => {
+    if (s.status === 'FAILED' && s.error_detail && s.error_detail.category) {
+      catCounts[s.error_detail.category] = (catCounts[s.error_detail.category] || 0) + 1
+    }
+  })
+  const catEntries = Object.entries(catCounts).sort((a, b) => b[1] - a[1])
+  const failureSummary = catEntries.length > 0
+    ? `<div class="failure-summary">
+         <div class="failure-summary-label">Failures by type</div>
+         <div class="failure-summary-chips">
+           ${catEntries.map(([cat, n]) =>
+             `<span class="failure-chip">${escHtml(cat)} <strong>${n}</strong></span>`).join('')}
+         </div>
+       </div>`
+    : ''
+
   const body = `
     <div class="stats-row">
       <div class="stat-card"><div class="stat-value">${run.total || 0}</div><div class="stat-label">Total</div></div>
@@ -2605,6 +2623,7 @@ function showRunResults(run, suiteName) {
       <div class="stat-card"><div class="stat-value fail">${run.failed || 0}</div><div class="stat-label">Failed</div></div>
       <div class="stat-card"><div class="stat-value">${skipped}</div><div class="stat-label">Skipped</div></div>
     </div>
+    ${failureSummary}
     ${scripts.map(s => {
       const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
       const badge = s.status === 'PASSED'
@@ -2665,9 +2684,46 @@ function showRunResults(run, suiteName) {
         </div>`
       }
 
-      // Error block with friendly message + collapsible full traceback
-      const errorBlock = s.status === 'FAILED' && friendlyError
-        ? `<div class="script-result-error">
+      // Error block. Prefer the structured error_detail (classified, plain
+      // language); fall back to the raw friendly-error line for old runs.
+      let errorBlock = ''
+      if (s.status === 'FAILED' && s.error_detail) {
+        const ed = s.error_detail
+        const sevCls = ed.severity === 'warning' ? 'sev-warning' : 'sev-error'
+        // Diagnostics — the classifier's extracted fields, as scannable
+        // pills. Absent fields don't render. See error-reporting-plan §6.5.
+        const diagItems = []
+        if (ed.action) diagItems.push(['action', `<code>${escHtml(ed.action)}</code>`])
+        if (ed.selector) diagItems.push(['element', `<code>${escHtml(ed.selector)}</code>`])
+        if (ed.timeout_ms) diagItems.push(['timeout', `${Math.round(ed.timeout_ms / 1000)}s`])
+        if (ed.element_state) diagItems.push(['state', escHtml(ed.element_state)])
+        if (ed.match_count) diagItems.push(['matched', `${ed.match_count} elements`])
+        if (ed.url) diagItems.push(['url', `<code>${escHtml(ed.url)}</code>`])
+        if (ed.net_error) diagItems.push(['network', `<code>${escHtml(ed.net_error)}</code>`])
+        const failingStep = diagItems.length
+          ? `<div class="error-card-step">${diagItems.map(([k, v]) =>
+              `<span class="diag-pill"><span class="diag-k">${k}</span><span class="diag-v">${v}</span></span>`
+            ).join('')}</div>`
+          : ''
+        errorBlock = `<div class="script-result-error error-card ${sevCls}">
+            <div class="error-card-head">
+              <span class="error-card-badge">${escHtml(ed.category)}</span>
+              <span class="error-card-title">${escHtml(ed.title)}</span>
+            </div>
+            <div class="error-card-message">${escHtml(ed.message)}</div>
+            <div class="error-card-next"><span class="error-card-next-label">What to do</span>${escHtml(ed.next_step)}</div>
+            ${failingStep}
+            ${screenshotBlock}
+            <div class="script-result-error-toggle" onclick="document.getElementById('${traceId}').classList.toggle('collapsed')">
+              <span class="script-result-error-label">Technical details</span>
+              <span class="script-result-error-chevron">&#9662;</span>
+            </div>
+            <div id="${traceId}" class="script-result-error-body collapsed">
+              <pre class="script-result-error-msg">${escHtml(fullTrace)}</pre>
+            </div>
+          </div>`
+      } else if (s.status === 'FAILED' && friendlyError) {
+        errorBlock = `<div class="script-result-error">
             <div class="script-result-friendly-error">${escHtml(friendlyError)}</div>
             ${screenshotBlock}
             <div class="script-result-error-toggle" onclick="document.getElementById('${traceId}').classList.toggle('collapsed')">
@@ -2678,7 +2734,7 @@ function showRunResults(run, suiteName) {
               <pre class="script-result-error-msg">${escHtml(fullTrace)}</pre>
             </div>
           </div>`
-        : ''
+      }
       return `
       <div class="script-result-card ${cls}">
         <div class="script-result-card-top">
@@ -2686,7 +2742,7 @@ function showRunResults(run, suiteName) {
             <div class="script-result-name">${escHtml(s.name)}</div>
             <div class="script-result-meta">
               <span>Duration: ${s.duration_ms != null ? s.duration_ms + ' ms' : '\u2014'}</span>
-              ${(s.console_errors || 0) > 0 ? '<span class="meta-warn">Console errors: ' + (s.console_errors || 0) + '</span>' : '<span>Console errors: 0</span>'}
+              ${(s.console_errors || 0) > 0 ? '<span class="meta-warn">Console errors/warnings: ' + (s.console_errors || 0) + '</span>' : '<span>Console errors/warnings: 0</span>'}
               ${(s.network_failures || 0) > 0 ? '<span class="meta-warn">Net failures: ' + (s.network_failures || 0) + '</span>' : '<span>Net: 0</span>'}
             </div>
           </div>
@@ -2697,7 +2753,13 @@ function showRunResults(run, suiteName) {
       </div>`
     }).join('')}`
 
+  const reportBtn = run.id
+    ? [{ label: 'Download report', cls: 'btn-ghost', keepOpen: true, action: () => {
+        downloadReport(run.id)
+      } }]
+    : []
   showModal('Execution History', body, [
+    ...reportBtn,
     { label: 'Close', cls: 'btn-ghost', action: () => { closeModal(); renderSuitesPage() } }
   ], suiteName + ' \u00b7 ' + statusBadge)
 }
@@ -2754,11 +2816,25 @@ async function renderRunsPage() {
               <td class="text-muted text-sm">${fmtDate(r.started_at)}</td>
               <td><div class="table-actions">
                 <button class="btn btn-xs btn-ghost" onclick="viewRunModal('${r.id}','${escHtml(r.suite_name)}')">View</button>
+                <button class="btn btn-xs btn-ghost" onclick="downloadReport('${r.id}')">Report</button>
               </div></td>
             </tr>`).join('')}
         </tbody>
       </table>
     </div>`
+}
+
+// Open the run's HTML report in a new tab AND save a copy to disk in one
+// click. ?view=1 → inline (tab); the bare URL → attachment (download).
+function downloadReport(runId) {
+  const base = '/api/runs/' + encodeURIComponent(runId) + '/report'
+  window.open(base + '?view=1', '_blank')
+  const a = document.createElement('a')
+  a.href = base
+  a.download = 'qaclan-report-' + runId + '.html'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 
 async function viewRunModal(id, suiteName) {

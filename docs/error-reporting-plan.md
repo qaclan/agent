@@ -199,3 +199,146 @@ New: `qaclan runs report <run_id>` + a "Download report" button in the web UI.
 8. CLI `runs` output uses plain messages.
 
 Steps 1–5 are the structural core; 6–8 are presentation and can ship after.
+
+---
+
+## Session notes
+
+- 2026-05-16: Implemented all 8 steps. Deviations from the plan, all
+  deliberate:
+  - **Classifier runs only in the runner, not the harness.** `cli/error_classifier.py`
+    is Python and cannot be imported by the JS/TS harness subprocesses.
+    Duplicating the ordered rule list into three harness templates was rejected.
+    Instead each harness emits only the raw exception fields
+    (`error: {raw_type, raw_message}`) into the artifacts JSON; the runner runs
+    the one classifier on those fields. Single source of truth, same JSON shape
+    across all 4 strategies. Stderr fallback (timeout / compile-fail / missing
+    artifacts) unchanged.
+  - **Report template inlined in `cli/report.py`** instead of a separate
+    `web/templates/report.html`. Keeping it inline avoids adding another
+    `--include-data-dir` to `build.sh` + the Windows workflow for Nuitka.
+  - **Phase-2 action manifest** (`action_index` / `action_text`) not built —
+    plan marks it optional. `error_detail.selector` is extracted from the
+    Playwright message by the classifier, which covers the failing-step view.
+  - New column `script_runs.error_detail` (migration `_migrate_error_detail`).
+    `error_detail` is parsed to an object in `GET /api/runs/<id>`; the live
+    `script_results` dict also carries it. Runner helper `_build_error_detail`
+    drives all 3 failure paths. Report: `qaclan runs report <id>` +
+    `GET /api/runs/<id>/report` + web "Download report" button.
+  - This unblocks Layer 4 (reactive fix-after-failure) in
+    `docs/expect-timeout-strategy-plan.md` — its required `error` object and
+    `error_detail` column now exist.
+
+---
+
+## 6. Revision — dynamic, information-rich messages (2026-05-16)
+
+### 6.1 Why
+
+Real run, `javascript_test` strategy:
+
+```
+TimeoutError: locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator('#notificationRailBackdrop')
+  - locator resolved to <div hidden id="notificationRailBackdrop" ...>
+  - attempting click action
+  - 2 × waiting for element to be visible, enabled and stable
+    - element is not visible
+```
+
+Two failures:
+
+1. **Misclassified.** Came out `ASSERTION_FAILED`. Correct = `ELEMENT_NOT_FOUND`
+   (locator-call timeout + actionability fail). Cause: the runner fell back to
+   the **stderr blob**, which contains the rendered code snippet (`> 41 | .click()`
+   plus the *next* line `42 | await expect(...).toBeVisible()`). `_is_assertion`
+   does a loose `"expect(" in low` — it matched the **source code**, not the error.
+2. **Generic message.** Even classified right, `CATEGORIES[*]["message"]` is one
+   frozen sentence. `selector` / `timeout_ms` are extracted but sit in side
+   fields — the message never says *what* element, *which* action, *how long*,
+   or that the element **was found but stayed hidden**. Non-tech and tech users
+   both learn nothing.
+
+### 6.2 Classification fixes (correctness)
+
+- **Trust the harness `error` exclusively when present.** In `_build_error_detail`
+  subprocess path, when `artifacts_error` has a `raw_message`, classify on
+  `raw_type`/`raw_message` **only** — do not also pass `stderr`/`stdout`. The
+  stderr blob carries rendered source code and fools keyword rules. Stderr is
+  the fallback for the *no-artifacts* case only (timeout / compile-fail).
+- **Strip code-snippet gutter lines before classifying the stderr blob.**
+  Bug A only helps when a harness `error` exists. The stderr-fallback path is
+  permanent (compile-fail, 300s-kill, or a missing harness `error` never have
+  one) — so the classifier itself must survive raw stderr. `@playwright/test`
+  renders the failing source with a line-number gutter; every snippet line
+  matches `^\s*>?\s*\d+\s*\|`. New helper `strip_code_snippet(blob)` drops those
+  lines. After stripping, only Playwright's real error text + `Call log:`
+  remain — no stray `await expect(...)` source for `_is_assertion` to match.
+  The classifier runs keyword rules on the stripped text.
+- Rule order unchanged; this is input sanitisation + Bug A, not a re-order.
+
+### 6.3 Richer field extraction
+
+The classifier extracts these from `raw_message` (Playwright embeds an identical
+`<api>: <reason>` + `Call log:` block in every language — all 5 strategies):
+
+| Field | Source | Example |
+|---|---|---|
+| `action` | message API prefix | `locator.click`, `page.goto`, `expect` |
+| `selector` | already extracted | `#notificationRailBackdrop` |
+| `timeout_ms` | already extracted | `30000` |
+| `actionability` | Call-log `element is not <state>` / `intercepts pointer events` / `outside of the viewport` / `not attached` | `not visible` |
+| `element_state` | Call-log `locator resolved to <…>` present? `hidden`/`display:none` in it? | `found-but-hidden` \| `never-appeared` |
+| `match_count` | `resolved to N elements` (strict mode) | `3` |
+| `url` | `navigating to "…"` / `page.goto` arg | `https://…` |
+| `net_error` | `net::ERR_[A-Z_]+` | `ERR_NAME_NOT_RESOLVED` |
+
+All optional — absent fields just don't render.
+
+### 6.4 Dynamic title / message / next_step
+
+`CATEGORIES` frozen strings become **fallback defaults**. Add per-category
+builder functions: `describe(category, fields) -> (title, message, next_step)`.
+The builder interpolates extracted fields into plain sentences; when a field is
+missing it degrades to the static default. One sentence, two audiences — plain
+words for non-tech, with the exact selector/action/timeout inline for tech.
+
+Examples (`ELEMENT_NOT_FOUND`, one category, message varies by `element_state`):
+
+- *found-but-hidden* — "The script tried to **click** `#notificationRailBackdrop`
+  but gave up after 30s. The element exists on the page but stayed **hidden** —
+  so the click never happened." → next: "A step that opens/reveals it may be
+  missing. If it should already be visible, the page changed — re-record."
+- *never-appeared* — "The script waited 30s for `#submit` to **appear** but it
+  never showed up." → next: "The page layout may have changed — re-record."
+- *strict-mode* (`match_count=3`) — "The selector `.row` matched **3 elements**
+  but the script needs exactly one." → next: "Make the selector specific to a
+  single element, then re-record."
+
+`TIMEOUT` / `NAVIGATION_FAILED` / `ASSERTION_FAILED` / `SETUP_ERROR` etc. get
+the same treatment — interpolate `action`, `url`, `net_error`, `timeout_ms`.
+
+### 6.5 Scope
+
+- **No strategy changes.** All 5 strategies already emit `{raw_type, raw_message}`;
+  classifier is runner-side and language-agnostic.
+- `classify()` return dict gains the new optional keys (`action`, `actionability`,
+  `element_state`, `match_count`, `url`, `net_error`). Backward compatible —
+  `category`/`title`/`message`/`next_step`/`severity`/`raw_type`/`selector`/
+  `timeout_ms` keys all stay.
+- `error_detail` JSON column already stores the whole dict — no migration.
+- UI card / report / CLI: render the new fields as a small "Diagnostics" line
+  (action · selector · timeout · element state). Raw blob stays collapsible.
+
+### 6.6 Work items
+
+1. `cli/error_classifier.py` — new extraction helpers; `describe()` builders per
+   category; tighten `_is_assertion`; keep ordered rule list.
+2. `web/routes/runs.py` `_build_error_detail` — drop `stderr`/`stdout` from the
+   `classify()` call when `artifacts_error` has a `raw_message`.
+3. `web/static/app.js` + `style.css` — diagnostics line in the error card.
+4. `cli/report.py` — diagnostics line in the per-script block.
+5. `cli/commands/runs.py` — diagnostics line in `runs show`.
+
+Steps 1–2 are correctness; 3–5 presentation.

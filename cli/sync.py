@@ -158,7 +158,7 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
     return result
 
 
-def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None, language=None):
+def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, project_id=None, file_content=None, channel=None, start_url_key=None, start_url_value=None, var_keys=None, language=None, wait_timeout=None):
     """Sync a script. IDs are LOCAL IDs (optional).
 
     ``language`` falls back to the stored column when the caller doesn't pass
@@ -197,6 +197,8 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
         payload["start_url_value"] = start_url_value
     if var_keys is not None:
         payload["var_keys"] = var_keys
+    if wait_timeout is not None:
+        payload["wait_timeout"] = wait_timeout
     if suite_id:
         cloud_suite_id = _get_cloud_id("suites", suite_id)
         if cloud_suite_id:
@@ -385,7 +387,8 @@ def sync_all(project_id=None):
 
         # Scripts (with feature_id, project_id, and file content)
         scripts = conn.execute(
-            "SELECT id, name, feature_id, project_id, file_path, start_url_key, start_url_value, var_keys "
+            "SELECT id, name, feature_id, project_id, file_path, start_url_key, "
+            "start_url_value, var_keys, wait_timeout "
             "FROM scripts WHERE project_id = ?", (pid,)
         ).fetchall()
         import json as _json
@@ -409,6 +412,7 @@ def sync_all(project_id=None):
                 start_url_key=sc["start_url_key"],
                 start_url_value=sc["start_url_value"],
                 var_keys=sc_var_keys,
+                wait_timeout=sc["wait_timeout"],
             )
             if result:
                 total_synced["scripts"] += 1
@@ -446,8 +450,8 @@ def sync_all(project_id=None):
         for run in runs:
             script_run_rows = conn.execute(
                 "SELECT scr.script_id, s.name as script_name, scr.status, scr.duration_ms, "
-                "scr.error_message, scr.order_index, scr.console_errors, scr.network_failures, "
-                "scr.console_log, scr.network_log, scr.screenshot_path "
+                "scr.error_message, scr.error_detail, scr.order_index, scr.console_errors, "
+                "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path "
                 "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
                 "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
                 (run["id"],)
@@ -472,6 +476,7 @@ def sync_all(project_id=None):
                         "status": r["status"].lower() if r["status"] else "failed",
                         "duration_ms": r["duration_ms"] or 0,
                         "error_output": r["error_message"],
+                        "error_detail": r["error_detail"],
                         "order_index": r["order_index"],
                         "console_errors": r["console_errors"] or 0,
                         "network_failures": r["network_failures"] or 0,

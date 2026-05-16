@@ -139,6 +139,20 @@ def init_db():
     _migrate_script_templating(conn)
     _migrate_script_language(conn)
     _migrate_script_wait_timeout(conn)
+    _migrate_error_detail(conn)
+
+
+def _migrate_error_detail(conn):
+    """Add nullable error_detail column to script_runs — JSON of the structured
+    error dict {category, title, message, next_step, severity, raw_type,
+    selector, timeout_ms}. The raw blob stays in error_message. Old rows have
+    error_detail = NULL and the UI falls back to error_message. See
+    docs/error-reporting-plan.md (section 2.4)."""
+    try:
+        conn.execute("ALTER TABLE script_runs ADD COLUMN error_detail TEXT")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_script_wait_timeout(conn):
