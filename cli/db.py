@@ -138,6 +138,18 @@ def init_db():
     _migrate_run_options(conn)
     _migrate_script_templating(conn)
     _migrate_script_language(conn)
+    _migrate_script_wait_timeout(conn)
+
+
+def _migrate_script_wait_timeout(conn):
+    """Add nullable wait_timeout column to scripts — per-script timeout override.
+    NULL means 'inherit the run-level wait limit'. See
+    docs/expect-timeout-strategy-plan.md (Layer 2)."""
+    try:
+        conn.execute("ALTER TABLE scripts ADD COLUMN wait_timeout INTEGER")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_script_language(conn):

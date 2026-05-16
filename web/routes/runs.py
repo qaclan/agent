@@ -145,11 +145,17 @@ def execute_run():
         browser_type = data.get("browser", "chromium")
         resolution = data.get("resolution") or None
         headless = data.get("headless", False)
-        _ALLOWED_EXPECT_TIMEOUTS = {3000, 5000, 7000, 10000, 15000, 30000}
-        _raw_expect = data.get("expect_timeout")
-        expect_timeout = _raw_expect if isinstance(_raw_expect, int) and _raw_expect in _ALLOWED_EXPECT_TIMEOUTS else 7000
-        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s expect_timeout=%s",
-                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless, expect_timeout)
+        # Run-level "Wait limit" — one knob driving both QACLAN_EXPECT_TIMEOUT
+        # (assertions) and QACLAN_ACTION_TIMEOUT (clicks/fills/waits). A
+        # per-script wait_timeout column can override this inside the loop.
+        # See docs/expect-timeout-strategy-plan.md.
+        _ALLOWED_WAIT_TIMEOUTS = {5000, 10000, 15000, 30000, 45000, 60000}
+        _DEFAULT_WAIT_TIMEOUT = 15000
+        # Accept both the new "wait_timeout" key and the legacy "expect_timeout".
+        _raw_wait = data.get("wait_timeout", data.get("expect_timeout"))
+        run_wait_timeout = _raw_wait if isinstance(_raw_wait, int) and _raw_wait in _ALLOWED_WAIT_TIMEOUTS else _DEFAULT_WAIT_TIMEOUT
+        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s wait_timeout=%s",
+                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless, run_wait_timeout)
 
         if not suite_id:
             return jsonify({"ok": False, "error": "suite_id is required"}), 400
@@ -171,7 +177,7 @@ def execute_run():
 
         items = conn.execute(
             "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
+            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys, sc.wait_timeout "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -350,7 +356,17 @@ def execute_run():
                 child_env["QACLAN_BROWSER"] = browser_type
                 child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
                 child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
-                child_env["QACLAN_EXPECT_TIMEOUT"] = str(expect_timeout)
+                # Resolve the effective wait limit for THIS script:
+                #   script.wait_timeout  >  run-level pick  >  default.
+                # One value drives both the expect (assertion) and action
+                # (click/fill/wait) timeouts — see expect-timeout-strategy-plan.md.
+                _script_wt = item["wait_timeout"]
+                if isinstance(_script_wt, int) and _script_wt in _ALLOWED_WAIT_TIMEOUTS:
+                    effective_wait_timeout = _script_wt
+                else:
+                    effective_wait_timeout = run_wait_timeout
+                child_env["QACLAN_EXPECT_TIMEOUT"] = str(effective_wait_timeout)
+                child_env["QACLAN_ACTION_TIMEOUT"] = str(effective_wait_timeout)
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 

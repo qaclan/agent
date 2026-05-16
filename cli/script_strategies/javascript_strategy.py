@@ -38,6 +38,7 @@ const _VIEWPORT = process.env.QACLAN_VIEWPORT || '';
 const _STATE = process.env.QACLAN_STORAGE_STATE || '';
 const _ARTIFACTS = process.env.QACLAN_ARTIFACTS_PATH || '';
 const _SCREENSHOT = process.env.QACLAN_SCREENSHOT_PATH || '';
+const _ACTION_TIMEOUT = parseInt(process.env.QACLAN_ACTION_TIMEOUT || '30000', 10) || 30000;
 
 const _consoleErrors = [];
 const _networkFailures = [];
@@ -74,7 +75,7 @@ async function run() {
   const browser = await _browserType.launch({ headless: _HEADLESS });
   const context = await browser.newContext(_contextOpts());
   const page = await context.newPage();
-  page.setDefaultTimeout(30000);
+  page.setDefaultTimeout(_ACTION_TIMEOUT);
   page.on('console', msg => {
     if (msg.type() === 'error' || msg.type() === 'warning') {
       _consoleErrors.push({ type: msg.type(), text: msg.text() });

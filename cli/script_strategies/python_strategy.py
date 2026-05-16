@@ -45,9 +45,14 @@ _ARTIFACTS = os.environ.get("QACLAN_ARTIFACTS_PATH")
 _SCREENSHOT = os.environ.get("QACLAN_SCREENSHOT_PATH")
 
 try:
-    _EXPECT_TIMEOUT = int(os.environ.get("QACLAN_EXPECT_TIMEOUT", "7000"))
+    _EXPECT_TIMEOUT = int(os.environ.get("QACLAN_EXPECT_TIMEOUT", "15000"))
 except ValueError:
-    _EXPECT_TIMEOUT = 7000
+    _EXPECT_TIMEOUT = 15000
+
+try:
+    _ACTION_TIMEOUT = int(os.environ.get("QACLAN_ACTION_TIMEOUT", "30000"))
+except ValueError:
+    _ACTION_TIMEOUT = 30000
 
 _console_errors = []
 _network_failures = []
@@ -101,7 +106,7 @@ def run():
         browser = getattr(playwright, _BROWSER).launch(headless=_HEADLESS)
         context = browser.new_context(**_context_opts())
         page = context.new_page()
-        page.set_default_timeout(30000)
+        page.set_default_timeout(_ACTION_TIMEOUT)
         expect.set_options(timeout=_EXPECT_TIMEOUT)
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)

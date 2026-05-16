@@ -56,37 +56,73 @@ The harness owns the live exception — it is the right place to classify. Exten
     "raw_type": "AssertionError",
     "raw_message": "Locator expected to be visible ...",
     "selector": "#submit-btn",
-    "action_index": 4,
-    "action_text": "expect(page.locator('#submit-btn')).to_be_visible()",
-    "timeout_ms": 7000,
-    "raw_traceback": "Traceback (most recent call last): ..."
+    "timeout_ms": 7000
   }
 }
 ```
 
-- Wrap `{ACTIONS}` so each action is numbered; on exception the harness records the index + source line of the failing action. Strategies already template `{ACTIONS}` — emit a small action manifest at render time so the index maps back to a readable step.
 - Harness classifies the exception locally (see 2.2) and writes `error` into the artifacts file. The runner reads it instead of scraping stderr.
-- Must be done in **all 4 strategies** (`python`, `javascript`, `javascript_test`, `typescript_test`) — keep the JSON shape identical across languages so the runner/report are language-agnostic.
-- `raw_traceback` is still kept for the technical "Details" view.
+- `error` is **optional** — `_read_artifacts` already uses `.get()`, so old artifacts without the key still parse. No migration needed for the artifacts format.
+- The raw traceback stays in `error_message` only (see 2.4) — **not** duplicated inside `error`. `error` holds the structured/classified fields; the raw blob lives in one place.
+- Must be done in **all 4 strategies** — but the write mechanism differs:
+  - **`python`, `javascript`** (plain harnesses) — already write artifacts in their own `finally` / `.catch(err)`. The live `err` is in scope there → classify and write `error` directly.
+  - **`javascript_test`, `typescript_test`** (`@playwright/test` harnesses) — artifacts are written in `test.afterAll`, which has **no access to the thrown `err`**. The `catch (err) { throw err }` re-throws into the Playwright test runner. Fix: stash the error in a module-level var before re-throwing, then `afterAll` reads it:
+    ```js
+    let _scriptError = null;
+    // ...
+    } catch (err) { /* screenshot */ _scriptError = err; throw err; }
+    // test.afterAll: classify _scriptError, write into artifacts
+    ```
+    **Caveat:** the `catch` relay only fires for *thrown* exceptions. A `@playwright/test` **per-test timeout** aborts the test without running the `catch` block — `_scriptError` stays null and `afterAll` writes `error: null`. That case is fine: the subprocess still exits non-zero and the runner classifies `TIMEOUT` from stderr (`Test timeout of NNNNms exceeded`). Likewise a **TypeScript/compile failure** in `typescript_test` means the test file never loads, `afterAll` never runs, and *no artifacts file* is produced — the runner must classify `SCRIPT_ERROR` purely from stderr. Both are handled by the classifier's stderr-fallback path; the harness `error` is best-effort, not guaranteed.
+- Keep the JSON shape identical across all 4 languages so the runner/report stay language-agnostic.
+
+> **Optional / phase-2 — failing-step context.** `action_index` + `action_text` (which numbered action failed) require an action manifest emitted at render time. This touches the recording/render pipeline and is awkward for the `*_test` strategies (actions nested inside a `test()` callback). The core plan works without it — treat as a later enhancement, not a blocker.
 
 ### 2.2 Error classifier (shared, offline)
 
-New module `cli/error_classifier.py` — pure pattern matching, no I/O. Maps a raw exception type + message to:
+New module `cli/error_classifier.py` — pure pattern matching, no I/O.
 
-| Category | Trigger pattern | Plain-language message |
-|---|---|---|
-| `ASSERTION_FAILED` | `AssertionError`, `expect(...)` | "A check did not pass: the page was not in the expected state." |
-| `ELEMENT_NOT_FOUND` | `TimeoutError` + locator wait | "Could not find an element on the page (e.g. a button or field)." |
-| `TIMEOUT` | `TimeoutError`, subprocess timeout | "The page took too long to respond." |
-| `NAVIGATION_FAILED` | `goto`/`net::ERR` | "The page or website could not be opened." |
-| `NETWORK_ERROR` | request-failed dominates | "A network request failed while loading the page." |
-| `SCRIPT_ERROR` | syntax / import errors | "The test script itself has a problem." |
-| `RUNTIME_ERROR` | internal runner exception | "The test could not be run due to an internal error." |
-| `UNKNOWN` | fallback | "The test failed for an unknown reason." |
+> **Classify by the message prefix, not just the exception type.** Playwright embeds the failing API call at the start of every error message — `locator.click:`, `page.goto:`, `expect(locator).toBeVisible:`, `browserType.launch:`, etc. The *same* `TimeoutError` type maps to three different categories depending on that prefix (a `goto` timeout → `NAVIGATION_FAILED`, a locator wait → `ELEMENT_NOT_FOUND`, an `expect` → `ASSERTION_FAILED`, bare → `TIMEOUT`). So the classifier keys on **(exception type, message-prefix, message-body keywords)**, with an explicit ordered rule list — first match wins. Type alone is insufficient.
 
-Each category carries: a short title, a plain message, a suggested next step ("Check the screenshot", "Verify the URL in the environment"), and a severity.
+| Category | Trigger pattern | Plain-language message | Suggested next step |
+|---|---|---|---|
+| `ASSERTION_FAILED` | `AssertionError`; message starts `expect(` / contains `expected to` | "A check did not pass: the page was not in the expected state." | Check the screenshot |
+| `ELEMENT_NOT_FOUND` | locator wait timeout; `strict mode violation ... resolved to N elements`; actionability fail (`not visible` / `not enabled` / `not stable` / `intercepts pointer events` / `outside of the viewport`) | "Could not find or interact with an element (e.g. a button or field)." | Page layout may have changed — re-record |
+| `TIMEOUT` | bare Playwright `TimeoutError`, Playwright-test per-test timeout, **or** subprocess kill | "The page took too long to respond." | Check the site is reachable |
+| `NAVIGATION_FAILED` | `page.goto:` / `net::ERR` / `Execution context was destroyed ... navigation` | "The page or website could not be opened." | Verify the URL in the environment |
+| `NETWORK_ERROR` | request-failed dominates | "A network request failed while loading the page." | Check network / the API being called |
+| `BROWSER_CRASHED` | `TargetClosedError`; `Target ... has been closed`; `Browser has been closed`; worker process crash | "The browser stopped unexpectedly during the test." | Re-run; if it repeats, report it |
+| `CONFIG_ERROR` | unresolved `{{KEY}}` placeholder, missing env var, bad `var_keys` | "A required setting or value is missing." | Edit the environment, add the missing value |
+| `SETUP_ERROR` | broken runtime, Chromium missing (`Executable doesn't exist`), `validate_runtime()` fail | "The test tools are not installed correctly." | Run `qaclan setup` |
+| `SCRIPT_MISSING` | `FileNotFoundError` — script file gone (runs.py:311) | "The test script file could not be found." | The script may have been deleted |
+| `SCRIPT_ERROR` | syntax / import / TypeScript-compile errors inside the script body | "The test script itself has a problem." | Re-record or edit the script |
+| `RUNTIME_ERROR` | internal runner exception | "The test could not be run due to an internal error." | Report this — internal bug |
+| `UNKNOWN` | fallback | "The test failed for an unknown reason." | See technical details |
+
+Each category carries: a short title, a plain message, a suggested next step, and a severity.
+
+`ELEMENT_NOT_FOUND` deliberately covers three Playwright failure shapes that all mean "the script could not use a target element": **0 matches** (locator timeout), **N>1 matches** (strict-mode violation), and **found-but-unusable** (actionability failures during `click`/`fill`). Splitting them would not change the user's next step (re-record), so they share one category; the `raw_type` field preserves the distinction for the technical view.
+
+Rationale for the extra categories: the original 8 assumed every failure is *in the page*. But `SETUP_ERROR` (run `qaclan setup`), `CONFIG_ERROR` (fix the environment), `SCRIPT_MISSING`, and `BROWSER_CRASHED` (not the user's fault) need different advice. Folding them into `SCRIPT_ERROR` would give the user wrong next steps.
+
+**Ordered rule list (first match wins)** — overlap is real, so order is part of the spec:
+1. `SCRIPT_MISSING`, `SETUP_ERROR`, `CONFIG_ERROR` — environment problems, checked before any page-level rule.
+2. `BROWSER_CRASHED` — target/browser closed (otherwise misreads as a timeout).
+3. `ASSERTION_FAILED` — message prefix `expect(`.
+4. `NAVIGATION_FAILED` — prefix `page.goto:` / `net::ERR`.
+5. `ELEMENT_NOT_FOUND` — locator-call prefix + (timeout | strict-mode | actionability).
+6. `TIMEOUT` — any remaining `TimeoutError` / subprocess kill.
+7. `NETWORK_ERROR` — only if no exception but request failures dominate.
+8. `SCRIPT_ERROR` — syntax / import / compile signatures.
+9. `RUNTIME_ERROR` → `UNKNOWN` — fallbacks.
 
 Used by **both** the harness (to classify the script exception) and the runner (to classify timeout / internal-error paths where there is no harness output).
+
+**Two distinct timeout sources** feed `TIMEOUT`:
+1. **Playwright timeout inside the harness** — a locator wait / `page.setDefaultTimeout(30000)` expires, *or* (for `*_test` strategies) the `@playwright/test` per-test timeout (default 30s) expires. The harness exits non-zero with artifacts written — handled by the `subprocess` path.
+2. **Subprocess kill** — the whole process exceeds `PER_SCRIPT_TIMEOUT_SEC` (300s) and is killed. No harness `error`, possibly partial artifacts — handled by the `timeout` path.
+
+The classifier handles both; the runner just picks the right `kind`.
 
 ### 2.3 Runner changes (`web/routes/runs.py`)
 
@@ -97,12 +133,13 @@ def _build_error_detail(*, returncode, stdout, stderr, artifacts, kind):
     # kind: "subprocess" | "timeout" | "internal"
     # 1. prefer artifacts["error"] (harness already classified)
     # 2. else classify(stderr/stdout) or the timeout/internal kind
-    # returns dict: {category, title, message, next_step, severity,
-    #                raw_message, raw_traceback}
+    # returns (detail, raw): detail = structured dict written to the
+    #   error_detail column; raw = the raw blob written to error_message.
+    # The raw blob is NOT embedded in detail — stored once (see 2.4).
 ```
 
-- L373–398 → call `_build_error_detail(kind="subprocess")`.
-- L426 (timeout) → `_build_error_detail(kind="timeout")` (still read artifacts — partial console/network data may exist).
+- L373–398 → call `_build_error_detail(kind="subprocess")`. Note: a Playwright-test per-test timeout (default 30s) lands **here**, not in the timeout path — the subprocess exits non-zero on its own. The classifier still resolves it to `TIMEOUT` via the harness `error` or stderr pattern.
+- L426 (timeout) → `_build_error_detail(kind="timeout")` — this path only fires on the 300s `PER_SCRIPT_TIMEOUT_SEC` subprocess kill. Still read artifacts — partial console/network data may exist.
 - L462 (internal) → `_build_error_detail(kind="internal")`.
 
 All three paths now produce the **same structured dict**.
@@ -111,9 +148,9 @@ All three paths now produce the **same structured dict**.
 
 Add one column via `_run_migrations()` in `cli/db.py`:
 
-- `error_detail TEXT` — JSON of the structured dict above.
+- `error_detail TEXT` — JSON of the structured dict: `{category, title, message, next_step, severity, raw_type, selector, timeout_ms}`.
 
-Keep `error_message TEXT` as-is (raw text, backward compatible, used by cloud sync). `error_detail` is the new primary field; `error_message` becomes the `raw_message` for legacy/sync consumers. No breaking change — old rows simply have `error_detail = NULL` and the UI falls back to `error_message`.
+Keep `error_message TEXT` as-is — it holds the **raw** traceback / stderr blob (backward compatible, used by cloud sync). The raw blob is stored **once**, here — `error_detail` does **not** repeat it. UI/report show `error_detail` by default and reveal `error_message` under "Technical details". No breaking change — old rows have `error_detail = NULL` and the UI falls back to `error_message`.
 
 `script_results` in-memory dict gains `error_detail` so the live UI gets it too.
 
@@ -124,11 +161,13 @@ Keep `error_message TEXT` as-is (raw text, backward compatible, used by cloud sy
 - **Run detail view** — per failed script, render a card:
   - Category badge + plain-language title (color by severity).
   - One-line message + suggested next step.
-  - Failing step (`action_text`, selector) when available.
+  - Failing step (selector, and `action_text` if the phase-2 manifest exists) when available.
   - Screenshot thumbnail (already saved at `screenshot_path`).
-  - Collapsible "Technical details" → `raw_traceback`, console errors, network failures.
+  - Collapsible "Technical details" → raw `error_message`, console errors/warnings, network failures.
 - **Suite run summary** — group failures by category ("3 timeouts, 1 element-not-found") so a user sees the pattern at a glance.
-- **CLI** (`cli/commands/runs.py`) — print category + plain message instead of nothing, raw traceback behind `--verbose`.
+- **CLI** (`cli/commands/runs.py`) — print category + plain message instead of nothing, raw `error_message` behind `--verbose`.
+
+> **Wording note.** The harness captures `msg.type in ("error", "warning")` — the `console_errors` count therefore includes console **warnings**, not only errors. Label it "console errors/warnings" everywhere in the UI, report, and CLI so the number isn't misread.
 
 ---
 
@@ -150,9 +189,9 @@ New: `qaclan runs report <run_id>` + a "Download report" button in the web UI.
 
 ## 5. Suggested order of work
 
-1. `cli/error_classifier.py` — classifier + category table (unit-testable, no deps).
-2. Extend Python harness to emit `error` in artifacts; verify shape.
-3. Repeat for the 3 JS/TS strategies (identical JSON shape).
+1. `cli/error_classifier.py` — classifier + 11-category table (unit-testable, no deps).
+2. Extend Python + plain JavaScript harnesses to emit `error` in artifacts (live `err` in scope at the existing write site).
+3. `javascript_test` + `typescript_test` — add the module-var error relay (`catch` stashes, `afterAll` writes). Keep JSON shape identical to step 2.
 4. DB migration: add `error_detail`.
 5. Runner: `_build_error_detail` helper, wire all 3 failure paths.
 6. UI run-detail card + suite summary grouping.

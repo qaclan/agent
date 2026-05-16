@@ -2077,6 +2077,11 @@ async function editScriptModal(id) {
   const envs = envsRes.environments || []
   const lang = s.language || 'python'
   const langLabel = { python: 'Python', javascript: 'JavaScript', typescript: 'TypeScript', javascript_test: 'JavaScript (playwright/test)', typescript_test: 'TypeScript (playwright/test)' }[lang] || lang
+  // Per-script "Wait limit" override — empty value = inherit the run-level pick.
+  const waitTimeoutOptions = `<option value="">Inherit suite default</option>` +
+    [5000, 10000, 15000, 30000, 45000, 60000].map(v =>
+      `<option value="${v}"${s.wait_timeout === v ? ' selected' : ''}>${v / 1000}s</option>`
+    ).join('')
   showModal('Edit Script', `
     <div class="form-group">
       <label class="form-label">Script Name</label>
@@ -2090,6 +2095,13 @@ async function editScriptModal(id) {
       </div>
     </div>
     ${_scriptProvenanceHTML(s)}
+    <div class="form-group">
+      <label class="form-label" title="How long QAClan waits for a component before failing.">Wait limit</label>
+      <select id="edit-script-wait-timeout" style="max-width:240px">
+        ${waitTimeoutOptions}
+      </select>
+      <p class="form-hint">Overrides the suite's wait limit for this script only. <strong style="color:var(--text-primary)">Inherit</strong> uses whatever is picked when the suite runs.</p>
+    </div>
     <div class="form-group">
       <label class="form-label">Insert Variable</label>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -2114,7 +2126,9 @@ async function editScriptModal(id) {
       const name = document.getElementById('edit-script-name').value.trim()
       const content = window._qcCurrentEditor ? window._qcCurrentEditor.getValue() : ''
       if (!name) return
-      const res = await api('PUT', '/scripts/' + id, { name, content })
+      const wtEl = document.getElementById('edit-script-wait-timeout')
+      const wait_timeout = wtEl && wtEl.value ? parseInt(wtEl.value, 10) : null
+      const res = await api('PUT', '/scripts/' + id, { name, content, wait_timeout })
       if (res.ok === false) { toast(res.error, 'error'); return }
       closeModal(); toast('Script updated')
       renderScriptsPage()
@@ -2473,28 +2487,23 @@ async function removeSuiteScript(suiteId, scriptId) {
 }
 
 async function runSuiteModal(id, name) {
-  const [envsRes, suiteRes] = await Promise.all([
-    api('GET', '/envs'),
-    api('GET', '/suites/' + id),
-  ])
+  const envsRes = await api('GET', '/envs')
   const envs = envsRes.environments || []
-  const suiteScripts = (suiteRes.suite && suiteRes.suite.scripts) || []
-  const needsExpectTimeout = suiteScripts.some(s =>
-    s.language === 'python' || s.language === 'javascript_test' || s.language === 'typescript_test'
-  )
 
-  const expectTimeoutBlock = needsExpectTimeout ? `
+  // "Wait limit" — one knob, applies to every strategy (actions + assertions).
+  // A per-script override can supersede this; see the script editor.
+  const waitTimeoutBlock = `
       <div class="form-group" style="flex:1">
-        <label class="form-label" title="How long expect() waits for assertions (ms).">Assertion timeout</label>
-        <select id="run-expect-timeout">
-          <option value="3000">3s — Fast</option>
-          <option value="5000">5s — Playwright default</option>
-          <option value="7000" selected>7s — Default</option>
+        <label class="form-label" title="How long QAClan waits for a component before failing.">Wait limit</label>
+        <select id="run-wait-timeout">
+          <option value="5000">5s — Fast</option>
           <option value="10000">10s — Lenient</option>
-          <option value="15000">15s — Slow app</option>
-          <option value="30000">30s — Heavy SPA</option>
+          <option value="15000" selected>15s — Default</option>
+          <option value="30000">30s — Slow app</option>
+          <option value="45000">45s — Heavy SPA</option>
+          <option value="60000">60s — Very slow</option>
         </select>
-      </div>` : ''
+      </div>`
 
   showModal('Run Suite', `
     <div class="form-group">
@@ -2519,8 +2528,9 @@ async function runSuiteModal(id, name) {
           ${_renderResolutionOptions()}
         </select>
       </div>
-      ${expectTimeoutBlock}
+      ${waitTimeoutBlock}
     </div>
+    <p class="form-hint">How long QAClan waits for a component before failing. Higher = more patient with slow pages; only slows down reporting of genuine failures.</p>
     <div style="display:flex;gap:16px">
       <label class="checkbox-wrap">
         <input type="checkbox" id="run-headless">
@@ -2538,8 +2548,8 @@ async function runSuiteModal(id, name) {
       const browser = document.getElementById('run-browser').value
       const resolution = document.getElementById('run-resolution').value || undefined
       const headless = document.getElementById('run-headless').checked
-      const expectEl = document.getElementById('run-expect-timeout')
-      const expect_timeout = expectEl ? parseInt(expectEl.value, 10) : undefined
+      const waitEl = document.getElementById('run-wait-timeout')
+      const wait_timeout = waitEl ? parseInt(waitEl.value, 10) : undefined
       // Show spinner
       document.querySelector('.modal-body').innerHTML = `
         <div class="loading-state">
@@ -2548,7 +2558,7 @@ async function runSuiteModal(id, name) {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, expect_timeout })
+      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, wait_timeout })
       if (res.ok === false) {
         document.querySelector('.modal-body').innerHTML = `<p style="color:var(--danger)">${escHtml(res.error)}</p>`
         return
