@@ -34,15 +34,72 @@ def _require_active_project():
 def _read_artifacts(path: Path):
     """Read the artifacts JSON a script writes on exit. Missing or malformed
     files degrade gracefully to empty lists — a crashed script may not have
-    written anything."""
+    written anything.
+
+    Returns (console_errors, network_failures, error) — `error` is the
+    harness's structured exception dict ({raw_type, raw_message}) or None.
+    """
     if not path.exists():
-        return [], []
+        return [], [], None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data.get("console_errors", []) or [], data.get("network_failures", []) or []
+        return (
+            data.get("console_errors", []) or [],
+            data.get("network_failures", []) or [],
+            data.get("error") or None,
+        )
     except Exception as e:
         logger.warning("Failed to read artifacts at %s: %s", path, e)
-        return [], []
+        return [], [], None
+
+
+def _build_error_detail(*, kind, returncode=None, stdout=None, stderr=None,
+                        artifacts_error=None, exc=None, has_network_failures=False):
+    """Turn a failure into (detail, raw): `detail` is the structured dict for
+    the error_detail column, `raw` is the raw blob for error_message. The raw
+    blob is NOT embedded in detail — stored once. See error-reporting-plan §2.3.
+
+    kind: "subprocess" | "timeout" | "internal".
+    """
+    from cli.error_classifier import classify
+
+    if kind == "internal":
+        raw = stderr or (traceback.format_exc() if exc else "")
+        detail = classify(
+            raw_type=type(exc).__name__ if exc else None,
+            raw_message=str(exc) if exc else None,
+            stderr=raw, kind="internal",
+        )
+        return detail, raw
+
+    if kind == "timeout":
+        raw = stderr or f"Script timed out after {PER_SCRIPT_TIMEOUT_SEC}s"
+        detail = classify(kind="timeout", has_network_failures=has_network_failures)
+        return detail, raw
+
+    # subprocess: script exited non-zero.
+    stderr_txt = (stderr or "").strip()
+    stdout_txt = (stdout or "").strip()
+    parts = []
+    if stderr_txt:
+        parts.append(f"[stderr]\n{stderr_txt}")
+    if stdout_txt:
+        parts.append(f"[stdout]\n{stdout_txt}")
+    raw = "\n\n".join(parts) or f"exit code {returncode}"
+    # When the harness emitted a structured error, trust it exclusively: the
+    # stderr/stdout blob carries rendered source code that fools keyword
+    # rules. Pass the blob only as the fallback for the no-artifacts case
+    # (compile-fail / timeout). See error-reporting-plan §6.2.
+    has_harness_msg = bool((artifacts_error or {}).get("raw_message"))
+    detail = classify(
+        raw_type=(artifacts_error or {}).get("raw_type"),
+        raw_message=(artifacts_error or {}).get("raw_message"),
+        stderr=None if has_harness_msg else stderr_txt,
+        stdout=None if has_harness_msg else stdout_txt,
+        kind="subprocess", returncode=returncode,
+        has_network_failures=has_network_failures,
+    )
+    return detail, raw
 
 
 @bp.route('/api/runs', methods=['GET'])
@@ -103,18 +160,53 @@ def get_run(run_id):
 
         script_rows = conn.execute(
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
-            "scr.console_errors, scr.network_failures, scr.error_message, "
+            "scr.console_errors, scr.network_failures, scr.error_message, scr.error_detail, "
             "scr.console_log, scr.network_log, scr.screenshot_path, "
             "scr.order_index, scr.started_at, scr.finished_at "
             "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
             "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
             (run_id,),
         ).fetchall()
-        run["scripts"] = [dict(sr) for sr in script_rows]
+        # error_detail is stored as a JSON string — parse it so the frontend
+        # gets a structured object, not a string.
+        run["scripts"] = []
+        for sr in script_rows:
+            d = dict(sr)
+            if d.get("error_detail"):
+                try:
+                    d["error_detail"] = json.loads(d["error_detail"])
+                except (TypeError, ValueError):
+                    d["error_detail"] = None
+            run["scripts"].append(d)
 
         return jsonify({"ok": True, "run": run})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/runs/<run_id>/report', methods=['GET'])
+def download_report(run_id):
+    """Generate and download a self-contained offline HTML report for a run.
+    See docs/error-reporting-plan.md (section 4)."""
+    from flask import Response
+    from cli.report import generate_html_report
+    try:
+        html_str = generate_html_report(run_id)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.error("download_report: failed for %s: %s", run_id, e, exc_info=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+    # ?view=1 serves the report inline (open in a browser tab); the default
+    # serves it as an attachment (save to disk). The UI fires both at once.
+    disposition = "inline" if request.args.get("view") else "attachment"
+    return Response(
+        html_str,
+        mimetype="text/html",
+        headers={
+            "Content-Disposition": f'{disposition}; filename="qaclan-report-{run_id}.html"'
+        },
+    )
 
 
 def _cleanup_run_dir(run_dir):
@@ -145,11 +237,17 @@ def execute_run():
         browser_type = data.get("browser", "chromium")
         resolution = data.get("resolution") or None
         headless = data.get("headless", False)
-        _ALLOWED_EXPECT_TIMEOUTS = {3000, 5000, 7000, 10000, 15000, 30000}
-        _raw_expect = data.get("expect_timeout")
-        expect_timeout = _raw_expect if isinstance(_raw_expect, int) and _raw_expect in _ALLOWED_EXPECT_TIMEOUTS else 7000
-        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s expect_timeout=%s",
-                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless, expect_timeout)
+        # Run-level "Wait limit" — one knob driving both QACLAN_EXPECT_TIMEOUT
+        # (assertions) and QACLAN_ACTION_TIMEOUT (clicks/fills/waits). A
+        # per-script wait_timeout column can override this inside the loop.
+        # See docs/expect-timeout-strategy-plan.md.
+        _ALLOWED_WAIT_TIMEOUTS = {5000, 10000, 15000, 30000, 45000, 60000}
+        _DEFAULT_WAIT_TIMEOUT = 15000
+        # Accept both the new "wait_timeout" key and the legacy "expect_timeout".
+        _raw_wait = data.get("wait_timeout", data.get("expect_timeout"))
+        run_wait_timeout = _raw_wait if isinstance(_raw_wait, int) and _raw_wait in _ALLOWED_WAIT_TIMEOUTS else _DEFAULT_WAIT_TIMEOUT
+        logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s wait_timeout=%s",
+                     suite_id, env_name, stop_on_fail, browser_type, resolution, headless, run_wait_timeout)
 
         if not suite_id:
             return jsonify({"ok": False, "error": "suite_id is required"}), 400
@@ -171,7 +269,7 @@ def execute_run():
 
         items = conn.execute(
             "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys "
+            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys, sc.wait_timeout "
             "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
@@ -350,7 +448,17 @@ def execute_run():
                 child_env["QACLAN_BROWSER"] = browser_type
                 child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
                 child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
-                child_env["QACLAN_EXPECT_TIMEOUT"] = str(expect_timeout)
+                # Resolve the effective wait limit for THIS script:
+                #   script.wait_timeout  >  run-level pick  >  default.
+                # One value drives both the expect (assertion) and action
+                # (click/fill/wait) timeouts — see expect-timeout-strategy-plan.md.
+                _script_wt = item["wait_timeout"]
+                if isinstance(_script_wt, int) and _script_wt in _ALLOWED_WAIT_TIMEOUTS:
+                    effective_wait_timeout = _script_wt
+                else:
+                    effective_wait_timeout = run_wait_timeout
+                child_env["QACLAN_EXPECT_TIMEOUT"] = str(effective_wait_timeout)
+                child_env["QACLAN_ACTION_TIMEOUT"] = str(effective_wait_timeout)
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 
@@ -368,8 +476,9 @@ def execute_run():
 
                 duration_ms = int((time.time() - script_start) * 1000)
                 finished_at = datetime.now(timezone.utc).isoformat()
-                console_errors, network_failures = _read_artifacts(artifacts_path)
+                console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
 
+                error_detail = None
                 if proc.returncode == 0:
                     status = "PASSED"
                     error_msg = None
@@ -380,30 +489,29 @@ def execute_run():
                                 len(console_errors), len(network_failures))
                 else:
                     status = "FAILED"
-                    stderr_txt = (proc.stderr or "").strip()
-                    stdout_txt = (proc.stdout or "").strip()
-                    parts = []
-                    if stderr_txt:
-                        parts.append(f"[stderr]\n{stderr_txt}")
-                    if stdout_txt:
-                        parts.append(f"[stdout]\n{stdout_txt}")
-                    error_msg = "\n\n".join(parts) or f"exit code {proc.returncode}"
+                    error_detail, error_msg = _build_error_detail(
+                        kind="subprocess", returncode=proc.returncode,
+                        stdout=proc.stdout, stderr=proc.stderr,
+                        artifacts_error=artifacts_error,
+                        has_network_failures=bool(network_failures),
+                    )
                     failed += 1
                     saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
-                    logger.error("execute_run: [%d/%d] %s — FAILED (%dms, exit=%d): %s",
+                    logger.error("execute_run: [%d/%d] %s — FAILED (%dms, exit=%d) [%s]: %s",
                                  idx + 1, total, item["script_name"], duration_ms, proc.returncode,
-                                 error_msg[:1000])
+                                 error_detail["category"], error_msg[:1000])
                     if stop_on_fail:
                         stopped = True
                         logger.info("execute_run: stop-on-fail triggered, remaining scripts will be skipped")
 
+                error_detail_json = json.dumps(error_detail) if error_detail else None
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                    "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
-                    "screenshot_path, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "duration_ms, error_message, error_detail, console_errors, network_failures, "
+                    "console_log, network_log, screenshot_path, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"], status,
-                     duration_ms, error_msg,
+                     duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
@@ -416,6 +524,7 @@ def execute_run():
                     "status": status,
                     "duration_ms": duration_ms,
                     "error_message": error_msg,
+                    "error_detail": error_detail,
                     "screenshot_path": saved_screenshot,
                     "console_errors": len(console_errors),
                     "network_failures": len(network_failures),
@@ -427,20 +536,25 @@ def execute_run():
                 duration_ms = int((time.time() - script_start) * 1000)
                 finished_at = datetime.now(timezone.utc).isoformat()
                 failed += 1
-                error_msg = f"Script timed out after {PER_SCRIPT_TIMEOUT_SEC}s"
                 saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
                 logger.error("execute_run: [%d/%d] %s — TIMEOUT (%dms)",
                              idx + 1, total, item["script_name"], duration_ms)
                 if stop_on_fail:
                     stopped = True
-                console_errors, network_failures = _read_artifacts(artifacts_path)
+                # Partial console/network data may still exist from the killed
+                # subprocess; the harness `error` almost never does.
+                console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
+                error_detail, error_msg = _build_error_detail(
+                    kind="timeout", has_network_failures=bool(network_failures),
+                )
+                error_detail_json = json.dumps(error_detail)
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                    "duration_ms, error_message, console_errors, network_failures, console_log, network_log, "
-                    "screenshot_path, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "duration_ms, error_message, error_detail, console_errors, network_failures, "
+                    "console_log, network_log, screenshot_path, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"],
-                     duration_ms, error_msg,
+                     duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
@@ -452,6 +566,7 @@ def execute_run():
                     "status": "FAILED",
                     "duration_ms": duration_ms,
                     "error_message": error_msg,
+                    "error_detail": error_detail,
                     "screenshot_path": saved_screenshot,
                     "console_errors": len(console_errors),
                     "network_failures": len(network_failures),
@@ -463,17 +578,19 @@ def execute_run():
                 duration_ms = int((time.time() - script_start) * 1000)
                 finished_at = datetime.now(timezone.utc).isoformat()
                 failed += 1
-                error_msg = traceback.format_exc()
-                logger.error("execute_run: [%d/%d] %s — INTERNAL ERROR (%dms): %s",
-                             idx + 1, total, item["script_name"], duration_ms, e)
+                error_detail, error_msg = _build_error_detail(kind="internal", exc=e)
+                error_detail_json = json.dumps(error_detail)
+                logger.error("execute_run: [%d/%d] %s — INTERNAL ERROR (%dms) [%s]: %s",
+                             idx + 1, total, item["script_name"], duration_ms,
+                             error_detail["category"], e)
                 if stop_on_fail:
                     stopped = True
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
-                    "duration_ms, error_message, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?)",
+                    "duration_ms, error_message, error_detail, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"],
-                     duration_ms, error_msg, script_now, finished_at),
+                     duration_ms, error_msg, error_detail_json, script_now, finished_at),
                 )
                 script_results.append({
                     "script_id": item["script_id"],
@@ -481,6 +598,7 @@ def execute_run():
                     "status": "FAILED",
                     "duration_ms": duration_ms,
                     "error_message": error_msg,
+                    "error_detail": error_detail,
                 })
 
         # Ensure the env-vars dict is released promptly so decrypted secrets
@@ -538,3 +656,4 @@ def execute_run():
         # *.artifacts.json, playwright.config.js) are disposable. Drop the
         # directory regardless of success/failure path.
         _cleanup_run_dir(run_dir)
+        # pass

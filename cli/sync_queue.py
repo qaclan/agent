@@ -138,7 +138,7 @@ def _dispatch(row):
         elif et == "script":
             r = conn.execute(
                 "SELECT name, feature_id, project_id, file_path, channel, "
-                "start_url_key, start_url_value, var_keys, language "
+                "start_url_key, start_url_value, var_keys, language, wait_timeout "
                 "FROM scripts WHERE id = ?", (eid,)
             ).fetchone()
             if r:
@@ -164,6 +164,7 @@ def _dispatch(row):
                     start_url_value=r["start_url_value"],
                     var_keys=var_keys,
                     language=r["language"],
+                    wait_timeout=r["wait_timeout"],
                 )
         elif et == "environment":
             r = conn.execute(

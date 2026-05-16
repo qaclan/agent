@@ -843,6 +843,119 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   line-height: 1.4;
   word-break: break-word;
 }
+/* Structured error card (error-reporting-plan §3) */
+/* No red left border here — the outer .script-result-card.fail already
+   carries the red failure bar. The red category badge is the signal. */
+.error-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--bg-sunken, rgba(0,0,0,0.12));
+  padding: 10px 12px;
+  margin-top: 6px;
+}
+.error-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.error-card-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--danger);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px 7px;
+}
+.error-card.sev-warning .error-card-badge { background: var(--warning); }
+.error-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+/* Tier 1 — what happened. The headline, brightest body text. */
+.error-card-message {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+/* Tier 2 — what to do. A calm accent block — background tint only, no
+   border. Red is the card's signal; this block must not compete. */
+.error-card-next {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.45;
+  margin-top: 7px;
+  padding: 6px 9px;
+  background: var(--accent-subtle);
+  border-radius: var(--radius-sm, 4px);
+}
+.error-card-next-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+/* Tier 3 — the facts. Scannable pill row, not a dim line. */
+.error-card-step {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+.diag-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 2px 8px;
+}
+.diag-k {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.diag-v { font-size: 11.5px; color: var(--text-secondary); }
+.diag-v code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.failure-summary {
+  margin: 10px 0 4px;
+  padding: 8px 10px;
+  background: var(--bg-sunken, rgba(0,0,0,0.12));
+  border-radius: var(--radius-sm, 6px);
+  border: 1px solid var(--border-subtle);
+}
+.failure-summary-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.failure-summary-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.failure-chip {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--danger);
+  background: var(--bg-elevated, rgba(255,255,255,0.04));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  padding: 2px 8px;
+}
+.failure-chip strong { color: var(--text-primary); }
+
 .script-result-screenshot {
   margin: 6px 0;
 }

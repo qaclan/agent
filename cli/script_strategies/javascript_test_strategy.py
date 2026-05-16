@@ -34,12 +34,16 @@ const fs = require('fs');
 const _STATE      = process.env.QACLAN_STORAGE_STATE || '';
 const _ARTIFACTS  = process.env.QACLAN_ARTIFACTS_PATH || '';
 const _SCREENSHOT = process.env.QACLAN_SCREENSHOT_PATH || '';
+const _ACTION_TIMEOUT = parseInt(process.env.QACLAN_ACTION_TIMEOUT || '30000', 10) || 30000;
 
 const _consoleErrors = [];
 const _networkFailures = [];
+// Stash the thrown error before re-throwing — test.afterAll has no access to
+// it otherwise. See docs/error-reporting-plan.md (section 2.1).
+let _scriptError = null;
 
 test('qaclan', async ({ page, context }) => {
-  page.setDefaultTimeout(30000);
+  page.setDefaultTimeout(_ACTION_TIMEOUT);
   page.on('console', msg => {
     if (msg.type() === 'error' || msg.type() === 'warning')
       _consoleErrors.push({ type: msg.type(), text: msg.text() });
@@ -59,6 +63,7 @@ test('qaclan', async ({ page, context }) => {
     if (_SCREENSHOT) {
       try { await page.screenshot({ path: _SCREENSHOT }); } catch (_) {}
     }
+    _scriptError = err;
     throw err;
   } finally {
     if (_STATE) {
@@ -70,10 +75,15 @@ test('qaclan', async ({ page, context }) => {
 test.afterAll(() => {
   if (!_ARTIFACTS) return;
   try {
-    fs.writeFileSync(_ARTIFACTS, JSON.stringify({
+    const payload = {
       console_errors: _consoleErrors,
       network_failures: _networkFailures,
-    }));
+    };
+    if (_scriptError) payload.error = {
+      raw_type: (_scriptError && _scriptError.name) || 'Error',
+      raw_message: (_scriptError && _scriptError.message) || String(_scriptError),
+    };
+    fs.writeFileSync(_ARTIFACTS, JSON.stringify(payload));
   } catch (_) {}
 });
 """
@@ -300,9 +310,15 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "  }\n"
             "}\n"
             "if (_STATE && fs.existsSync(_STATE)) _use.storageState = _STATE;\n"
-            "const _EXPECT_TIMEOUT = parseInt(process.env.QACLAN_EXPECT_TIMEOUT || '7000', 10) || 7000;\n"
+            "const _EXPECT_TIMEOUT = parseInt(process.env.QACLAN_EXPECT_TIMEOUT || '15000', 10) || 15000;\n"
+            "const _ACTION_TIMEOUT = parseInt(process.env.QACLAN_ACTION_TIMEOUT || '30000', 10) || 30000;\n"
+            # Per-test timeout must exceed the expect/action budget, else the
+            # @playwright/test runner aborts the test before a slow-but-healthy
+            # assertion can settle. Give it generous headroom over the larger
+            # of the two; PER_SCRIPT_TIMEOUT_SEC (300s) is the real backstop.
+            "const _TEST_TIMEOUT = Math.max(_EXPECT_TIMEOUT, _ACTION_TIMEOUT) + 60000;\n"
             f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use, "
-            f"timeout: 60000, expect: {{ timeout: _EXPECT_TIMEOUT }} }};\n"
+            f"timeout: _TEST_TIMEOUT, expect: {{ timeout: _EXPECT_TIMEOUT }} }};\n"
         )
 
     def validate_runtime(self) -> None:
