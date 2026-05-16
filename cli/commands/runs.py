@@ -1,3 +1,5 @@
+import json
+
 import click
 from rich.console import Console
 from rich.table import Table
@@ -72,7 +74,8 @@ def runs_group(ctx, suite_id):
 
 @runs_group.command("show")
 @click.argument("run_id")
-def run_show(run_id):
+@click.option("--verbose", "-v", is_flag=True, help="Show the raw technical error blob.")
+def run_show(run_id, verbose):
     """Show detailed results for a run."""
     proj = get_active_project(console)
     if not proj:
@@ -128,12 +131,66 @@ def run_show(run_id):
         elif scr["status"] == "FAILED":
             console.print(
                 f"[{scr['order_index'] + 1}] {scr['script_name']}    "
-                f"[red]FAILED[/red]   {dur_s}   console errors: {scr['console_errors']}"
+                f"[red]FAILED[/red]   {dur_s}   console errors/warnings: {scr['console_errors']}"
             )
-            if scr["error_message"]:
+            # Prefer the classified, plain-language error. Fall back to the
+            # raw blob only for old runs without error_detail.
+            detail = None
+            if scr["error_detail"]:
+                try:
+                    detail = json.loads(scr["error_detail"])
+                except (TypeError, ValueError):
+                    detail = None
+            if detail:
+                console.print(f"    [{detail.get('category')}] {detail.get('title')}")
+                console.print(f"    {detail.get('message')}")
+                console.print(
+                    f"    [cyan bold]What to do:[/cyan bold] {detail.get('next_step')}"
+                )
+                diag = []
+                if detail.get("action"):
+                    diag.append(f"action: {detail['action']}")
+                if detail.get("selector"):
+                    diag.append(f"element: {detail['selector']}")
+                if detail.get("timeout_ms"):
+                    diag.append(f"timeout: {int(detail['timeout_ms'] / 1000)}s")
+                if detail.get("element_state"):
+                    diag.append(f"state: {detail['element_state']}")
+                if detail.get("match_count"):
+                    diag.append(f"matched: {detail['match_count']} elements")
+                if detail.get("url"):
+                    diag.append(f"url: {detail['url']}")
+                if detail.get("net_error"):
+                    diag.append(f"network: {detail['net_error']}")
+                if diag:
+                    console.print(f"    [dim]{'  ·  '.join(diag)}[/dim]")
+            elif scr["error_message"]:
                 console.print(f"    Error: {scr['error_message']}")
+            if verbose and scr["error_message"]:
+                console.print(f"    [dim]{scr['error_message']}[/dim]")
         elif scr["status"] == "SKIPPED":
             console.print(
                 f"[{scr['order_index'] + 1}] {scr['script_name']}    "
                 f"[yellow]SKIPPED[/yellow]"
             )
+
+
+@runs_group.command("report")
+@click.argument("run_id")
+@click.option("--output", "-o", "output", default=None,
+              help="Output file path (default: qaclan-report-<run_id>.html)")
+def run_report(run_id, output):
+    """Generate a self-contained offline HTML report for a run."""
+    from cli.report import generate_html_report
+    try:
+        html_str = generate_html_report(run_id)
+    except ValueError as e:
+        console.print(f"[red]{e}. Run: qaclan runs[/red]")
+        return
+    except Exception as e:
+        console.print(f"[red]Failed to generate report: {e}[/red]")
+        return
+    out_path = output or f"qaclan-report-{run_id}.html"
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html_str)
+    console.print(f"[green]Report written to[/green] {out_path}")

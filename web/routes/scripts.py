@@ -53,6 +53,24 @@ def get_settings():
 
 _MAX_IMPORT_BYTES = 256 * 1024
 
+# Per-script "Wait limit" override (Layer 2, expect-timeout-strategy-plan.md).
+# NULL/None means "inherit the run-level wait limit".
+_ALLOWED_WAIT_TIMEOUTS = {5000, 10000, 15000, 30000, 45000, 60000}
+
+
+def _coerce_wait_timeout(raw):
+    """Return (value, error). value is an allowed int, or None for inherit.
+    error is a message string when raw is an unsupported value."""
+    if raw is None or raw == "":
+        return None, None
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return None, "wait_timeout must be an integer or null"
+    if val not in _ALLOWED_WAIT_TIMEOUTS:
+        return None, f"wait_timeout must be one of {sorted(_ALLOWED_WAIT_TIMEOUTS)} or null"
+    return val, None
+
 # Filename suffix → strategy. Order matters — longest match first.
 _EXT_TO_LANGUAGE = [
     (".spec.ts", "typescript_test"),
@@ -385,7 +403,7 @@ def get_script(script_id):
         row = conn.execute(
             "SELECT s.id, s.name, s.feature_id, f.name AS feature_name, "
             "s.channel, s.source, s.language, s.file_path, s.created_at, s.created_by, "
-            "s.start_url_key, s.start_url_value, s.var_keys "
+            "s.start_url_key, s.start_url_value, s.var_keys, s.wait_timeout "
             "FROM scripts s JOIN features f ON s.feature_id = f.id "
             "WHERE s.id = ? AND s.project_id = ?",
             (script_id, project_id),
@@ -428,6 +446,9 @@ def create_script():
         language = (data.get("language") or "python").strip()
         start_url_key = (data.get("start_url_key") or "").strip() or None
         start_url_value = (data.get("start_url_value") or "").strip() or None
+        wait_timeout, wt_err = _coerce_wait_timeout(data.get("wait_timeout"))
+        if wt_err:
+            return jsonify({"ok": False, "error": wt_err}), 400
 
         if not name:
             return jsonify({"ok": False, "error": "Script name is required"}), 400
@@ -468,10 +489,10 @@ def create_script():
             var_keys_list.append(start_url_key)
         conn.execute(
             "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, "
-            "created_at, created_by, start_url_key, start_url_value, var_keys) "
-            "VALUES (?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, created_by, start_url_key, start_url_value, var_keys, wait_timeout) "
+            "VALUES (?, ?, ?, 'web', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (script_id, feature_id, project_id, name, file_path, content, language, now, created_by,
-             start_url_key, start_url_value, json.dumps(var_keys_list)),
+             start_url_key, start_url_value, json.dumps(var_keys_list), wait_timeout),
         )
         conn.commit()
 
@@ -509,6 +530,15 @@ def update_script(script_id):
                 return jsonify({"ok": False, "error": "Script name cannot be empty"}), 400
             conn.execute(
                 "UPDATE scripts SET name = ? WHERE id = ?", (name, script_id)
+            )
+
+        # wait_timeout: present key = set (int or null-to-inherit); absent = leave.
+        if "wait_timeout" in data:
+            wait_timeout, wt_err = _coerce_wait_timeout(data.get("wait_timeout"))
+            if wt_err:
+                return jsonify({"ok": False, "error": wt_err}), 400
+            conn.execute(
+                "UPDATE scripts SET wait_timeout = ? WHERE id = ?", (wait_timeout, script_id)
             )
 
         # Language change: validate, rename the on-disk file to the new

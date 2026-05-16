@@ -45,9 +45,14 @@ _ARTIFACTS = os.environ.get("QACLAN_ARTIFACTS_PATH")
 _SCREENSHOT = os.environ.get("QACLAN_SCREENSHOT_PATH")
 
 try:
-    _EXPECT_TIMEOUT = int(os.environ.get("QACLAN_EXPECT_TIMEOUT", "7000"))
+    _EXPECT_TIMEOUT = int(os.environ.get("QACLAN_EXPECT_TIMEOUT", "15000"))
 except ValueError:
-    _EXPECT_TIMEOUT = 7000
+    _EXPECT_TIMEOUT = 15000
+
+try:
+    _ACTION_TIMEOUT = int(os.environ.get("QACLAN_ACTION_TIMEOUT", "30000"))
+except ValueError:
+    _ACTION_TIMEOUT = 30000
 
 _console_errors = []
 _network_failures = []
@@ -66,15 +71,20 @@ def _context_opts():
     return opts
 
 
-def _write_artifacts():
+def _write_artifacts(error=None):
     if not _ARTIFACTS:
         return
     try:
+        payload = {
+            "console_errors": _console_errors,
+            "network_failures": _network_failures,
+        }
+        # Structured error — raw exception fields the runner's classifier
+        # keys on. See docs/error-reporting-plan.md (section 2.1).
+        if error is not None:
+            payload["error"] = error
         with open(_ARTIFACTS, "w", encoding="utf-8") as f:
-            json.dump({
-                "console_errors": _console_errors,
-                "network_failures": _network_failures,
-            }, f)
+            json.dump(payload, f)
     except Exception:
         pass
 
@@ -101,7 +111,7 @@ def run():
         browser = getattr(playwright, _BROWSER).launch(headless=_HEADLESS)
         context = browser.new_context(**_context_opts())
         page = context.new_page()
-        page.set_default_timeout(30000)
+        page.set_default_timeout(_ACTION_TIMEOUT)
         expect.set_options(timeout=_EXPECT_TIMEOUT)
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
@@ -137,13 +147,15 @@ def run():
 
 if __name__ == "__main__":
     exit_code = 0
+    _error = None
     try:
         run()
-    except Exception:
+    except Exception as exc:
         traceback.print_exc()
         exit_code = 1
+        _error = {"raw_type": type(exc).__name__, "raw_message": str(exc)}
     finally:
-        _write_artifacts()
+        _write_artifacts(_error)
     sys.exit(exit_code)
 '''
 
