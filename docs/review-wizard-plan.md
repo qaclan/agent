@@ -120,71 +120,72 @@ for surgical access:
   `scanAndConvertTypedInputsFromEditor`). Those functions stay public on
   `window.qcApp` (or the equivalent) so the dropdown is a thin shim.
 
-### 2.2 Wizard shape — jump-ahead stepper (Option B, shipped)
+### 2.2 Wizard shape — persistent shell + compact tabs (shipped)
 
-**Decision history.** Three layout options were considered:
+**Decision history.** Three layout options were considered, in shipping
+order:
 
-- **A. True tabs / shared shell** — one modal whose body swaps between three
-  phase views. Rejected: Bind modal's `_showFieldReviewModalCore` is ~280
-  lines with env-loading, per-row dropdowns and a `closeOverlayModal`
-  monkey-patch; refactoring it to a body-only renderer risks regressing
-  already-working code.
-- **B. Stepper strip with jump-ahead** (shipped). Each phase still has its
-  own modal — Bind / Wait / Typed cores stay untouched in their internals.
-  At the top of every phase modal a **clickable stepper strip** is rendered
-  showing all three phases, their counts and status. The current step is
-  the disabled pill; the user can click any other populated step to jump
-  there directly. Order is suggested (Bind → Wait → Typed) but not forced.
-- **C. Drop wizard, dropdown-only** — rejected: regresses the "one button does
-  it all" promise.
+- **A. Forward-only sequential chain** (initial draft). Rejected: user
+  cannot navigate freely between phases. Forced order. Skipping a phase
+  required opening + closing its modal.
+- **B. Stepper strip with jump-ahead modals** (shipped Step 3). Each
+  phase opened its own modal with a stepper header that let the user jump.
+  Worked, but every jump tore down and re-opened a modal — visible flip /
+  flicker, animations re-played, modal-card DOM rebuilt. Still felt like
+  "three separate modals" not "one tool."
+- **C. Persistent shell + compact tabs** (shipped Step 5, current). One
+  modal opens and stays open for the whole flow. A compact tab strip at
+  the top swaps the body in-place on tab click. No modal teardown between
+  phases — same modal-card, just different body HTML and a re-titled
+  Apply button. Feels like one tool with three views.
 
-**Why B.** Modern wizard pattern (Stripe checkout, Linear onboarding, GitHub
-PR review): visible structure, free navigation, per-phase apply. Each phase
-keeps its blast-radius separation (independent ticks, independent Apply, no
-mega-button). Adds a single stepper-header optional param to each existing
-modal core — minimum surface for maximum UX gain.
+**Why C.** Standard pattern for any multi-section configuration UI: VS
+Code's panel tabs, GitHub repo settings, Stripe dashboard sub-views,
+Linear's filter+sort panel. The user's complaint with B was concrete: the
+flip animation made it feel like the wizard was opening *new* modals
+between phases instead of moving between sections of one.
 
-**Layout.** Each phase modal opens with the stepper as its first body
-element:
+**Layout.**
 
 ```
 ┌─ Review & Improve ──────────────────────────────────────────────────┐
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
-│  │ 1 Bind data  │  │ 2 Add waits  │  │ 3 Typed in.  │                │
-│  │  3 candidates│  │ ✓ applied (2)│  │ 1 candidate  │                │
-│  └──────────────┘  └──────────────┘  └──────────────┘                │
-│  Click any step to jump.                                              │
+│  Bind ⓷   Waits ②   Typed ① ✓                                      │  <-- compact tabs
 ├──────────────────────────────────────────────────────────────────────┤
-│  (current phase body — Bind rows, Wait rows, or Typed rows)           │
+│                                                                      │
+│  <current phase body — Bind rows, Wait rows, or Typed rows>          │
+│                                                                      │
 ├──────────────────────────────────────────────────────────────────────┤
-│              [ Skip for now ]      [ Apply (N) ]                      │
+│   [ Skip step ]                              [ Apply Bindings (3) ]  │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Scan timing.** Unlike the forward-only draft, scans run **up-front for all
-three phases** so the stepper can show candidate counts immediately. After
-each Apply the wizard re-scans every phase against the mutated script and
-updates the stepper counts (a Wait inserted in phase 2 shifts offsets in
-phase 3, so phase 3's candidate list is recomputed). Pre-scanning is cheap
-— it is all client-side and the configs (`/wait-config`, `/typed-input-config`)
-are fetched once each and cached on the wizard state.
+- Single-line tabs with count badge + status icon (✓ applied, – skipped).
+- Active tab: underline accent + bold.
+- Empty tabs disabled (greyed).
+- Tab-strip height ~32px (vs old stepper ~80px).
 
-**Pill states** (CSS classes):
+**Scan timing.** Same as B: scans run up-front for all three phases so
+tab counts appear immediately. After each Apply the wizard re-scans
+every phase against the mutated script and re-renders the tab strip
+(via `_wizardRenderTabs(state)`). Pre-scanning is cheap — all
+client-side, configs cached on `state.cfgs`.
 
-| State | Class | Badge text | Clickable? |
+**Tab states** (CSS classes on `.qc-wizard-tab`):
+
+| State | Class | Visual | Clickable? |
 |---|---|---|---|
-| Current | `.is-current` | candidate count or "applied" / "skipped" / "none found" | No (disabled) |
-| Applied | `.is-applied` | `applied (N)` | Yes if count > 0 (re-evaluate remainder) |
-| Skipped | `.is-skipped` | `skipped` | Yes if count > 0 |
-| Auto-empty | `.is-empty` | `none found` | No (disabled) — nothing to jump to |
-| Pending | (no extra class) | `N candidate(s)` | Yes |
+| Current | `.is-current` | underlined accent, bold | No (no-op handler) |
+| Applied | `.is-applied` | green text + ✓ icon | Yes if count > 0 (re-evaluate) |
+| Skipped | `.is-skipped` | muted + – icon | Yes if count > 0 |
+| Empty | `.is-empty` | dimmed | No (disabled) |
+| Pending | (no extra class) | normal | Yes |
 
-**Jump semantics.** Clicking a non-current populated pill resolves the
-current phase's promise with `{action: 'jump', targetIdx}`. The current
-phase's ticked-but-unapplied state is discarded — same contract as
-Skip-for-now. Phase status stays `pending` so the stepper continues to
-offer it. Applies are still irreversible (a previously applied phase shows
-the ✓ badge and re-clicking opens it again against the latest content).
+**Tab click semantics.** `_qcWizardSwitchTo(idx)` calls the current
+handler's `dispose()` (cleans globals), updates `state.currentIdx`, calls
+`_qcWizardMountCurrent()` which mounts the new phase into the persistent
+body slot via that phase's `mountInto`. The wizard's shared footer
+buttons stay mounted; the Apply label/count refresh via
+`_qcWizardSyncCurrent()`. **No modal close/reopen, no flip.**
 - A **content slot** holding the current phase's rows + per-phase controls
   (master toggle, `Show all`, etc.).
 - A **footer** with `← Back` (disabled on step 1), `Skip this step` (advances
@@ -405,49 +406,67 @@ Add a single cohesive block, conceptually one "module":
   entry. Loads the script, fetches the two scan-configs in parallel, runs
   scans, opens the shell.
 
-### 4.3 Stepper-strip injection contract (shipped)
+### 4.3 `mountInto` body-render contract (shipped Step 5)
 
-Instead of the originally drafted `renderInto` embedded-body contract (a
-heavier refactor of each modal core), the shipped implementation passes a
-single optional **`wizardStepper`** HTML string to each modal core:
+The wizard owns the modal shell. Each phase renders its body **only**
+into the wizard's `#qc-wizard-body` slot. To enable this, each modal
+core accepts an optional `mountInto: HTMLElement` parameter:
 
-- `_showFieldReviewModalCore({ ..., wizardStepper = '' })`
-- `_showWaitReviewModalCore({ ..., wizardStepper = '' })`
-- `_showTypedInputReviewModalCore({ ..., wizardStepper = '' })`
+- `_showFieldReviewModalCore({ ..., mountInto = null })`
+- `_showWaitReviewModalCore({ ..., mountInto = null })`
+- `_showTypedInputReviewModalCore({ ..., mountInto = null })`
 
-If set, the core prepends the HTML to its body and swaps the modal title to
-`"Review & Improve"`. If empty (standalone callers — dropdown shortcuts,
-devtools), the core renders its original title and body unchanged. Zero
-regression risk for the existing standalone paths.
+When `mountInto` is set:
 
-The stepper HTML itself comes from `_wizardStepperHTML(state)`. Click
-handlers on the pills call `window._qcWizardJumpTo(idx)`, which:
+1. Skip the `modalShowFn` call entirely — no new modal opens.
+2. Write the body HTML directly into `mountInto.innerHTML`.
+3. Set up the same per-phase globals (`_qcWaitReviewRoot` etc.) but
+   pointing at the slot, not a modal-root.
+4. Return a **control handle**: `{ apply, dispose, sync, canApply?, empty }`.
+   - `apply()` — collects picks, rewrites content, returns `{ newContent, meta }`.
+     Returns `null` for soft-error cases (Bind: env not picked → toast).
+   - `dispose()` — clears globals registered by this phase. Called on tab
+     switch / Apply advance / wizard close.
+   - `sync()` — returns the current "change count" for the Apply button
+     label (e.g. 3 selected dropdowns / 2 toggled checkboxes / 1
+     conversion). Read by `_qcWizardSyncCurrent()`.
+   - `canApply()` (Bind only) — returns `false` when no env is selected
+     so the wizard greys the Apply button.
+   - `empty: true` — set when the phase has zero candidates; the wizard
+     auto-skips.
 
-1. Reads `window._qcWizardCurrent` (set by `_wizardInstallCurrent` before
-   each phase modal opens) to find the current phase's resolver + close
-   function.
-2. Calls the close function to dismiss the modal.
-3. Resolves the phase promise with `{action: 'jump', targetIdx: idx}`.
+When `mountInto` is `null` (standalone callers — dropdown shortcuts,
+post-record fallback, devtools), the core opens its own modal as before.
+Zero regression on standalone paths.
 
-The state machine in `openReviewWizard` then routes to `targetIdx` and
-opens that phase's modal.
+**Sync hook.** Inside the modal cores, `_qcWaitReviewSync` /
+`_qcTypedReviewSync` / `_onFieldReviewSelect` / `_onReviewEnvChange` all
+call `window._qcWizardSyncCurrent?.()` after updating local state. The
+wizard's footer Apply button auto-updates label and disabled-state from
+the handler's `sync()` return.
 
-### 4.4 Stepper UX details (shipped)
+### 4.4 Tab UX details (shipped Step 5)
 
-- **Empty pills** (`count === 0`) render disabled with a `none found` badge.
-  Wizard auto-skips them when walking phases in script order. User cannot
-  click them — avoids the silent "click → auto-skip → re-route" confusion
-  caught in review.
-- **Applied pills** keep a ✓ badge and stay clickable **if** rescan still
-  finds remaining candidates (partial apply leaves unconverted fills).
-  Clicking re-opens the phase against the post-apply content; the candidate
-  list is freshly computed, so previously-applied changes do not reappear.
+- **Empty tabs** render with `disabled` attr + greyed text. Wizard
+  auto-skips them when picking next pending phase. Click does nothing
+  (no silent re-route).
+- **Applied tabs** show ✓ icon and green tint. Re-clickable if rescan
+  finds remaining candidates (partial apply). Clicking remounts the
+  phase against the post-apply content; the candidate list is freshly
+  computed, so previously-applied changes do not reappear.
+- **Skipped tabs** show – icon, muted text, but stay clickable (same as
+  Pending) so user can change mind.
 - **Re-applies are additive in the summary toast.** `phase.applied +=
-  res.applied` on every Apply, so the end-of-wizard toast reports cumulative
-  changes per phase.
-- **No `Back` button.** Stepper is the navigation surface — adding a Back
-  button would duplicate it. Forward-with-wrap traversal handles auto-advance
-  after Apply / Skip.
+  appliedCount` on every Apply, so the end-of-wizard toast reports
+  cumulative changes per phase.
+- **No Back button.** Tabs are the navigation. After Apply or Skip, the
+  wizard advances to the next pending populated tab in script order
+  (then wraps). User can override by clicking any tab.
+- **Apply auto-advances.** Apply applies the current phase, re-scans,
+  then auto-mounts the next pending phase. The wizard closes when no
+  pending phases remain and fires the summary toast.
+- **No flip / no animation between tabs.** `_qcWizardSwitchTo` mutates
+  `#qc-wizard-body`'s innerHTML in place. The modal-card stays mounted.
 - **Keyboard.** Not yet implemented; pointer navigation only. Deferred to v2.
 
 ### 4.5 Toast / summary (shipped)
@@ -492,44 +511,62 @@ native. No changes to `cli/script_strategies/javascript*` or
 | `_showTypedInputReviewModalCore` | After `_showWaitReviewModalCore` (~2504) | same shape |
 | `scanAndConvertTypedInputsFromEditor` | After `scanAndAddWaitsFromEditor` (~2595) | same shape |
 
-### 5.3 Frontend — wizard shell (shipped)
+### 5.3 Frontend — wizard shell (shipped Step 5)
 
-Added as one contiguous block after `_promptAddWaitsAfterRecording` in
-`web/static/app.js`. Final shape (Option B, state-machine with stepper):
+Single contiguous block in `web/static/app.js` after the typed-input
+helpers:
 
 - `_wizardLoadContext(source, scriptId)` — editor vs post-record content fetch
 - `_wizardCommit(source, scriptId, newContent)` — editor.setValue vs PUT
-- `_wizardStepperHTML(state)` — stepper pills, click → `_qcWizardJumpTo`
-- `_qcWizardJumpTo(idx)` — global handler, closes current modal, resolves
-  current phase promise with `{action: 'jump', targetIdx}`
-- `_wizardScanBind` / `_wizardScanWait` / `_wizardScanTyped` — per-phase
-  scan + config caching (configs fetched once each, cached on `state.cfgs`)
-- `_wizardScanAll(state)` — calls all three; invoked initially and after
-  each Apply
-- `_wizardInstallCurrent(state, resolve, modalCloseFn)` — stashes phase
-  resolver on `window._qcWizardCurrent` so the global jump handler can find
-  it
-- `_wizardPhaseBind` / `_wizardPhaseWait` / `_wizardPhaseTyped` — each
-  builds candidates from cached scan, opens the corresponding
-  `_show*ReviewModalCore` with `wizardStepper` HTML + onApply / onSkip that
-  resolve to `{action, applied, newContent}`
-- `_wizardSummaryToast(state)` — final toast listing non-zero applied
-  phases
-- `_wizardRunCurrentPhase(state)` — dispatch by phase id
+- `_wizardScanBind` / `_wizardScanWait` / `_wizardScanTyped` /
+  `_wizardScanAll(state)` — per-phase scan + config caching. Called
+  up-front and after each Apply.
+- `_wizardTabsHTML(state)` — renders the compact tab strip.
+  `_wizardRenderTabs(state)` updates `#qc-wizard-tabs` innerHTML.
+- `_qcWizardSwitchTo(idx)` — tab click handler. Disposes current phase
+  handler, updates `currentIdx`, calls `_qcWizardMountCurrent`.
+- `_qcWizardMountCurrent()` — calls the right `_wizardMountX(state, slot)`
+  for the current phase, stores the returned handler on
+  `window._qcWizardActive.current`, refreshes tabs + Apply button.
+- `_wizardMountBind` / `_wizardMountWait` / `_wizardMountTyped` — each
+  delegates to the corresponding `_show*ReviewModalCore` with
+  `mountInto: slot`. The cores return `{ apply, dispose, sync, ... }`.
+- `_qcWizardSyncCurrent()` — global hook called by modal cores when row
+  state changes. Reads current handler's `sync()` and updates the Apply
+  button's label + disabled state.
+- `_qcWizardApply()` — footer Apply click. Calls
+  `w.current.handler.apply()`, commits via `_wizardCommit`, marks the
+  phase applied (cumulative), re-scans all, calls `_qcWizardAdvance`.
+- `_qcWizardSkip()` — footer Skip click. Marks phase skipped, advances.
+- `_qcWizardAdvance()` — disposes current handler, picks the next
+  pending populated phase (script-order, wraps), mounts it; if none
+  remain, fires summary toast and closes.
+- `_qcWizardClose()` — disposes handler, nulls `_qcWizardActive`,
+  closes the modal.
+- `_wizardSummaryToast(state)` — closing toast listing non-zero applied
+  phases.
 - `openReviewWizard(scriptId, opts)` — public entry. Loads content,
-  pre-scans all phases, runs a state-machine loop:
-  - dispatch current phase → result
-  - `jump` → set currentIdx, continue
-  - `applied` → update status + cumulative applied, re-scan all, find next
-    pending populated phase, continue
-  - `skipped` / `auto-skipped` → mark, advance to next, continue
-  - no pending populated phases left → break + summary toast
-  - sentinel iteration cap (64) as belt-and-braces against pathological
-    jump cycles
+  pre-scans all phases, opens **one** modal via `showOverlayModal` (editor
+  context) or `showModal` (post-record), tags footer buttons with
+  `data-wizard-btn="skip"|"apply"`, stores wizard state on
+  `window._qcWizardActive`, mounts the first non-empty phase.
 
-The shared `wizardStepper` parameter (HTML string) is the only addition to
-each `_show*ReviewModalCore` (§4.3) — far lighter than the originally
-drafted `renderInto`/`apply`/`dispose` contract.
+State on `window._qcWizardActive`:
+
+```js
+{
+  state: {
+    source, scriptId, envName, language, content,
+    cfgs: { bind?, wait?, typed? },     // cached per-language configs
+    phases: [
+      { id, label, status, count, applied, _scan: { fills | candidates } },
+      ...
+    ],
+    currentIdx,
+  },
+  current: { phaseId, handler },        // current handler (apply/dispose/sync)
+}
+```
 
 ### 5.4 Frontend — toolbar markup
 In each of the 4 toolbar locations (`app.js:1645/1646`, `1905/1906`,
@@ -617,21 +654,35 @@ without the entry-point swap, the toolbar has Bind + Wait visible plus a
 hidden wizard nobody can reach — confusing intermediate state with no value
 to ship-test. Better to gate the user-visible change behind one PR.
 
-### Step 4 — Option B refactor: jump-ahead stepper ✓
+### Step 4 — Option B refactor: jump-ahead stepper ✓ (superseded by Step 5)
 - Replaced the forward-only sequential `await phase1; await phase2; await
-  phase3` chain in `openReviewWizard` with a state-machine loop driven by
-  the stepper.
-- Added `_wizardStepperHTML(state)`, `_qcWizardJumpTo(idx)`,
-  `_wizardScanAll`, `_wizardInstallCurrent`, `_wizardRunCurrentPhase`.
-- Threaded a single optional `wizardStepper` HTML string into each
-  `_show*ReviewModalCore` (§4.3). Modals prepend it and swap title to
-  "Review & Improve" when set; standalone callers unchanged.
-- Disabled empty-phase pills (caught in review: clicking an empty pill
-  produced a silent auto-skip + re-route).
-- CSS `.qc-wizard-stepper` + per-state pill classes appended to
-  `web/static/style.css`.
+  phase3` chain with a state-machine loop driven by a stepper.
+- Each phase still opened its own modal; the stepper let the user jump
+  between them via `_qcWizardJumpTo(idx)`.
+- Caught in user review: the modal close-and-reopen between phases
+  showed a flip animation — felt like "three modals" not "one wizard."
+- Stepper CSS + threading of `wizardStepper` HTML string into each
+  modal core. All later replaced.
 
-### Step 5 — Verification on the client's failing script (deferred — needs browser)
+### Step 5 — Persistent shell + compact tabs (current) ✓
+- Replaced the stepper + per-phase modal-flip pattern with **one
+  persistent modal** that swaps body content in-place on tab click.
+- Refactored each `_show*ReviewModalCore` to accept `mountInto:
+  HTMLElement`. When set, the core writes body HTML into the slot and
+  returns `{ apply, dispose, sync, canApply?, empty }` instead of opening
+  its own modal (§4.3).
+- New wizard shell functions: `_qcWizardSwitchTo`, `_qcWizardMountCurrent`,
+  `_qcWizardApply`, `_qcWizardSkip`, `_qcWizardAdvance`, `_qcWizardClose`,
+  `_qcWizardSyncCurrent`. State on `window._qcWizardActive`.
+- Tab strip CSS replaces stepper CSS — compact underline tabs (~32px
+  height vs old ~80px stepper).
+- Modal cores call `window._qcWizardSyncCurrent?.()` after row state
+  changes so the wizard's footer Apply button auto-updates label +
+  disabled.
+- `wizardStepper` parameter is no longer used in standalone callers
+  (still in core signatures for back-compat, defaults to '').
+
+### Step 6 — Verification on the client's failing script (deferred — needs browser)
 - Re-record the Candidates flow.
 - Run the wizard end-to-end: bind `asdfdf` → confirm Auto-Wait step →
   convert the search field. Optionally use the stepper to jump straight to
