@@ -1076,8 +1076,10 @@ async function recordScriptModal() {
       if (res.ok === false) { closeModal(); toast(res.error, 'error'); return }
       closeModal(); toast('Script "' + name + '" recorded')
 
-      // Post-record: load script and trigger field review if any .fill() calls exist
-      await reviewRecordedScriptFields(res.id, env_name)
+      // Post-record: chained review wizard (Bind → Wait → Typed). Each phase
+      // auto-skips when its scan finds no candidates. See
+      // docs/review-wizard-plan.md §5.5.
+      await openReviewWizard(res.id, { source: 'post-record', envName: env_name })
       renderScriptsPage()
     }}
   ])
@@ -1246,7 +1248,7 @@ function _renderDiffLine(lineText, value, valueQuote, mode, replacementKey) {
   return head + `<span class="diff-highlight-after">${escHtml(newInner)}</span>` + tail
 }
 
-async function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats, envName, patterns, onApply, onSkip, useOverlay = false }) {
+async function _showFieldReviewModalCore({ fills, originalContent, envVars, secretCats, envName, patterns, onApply, onSkip, useOverlay = false, wizardStepper = '', mountInto = null }) {
   // When called from inside another modal (e.g. editor Scan & Bind), render as an
   // overlay so the underlying modal and its state (textarea value, etc.) stay alive.
   const modalShowFn = useOverlay ? showOverlayModal : showModal
@@ -1390,13 +1392,19 @@ async function _showFieldReviewModalCore({ fills, originalContent, envVars, secr
       userSelections.delete(fillIndex)
     }
     _updateFieldReviewPreview(fillIndex)
+    if (typeof window._qcWizardSyncCurrent === 'function') window._qcWizardSyncCurrent()
+  }
+
+  const _getReviewRoot = () => {
+    if (mountInto) return mountInto
+    return useOverlay
+      ? document.getElementById('modal-overlay-root')
+      : document.getElementById('modal-root')
   }
 
   // Expose the env-change handler globally so the select's onchange can call it
   window._onReviewEnvChange = async function() {
-    const modalRoot = useOverlay
-      ? document.getElementById('modal-overlay-root')
-      : document.getElementById('modal-root')
+    const modalRoot = _getReviewRoot()
     if (!modalRoot) return
     const sel = modalRoot.querySelector('#review-env-select')
     if (!sel) return
@@ -1416,6 +1424,10 @@ async function _showFieldReviewModalCore({ fills, originalContent, envVars, secr
     for (const [fillIndex, key] of userSelections.entries()) {
       if (key) _updateFieldReviewPreview(fillIndex)
     }
+    // Notify wizard so it can update its Apply-button enabled state.
+    if (mountInto && typeof window._qcWizardSyncCurrent === 'function') {
+      window._qcWizardSyncCurrent()
+    }
   }
 
   const envSelectorHTML = `
@@ -1428,55 +1440,80 @@ async function _showFieldReviewModalCore({ fills, originalContent, envVars, secr
       ${!currentEnvName ? '<p class="form-hint" style="margin-top:4px">Select an environment to see available keys and enable Apply.</p>' : ''}
     </div>`
 
-  modalShowFn('Review Fields', `
+  const bindBodyHTML = `
     ${envSelectorHTML}
     <p class="form-hint" style="margin-bottom:14px">Bind detected fields to environment variables. Pick a key to preview the result. Skipped fields stay hardcoded.</p>
-    <div id="review-fields-container">${renderFieldRows()}</div>`, [
+    <div id="review-fields-container">${renderFieldRows()}</div>`
+
+  const collectBindResult = async (modalRoot) => {
+    if (!currentEnvName) {
+      toast('Select an environment first', 'error')
+      return null
+    }
+    const rows = (modalRoot || document).querySelectorAll('.field-review-row')
+    const bindings = []
+    rows.forEach(r => {
+      const idx = parseInt(r.getAttribute('data-fill-index'), 10)
+      const key = r.querySelector('.field-review-select').value
+      if (key) bindings.push({ index: idx, key })
+    })
+    if (bindings.length === 0) {
+      return { newContent: originalContent, meta: { count: 0 } }
+    }
+    const newContent = _rewriteScriptWithBindings(originalContent, fills, bindings)
+    // Auto-add missing keys to the selected env with recorded values
+    const envKeySet = new Set(currentEnvVars.map(v => v.key))
+    const missingVars = bindings
+      .filter(b => !envKeySet.has(b.key))
+      .map(b => {
+        const fill = fills[b.index]
+        const isSecret = fill && fill.category && secretCats.includes(fill.category)
+        return { key: b.key, value: fill ? fill.value : '', is_secret: isSecret ? 1 : 0 }
+      })
+    if (missingVars.length > 0) {
+      const appendRes = await api('POST', '/envs/' + encodeURIComponent(currentEnvName) + '/vars/append', { vars: missingVars })
+      if (appendRes.ok !== false && appendRes.added > 0) {
+        const keyNames = missingVars.map(v => v.key).join(', ')
+        toast('Added ' + keyNames + ' to "' + currentEnvName + '" with recorded values')
+      }
+    }
+    return { newContent, meta: { count: bindings.length } }
+  }
+
+  if (mountInto) {
+    mountInto.innerHTML = bindBodyHTML
+    return {
+      apply: async () => {
+        const r = await collectBindResult(mountInto)
+        if (r === null) return null  // user must pick env first
+        return r
+      },
+      dispose: () => _cleanupReviewModalGlobals(),
+      sync: () => {
+        let n = 0
+        mountInto.querySelectorAll('.field-review-row .field-review-select').forEach(s => {
+          if (s.value) n++
+        })
+        return n
+      },
+      // canApply is false if no env selected yet — wizard greys Apply button.
+      canApply: () => !!currentEnvName,
+      empty: false,
+    }
+  }
+
+  modalShowFn(wizardStepper ? 'Review &amp; Improve' : 'Review Fields',
+    `${wizardStepper}${bindBodyHTML}`, [
     { label: 'Skip & save as-is', cls: 'btn-ghost', action: () => { modalCloseFn(); onSkip && onSkip() } },
     { label: 'Apply Bindings', cls: 'btn-primary', action: async () => {
-      if (!currentEnvName) {
-        toast('Select an environment first', 'error')
-        return
-      }
-
-      // Scope queries to the correct modal root
       const modalRoot = useOverlay
         ? document.getElementById('modal-overlay-root')
         : document.getElementById('modal-root')
-      const rows = (modalRoot || document).querySelectorAll('.field-review-row')
-      const bindings = []
-      rows.forEach(r => {
-        const idx = parseInt(r.getAttribute('data-fill-index'), 10)
-        const key = r.querySelector('.field-review-select').value
-        if (key) bindings.push({ index: idx, key })
-      })
-
-      if (bindings.length === 0) {
-        modalCloseFn(); onSkip && onSkip(); return
-      }
-
-      const newContent = _rewriteScriptWithBindings(originalContent, fills, bindings)
-
-      // Auto-add missing keys to the selected env with recorded values
-      const envKeySet = new Set(currentEnvVars.map(v => v.key))
-      const missingVars = bindings
-        .filter(b => !envKeySet.has(b.key))
-        .map(b => {
-          const fill = fills[b.index]
-          const isSecret = fill && fill.category && secretCats.includes(fill.category)
-          return { key: b.key, value: fill ? fill.value : '', is_secret: isSecret ? 1 : 0 }
-        })
-
-      if (missingVars.length > 0) {
-        const appendRes = await api('POST', '/envs/' + encodeURIComponent(currentEnvName) + '/vars/append', { vars: missingVars })
-        if (appendRes.ok !== false && appendRes.added > 0) {
-          const keyNames = missingVars.map(v => v.key).join(', ')
-          toast('Added ' + keyNames + ' to "' + currentEnvName + '" with recorded values')
-        }
-      }
-
+      const result = await collectBindResult(modalRoot)
+      if (result === null) return  // env not picked, error already toasted
+      if (result.meta.count === 0) { modalCloseFn(); onSkip && onSkip(); return }
       modalCloseFn()
-      if (onApply) await onApply(newContent, bindings.length)
+      if (onApply) await onApply(result.newContent, result.meta.count)
     }}
   ], '', 'xl')
 
@@ -1640,9 +1677,13 @@ async function createScriptModal() {
           <option value="">— Pick env first —</option>
         </select>
         <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+        <span class="qc-legacy-scan-buttons" hidden>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndAddWaitsFromEditor()">Scan &amp; Add Waits</button>
+        </span>
+        ${_reviewImproveButtonsHTML('sm')}
       </div>
-      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
+      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Review &amp; Improve</strong> binds <code>.fill()</code> values, adds smart waits, and converts search inputs to typed input.</p>
     </div>
     <div class="form-group">
       <label class="form-label">Script Content</label>
@@ -1899,7 +1940,11 @@ async function _openImportedScriptEditor(preview, filename) {
           <option value="">— Pick env first —</option>
         </select>
         <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+        <span class="qc-legacy-scan-buttons" hidden>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndAddWaitsFromEditor()">Scan &amp; Add Waits</button>
+        </span>
+        ${_reviewImproveButtonsHTML('sm')}
       </div>
     </div>
     <div class="form-group">
@@ -2003,7 +2048,11 @@ function _renderImportBanner(preview) {
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
         <strong style="color:var(--text-primary)">${headerLabel}</strong>
         <div style="display:flex;gap:6px">
-          <button type="button" class="btn btn-xs btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+          <span class="qc-legacy-scan-buttons" hidden>
+            <button type="button" class="btn btn-xs btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+            <button type="button" class="btn btn-xs btn-ghost" onclick="scanAndAddWaitsFromEditor()">Scan &amp; Add Waits</button>
+          </span>
+          ${_reviewImproveButtonsHTML('xs')}
           <button type="button" class="btn btn-xs btn-ghost" onclick="_dismissImportBanner()">Dismiss</button>
         </div>
       </div>
@@ -2116,9 +2165,13 @@ async function editScriptModal(id) {
           <option value="">— Pick env first —</option>
         </select>
         <button type="button" class="btn btn-sm btn-ghost" onclick="_insertVarAtCursor()">Insert at cursor</button>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+        <span class="qc-legacy-scan-buttons" hidden>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndBindFromEditor()">Scan &amp; Bind</button>
+          <button type="button" class="btn btn-sm btn-ghost" onclick="scanAndAddWaitsFromEditor()">Scan &amp; Add Waits</button>
+        </span>
+        ${_reviewImproveButtonsHTML('sm')}
       </div>
-      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Scan &amp; Bind</strong> reviews every <code>.fill()</code> in the current content.</p>
+      <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Review &amp; Improve</strong> binds <code>.fill()</code> values, adds smart waits, and converts search inputs to typed input.</p>
     </div>
     <div class="form-group">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
@@ -2263,6 +2316,1255 @@ async function _showFieldReviewModalForEditor(originalContent, fills, envVars, s
     onSkip: () => {},
   })
 }
+
+// ── Scan & Add Smart Waits (docs/auto-wait-plan.md) ─────────────
+// Lets a non-technical user add page-settle waits to recorded scripts. The
+// scan + rewrite run client-side, mirroring Scan & Bind; the backend only
+// serves the per-language settle snippet via /scripts/wait-config.
+
+function _detectScriptLanguage(content) {
+  // The settle snippet differs only Python vs non-Python, so detection need
+  // only be that precise; all JS/TS variants share the same snippet.
+  if (/from\s+playwright\.sync_api|sync_playwright\s*\(/.test(content)) return 'python'
+  if (/@playwright\/test/.test(content)) {
+    return /^\s*import\s/m.test(content) ? 'typescript_test' : 'javascript_test'
+  }
+  return /^\s*import\s.+\sfrom\s/m.test(content) ? 'typescript' : 'javascript'
+}
+
+function _describeAction(lineText, kind) {
+  // Friendly, non-technical label for a click/goto/fill step (auto-wait-plan §4.4).
+  // Returns null when no readable name is found — caller falls back to "Step N".
+  if (kind === 'goto') return 'Go to the page'
+  const roleM = lineText.match(/get_?by_?role\(\s*["']([^"']+)["']/i)
+  const role = roleM ? roleM[1].toLowerCase() : ''
+  let name = null, m
+  if ((m = lineText.match(/\bname\s*[:=]\s*(["'])((?:\\.|(?!\1).)*)\1/))) name = m[2]
+  else if ((m = lineText.match(/get_?by_?placeholder\(\s*(["'])((?:\\.|(?!\1).)*)\1/i))) name = m[2]
+  else if ((m = lineText.match(/get_?by_?text\(\s*(["'])((?:\\.|(?!\1).)*)\1/i))) name = m[2]
+  else if ((m = lineText.match(/get_?by_?label\(\s*(["'])((?:\\.|(?!\1).)*)\1/i))) name = m[2]
+  if (!name) return null
+  if (name.length > 42) name = name.slice(0, 42).trimEnd() + '…'
+  if (kind === 'fill') return `Type into "${name}"`
+  const verb = role === 'button' ? 'Click' : 'Open'
+  return `${verb} "${name}"`
+}
+
+// Words inside a field name/placeholder/label that suggest typing fires a
+// network request (search-as-you-type). Used only for `.fill()` candidates.
+const _WAIT_FILL_SEARCH_WORDS = [
+  'search', 'filter', 'query', 'find', 'lookup', 'autocomplete', 'suggest',
+]
+
+function _fillFieldName(lineText) {
+  // Same precedence as _describeAction so the label and classifier stay aligned.
+  let m
+  if ((m = lineText.match(/\bname\s*[:=]\s*(["'])((?:\\.|(?!\1).)*)\1/))) return m[2]
+  if ((m = lineText.match(/get_?by_?placeholder\(\s*(["'])((?:\\.|(?!\1).)*)\1/i))) return m[2]
+  if ((m = lineText.match(/get_?by_?label\(\s*(["'])((?:\\.|(?!\1).)*)\1/i))) return m[2]
+  return ''
+}
+
+function _isFieldFocusClick(lineText) {
+  // A click that only focuses an input — placeholder / label locators, or a
+  // form-control role. These never trigger a load, so they are excluded from
+  // the candidate list entirely (auto-wait-plan §4.5, revised).
+  if (/get_?by_?placeholder|get_?by_?label/i.test(lineText)) return true
+  const m = lineText.match(/get_?by_?role\(\s*["']([^"']+)["']/i)
+  const role = m ? m[1].toLowerCase() : ''
+  return ['textbox', 'searchbox', 'combobox', 'spinbutton',
+          'checkbox', 'radio', 'switch', 'slider'].includes(role)
+}
+
+function _classifyAction(lineText, kind, recommendWords) {
+  // Returns { recommended, category }. category drives the reason copy:
+  //   goto   — page load
+  //   nav    — navigational click (link / row / menuitem / visible text)
+  //   button — button/generic click whose name matches an action word
+  //   search — .fill() into a field whose name suggests search/filter
+  //   fill   — .fill() into a generic field (not search-shaped)
+  //   other  — everything else (listed under "Probably not needed")
+  if (kind === 'goto') return { recommended: true, category: 'goto' }
+  if (kind === 'fill') {
+    const fname = _fillFieldName(lineText).toLowerCase()
+    if (fname && _WAIT_FILL_SEARCH_WORDS.some(w => fname.includes(w))) {
+      return { recommended: true, category: 'search' }
+    }
+    return { recommended: false, category: 'fill' }
+  }
+  const m = lineText.match(/get_?by_?role\(\s*["']([^"']+)["']/i)
+  const role = m ? m[1].toLowerCase() : ''
+  if (['link', 'menuitem', 'tab', 'row', 'cell', 'gridcell', 'option', 'treeitem']
+        .includes(role)) {
+    return { recommended: true, category: 'nav' }
+  }
+  // Clicking visible text usually opens an item (a list row, a card).
+  if (/get_?by_?text\s*\(/i.test(lineText)) {
+    return { recommended: true, category: 'nav' }
+  }
+  const lower = lineText.toLowerCase()
+  if ((recommendWords || []).some(w => w && lower.includes(w.toLowerCase()))) {
+    return { recommended: true, category: 'button' }
+  }
+  return { recommended: false, category: 'other' }
+}
+
+function _parseActionCalls(content, settleMarker, recommendWords) {
+  // Find every .click( / .goto( statement and build a candidate (auto-wait
+  // §4.2). Steps are counted over ALL action statements so "Step N" matches
+  // the user's mental count of the recording.
+  const range = _findActionRanges(content)
+  const from = range ? range.editableFrom : 0
+  const to = range ? range.editableTo : content.length
+  const lines = content.slice(from, to).split('\n')
+
+  // Absolute offsets per line so insertion points stay valid in full content.
+  const records = []
+  let offset = from
+  for (const text of lines) {
+    records.push({ text, start: offset, end: offset + text.length })
+    offset += text.length + 1  // +1 for the '\n'
+  }
+
+  const candidates = []
+  let stepCount = 0
+  for (let i = 0; i < records.length; i++) {
+    const { text, start, end } = records[i]
+    const trimmed = text.trim()
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#')) continue
+    // A settle line is scaffolding, not an action step.
+    if (settleMarker && trimmed.includes(settleMarker)) continue
+    stepCount++
+    const isGoto = /\.goto\s*\(/.test(text)
+    const isClick = /\.click\s*\(/.test(text)
+    const isFill = /\.fill\s*\(/.test(text)
+    if (!isGoto && !isClick && !isFill) continue
+    // Field-focus clicks can never need a wait — drop them so they do not
+    // clutter the list. stepCount already advanced, so numbering still matches.
+    if (isClick && _isFieldFocusClick(text)) continue
+
+    // alreadyWaited: the next non-empty line is already a settle call.
+    // Capture its offsets too so the user can toggle it off to REMOVE the wait.
+    let alreadyWaited = false
+    let existingWaitStart = null, existingWaitEnd = null
+    for (let j = i + 1; j < records.length; j++) {
+      const nt = records[j].text.trim()
+      if (!nt) continue
+      if (settleMarker && nt.includes(settleMarker)) {
+        alreadyWaited = true
+        existingWaitStart = records[j].start
+        existingWaitEnd = records[j].end
+      }
+      break
+    }
+
+    const kind = isGoto ? 'goto' : (isFill ? 'fill' : 'click')
+    const cls = _classifyAction(text, kind, recommendWords)
+    candidates.push({
+      index: candidates.length,
+      stepNumber: stepCount,
+      kind,
+      lineNumber: _lineNumberAt(content, start),
+      lineText: text,
+      label: _describeAction(text, kind),
+      lineEndOffset: end,
+      indent: (text.match(/^(\s*)/) || ['', ''])[1],
+      alreadyWaited,
+      existingWaitStart,
+      existingWaitEnd,
+      recommended: alreadyWaited || cls.recommended,
+      category: cls.category,
+    })
+  }
+  return candidates
+}
+
+function _waitReasonText(cand) {
+  if (cand.alreadyWaited) return 'A wait is already added here.'
+  switch (cand.category) {
+    case 'goto':   return 'Recommended — loading a new page usually needs a moment.'
+    case 'nav':    return 'Recommended — opening this usually loads new information.'
+    case 'button': return 'Recommended — this usually sends a request or loads data.'
+    case 'search': return 'Recommended — typing here usually triggers a search request.'
+    case 'fill':   return 'Usually not needed — typing into a form field rarely loads data on its own.'
+    default:       return 'Usually not needed — looks like a menu or layout step.'
+  }
+}
+
+function _rewriteScriptWithWaits(content, candidates, pickedIndices, settleSnippet) {
+  // Three states per candidate:
+  //   was off, now on   -> INSERT a settle line after the statement
+  //   was on,  now off  -> DELETE the existing settle line that follows
+  //   unchanged         -> noop
+  // Apply ops back-to-front so earlier offsets stay valid.
+  const picked = new Set(pickedIndices)
+  const ops = []
+  for (const c of candidates) {
+    const wantOn = picked.has(c.index)
+    if (!c.alreadyWaited && wantOn) {
+      ops.push({
+        start: c.lineEndOffset,
+        end: c.lineEndOffset,
+        text: '\n' + c.indent + settleSnippet,
+      })
+    } else if (c.alreadyWaited && !wantOn) {
+      // Consume the trailing newline of the wait line so we don't leave a
+      // blank line behind. Clamp at content.length for the last-line case.
+      const delEnd = Math.min(c.existingWaitEnd + 1, content.length)
+      ops.push({ start: c.existingWaitStart, end: delEnd, text: '' })
+    }
+  }
+  ops.sort((a, b) => b.start - a.start)
+  let result = content
+  for (const op of ops) {
+    result = result.slice(0, op.start) + op.text + result.slice(op.end)
+  }
+  return result
+}
+
+function _qcWaitReviewSync() {
+  const root = window._qcWaitReviewRoot
+  if (!root) return
+  // Count any toggle whose state differs from the baseline (data-already).
+  // Adds and removes are both real changes worth applying.
+  let n = 0
+  root.querySelectorAll('.wait-review-row input[type=checkbox]').forEach(b => {
+    const wasOn = b.getAttribute('data-already') === '1'
+    if (b.checked !== wasOn) n++
+  })
+  const applyBtn = root.querySelector('[data-btn-idx="1"]')
+  if (applyBtn) {
+    applyBtn.textContent = `Apply (${n})`
+    applyBtn.disabled = n === 0
+  }
+  // Wizard mode: notify the shared shell so its Apply button updates.
+  if (typeof window._qcWizardSyncCurrent === 'function') window._qcWizardSyncCurrent()
+}
+
+function _qcWaitReviewSetAll(val) {
+  const root = window._qcWaitReviewRoot
+  if (!root) return
+  root.querySelectorAll('.wait-review-row input[type=checkbox]').forEach(b => {
+    if (!b.disabled) b.checked = val  // alreadyWaited rows stay ticked
+  })
+  _qcWaitReviewSync()
+}
+
+async function _showWaitReviewModalCore({ candidates, originalContent, settleSnippet, onApply, onSkip, useOverlay = false, wizardStepper = '', mountInto = null }) {
+  // mountInto = wizard-owned body slot. When provided, this function renders
+  // body HTML into that slot and returns { apply, dispose, sync } so the
+  // wizard's persistent shell can drive Apply/Skip from its own footer.
+  // Standalone (mountInto null) keeps the existing self-contained modal.
+  const modalShowFn = useOverlay ? showOverlayModal : showModal
+  const modalCloseFn = useOverlay ? closeOverlayModal : closeModal
+  const modalTitle = wizardStepper ? 'Review &amp; Improve' : 'Add Smart Waits'
+
+  if (!candidates || candidates.length === 0) {
+    if (mountInto) {
+      mountInto.innerHTML = `<p style="margin:0">Nothing to add here — this script has no page loads or clicks that could need a wait.</p>`
+      return {
+        apply: async () => ({ newContent: originalContent, meta: { added: 0, removed: 0 } }),
+        dispose: () => {},
+        sync: () => 0,
+        empty: true,
+      }
+    }
+    modalShowFn(modalTitle,
+      `${wizardStepper}<p>Nothing to add here — this script has no page loads or clicks that could need a wait.</p>`,
+      [{ label: 'Close', cls: 'btn-ghost', action: modalCloseFn }], '', 'lg')
+    onSkip && onSkip()
+    return
+  }
+
+  const renderRow = (c) => {
+    // Default OFF for new candidates. alreadyWaited rows start ON so the
+    // user sees a wait is already there — but stay editable: turning the
+    // toggle off removes that existing wait on Apply.
+    const checked = c.alreadyWaited ? 'checked' : ''
+    const disabled = ''
+    const heading = c.label ? `Step ${c.stepNumber} — ${c.label}` : `Step ${c.stepNumber}`
+    const src = c.lineText.trim()
+    return `
+      <div class="wait-review-row" style="display:flex;gap:12px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--border-subtle)">
+        <label class="qc-toggle" style="margin-top:1px" title="Toggle a smart wait for this step">
+          <input type="checkbox" data-cand-index="${c.index}" data-already="${c.alreadyWaited ? '1' : '0'}"
+                 ${checked} ${disabled} onchange="_qcWaitReviewSync()">
+          <span class="qc-toggle-track"></span>
+        </label>
+        <span style="flex:1;min-width:0">
+          <strong style="color:var(--text-primary)">${escHtml(heading)}</strong>
+          <span style="display:block;font-size:13px;color:var(--text-secondary);margin-top:2px">${escHtml(_waitReasonText(c))}</span>
+          <code style="display:block;font-size:11px;color:var(--text-secondary);margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word">line ${c.lineNumber}: ${escHtml(src)}</code>
+        </span>
+      </div>`
+  }
+
+  const recommended = candidates.filter(c => c.recommended)
+  const others = candidates.filter(c => !c.recommended)
+
+  const recSection = `
+    <div style="font-weight:600;color:var(--text-primary);margin:8px 0 2px">Recommended (${recommended.length})</div>
+    ${recommended.length
+      ? recommended.map(renderRow).join('')
+      : `<p style="font-size:13px;color:var(--text-secondary);margin:4px 0">No steps look like they load data — you can still turn one on below.</p>`}`
+
+  const otherSection = others.length ? `
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text-secondary)">Probably not needed (${others.length})</summary>
+      <div style="margin-top:4px">${others.map(renderRow).join('')}</div>
+    </details>` : ''
+
+  const body = `
+    ${wizardStepper}
+    <p style="margin-top:0">Some steps open information that takes a moment to appear — a list, search results, or a new page. A test can run faster than the app: it moves to the next step before the page is ready, so it fails even though your app is fine.</p>
+    <p>A smart wait fixes this. It pauses at a step until the page finishes loading, then continues on its own. It waits only as long as needed — fast pages stay fast.</p>
+    <p style="color:var(--text-secondary)">Turn on the steps you want a wait on. Recommended steps usually need it — turn on all of them, or pick individually.</p>
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:12px 0">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="_qcWaitReviewSetAll(true)">Add a wait to every step</button>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="_qcWaitReviewSetAll(false)">Clear all</button>
+      <span style="font-size:12px;color:var(--text-secondary)">Safest if you're not sure. The test may run a little slower.</span>
+    </div>
+    ${recSection}
+    ${otherSection}`
+
+  const collectWaitResult = (root) => {
+    const pickedArr = []
+    if (root) root.querySelectorAll('.wait-review-row input[type=checkbox]').forEach(b => {
+      if (b.checked) pickedArr.push(parseInt(b.getAttribute('data-cand-index'), 10))
+    })
+    const pickedSet = new Set(pickedArr)
+    const added = candidates.filter(c => pickedSet.has(c.index) && !c.alreadyWaited).length
+    const removed = candidates.filter(c => !pickedSet.has(c.index) && c.alreadyWaited).length
+    const newContent = _rewriteScriptWithWaits(originalContent, candidates, pickedArr, settleSnippet)
+    return { newContent, meta: { added, removed } }
+  }
+
+  if (mountInto) {
+    mountInto.innerHTML = body
+    window._qcWaitReviewRoot = mountInto
+    _qcWaitReviewSync()
+    return {
+      apply: async () => collectWaitResult(mountInto),
+      dispose: () => { if (window._qcWaitReviewRoot === mountInto) window._qcWaitReviewRoot = null },
+      sync: () => {
+        let n = 0
+        mountInto.querySelectorAll('.wait-review-row input[type=checkbox]').forEach(b => {
+          const wasOn = b.getAttribute('data-already') === '1'
+          if (b.checked !== wasOn) n++
+        })
+        return n
+      },
+      empty: false,
+    }
+  }
+
+  modalShowFn(modalTitle, body, [
+    { label: 'Skip for now', cls: 'btn-ghost', action: () => {
+      modalCloseFn()
+      window._qcWaitReviewRoot = null
+      onSkip && onSkip()
+    }},
+    { label: 'Apply (0)', cls: 'btn-primary', action: async () => {
+      const root = window._qcWaitReviewRoot
+      const { newContent, meta } = collectWaitResult(root)
+      modalCloseFn()
+      window._qcWaitReviewRoot = null
+      if (meta.added === 0 && meta.removed === 0) { onSkip && onSkip(); return }
+      if (onApply) await onApply(newContent, meta)
+    }},
+  ], '', 'lg')
+
+  window._qcWaitReviewRoot = useOverlay
+    ? document.getElementById('modal-overlay-root')
+    : document.getElementById('modal-root')
+  _qcWaitReviewSync()
+}
+
+async function scanAndAddWaitsFromEditor() {
+  const editor = window._qcCurrentEditor
+  if (!editor) return
+  const content = editor.getValue()
+  const language = _detectScriptLanguage(content)
+  const cfg = await api('GET', '/scripts/wait-config?language=' + encodeURIComponent(language))
+  if (cfg.ok === false) { toast(cfg.error || 'Could not load wait settings', 'error'); return }
+  const candidates = _parseActionCalls(content, cfg.settle_marker, cfg.recommend_words)
+  await _showWaitReviewModalCore({
+    candidates,
+    originalContent: content,
+    settleSnippet: cfg.settle_snippet,
+    useOverlay: true,  // render on top of the existing edit/create script modal
+    onApply: (newContent, { added, removed }) => {
+      const ed = window._qcCurrentEditor
+      if (ed) { ed.setValue(newContent); ed.focus() }
+      toast(_waitChangeToast(added, removed))
+    },
+    onSkip: () => {},
+  })
+}
+
+function _waitChangeToast(added, removed) {
+  const a = added > 0 ? `Added ${added} smart wait${added === 1 ? '' : 's'}` : ''
+  const r = removed > 0 ? `Removed ${removed} smart wait${removed === 1 ? '' : 's'}` : ''
+  if (a && r) return `${a}, ${r.toLowerCase()}.`
+  return (a || r) + '.'
+}
+
+// Post-recording: offer the wait review after the field-binding review.
+async function _promptAddWaitsAfterRecording(scriptId) {
+  const sRes = await api('GET', '/scripts/' + scriptId)
+  if (sRes.ok === false) return
+  const script = sRes.script || sRes
+  const content = script.content || ''
+  const language = script.language || _detectScriptLanguage(content)
+  const cfg = await api('GET', '/scripts/wait-config?language=' + encodeURIComponent(language))
+  if (cfg.ok === false) return
+  const candidates = _parseActionCalls(content, cfg.settle_marker, cfg.recommend_words)
+  if (candidates.length === 0) return  // nothing to offer
+
+  return new Promise((resolve) => {
+    showModal('Add Smart Waits', `
+      <p style="margin-top:0"><strong style="color:var(--text-primary)">Recording saved.</strong></p>
+      <p>Some steps in your script open information that takes a moment to appear — a list, search results, or a new page. A test can run faster than the app: it moves to the next step before the page is ready, so the test fails even though your app is working fine.</p>
+      <p>A <strong>smart wait</strong> fixes that. It pauses at the step until the page finishes loading, then continues on its own. Fast pages stay fast — it only waits as long as needed.</p>
+      <p style="color:var(--text-secondary);font-size:13px;margin-bottom:0">You can review each step now and turn waits on for the ones that load data. You can also do this later from the script editor (<em>Scan &amp; Add Waits</em>).</p>`, [
+      { label: 'Skip for now', cls: 'btn-ghost', action: () => { closeModal(); resolve() } },
+      { label: 'Review smart waits', cls: 'btn-primary', action: async () => {
+        closeModal()
+        await _showWaitReviewModalCore({
+          candidates,
+          originalContent: content,
+          settleSnippet: cfg.settle_snippet,
+          useOverlay: false,
+          onApply: async (newContent, { added, removed }) => {
+            const r = await api('PUT', '/scripts/' + scriptId, { content: newContent })
+            if (r.ok === false) toast(r.error, 'error')
+            else toast(_waitChangeToast(added, removed))
+            resolve()
+          },
+          onSkip: () => resolve(),
+        })
+      }},
+    ])
+  })
+}
+
+// ── Typed-input conversion (Scan & Convert Search Inputs) ──────────────────
+// Companion to Auto-Wait. Rewrites `.fill('x')` into
+// `.pressSequentially('x', { delay: 50 })` (or the Python form) for fields
+// whose handler debounces on per-key events — search boxes, autocomplete,
+// filter pickers. See docs/typed-input-plan.md and docs/review-wizard-plan.md.
+
+function _findMatchingClose(content, openIdx) {
+  // openIdx points at '('. Walk forward tracking string state + paren depth.
+  // Returns the index of the matching ')' or -1 if unbalanced.
+  let depth = 0
+  let i = openIdx
+  const len = content.length
+  while (i < len) {
+    const ch = content[i]
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch
+      i++
+      while (i < len) {
+        if (content[i] === '\\') { i += 2; continue }
+        if (content[i] === quote) { i++; break }
+        // Template literal ${...} can hide parens; treat its body opaquely.
+        if (quote === '`' && content[i] === '$' && content[i + 1] === '{') {
+          i += 2
+          let d = 1
+          while (i < len && d > 0) {
+            if (content[i] === '{') d++
+            else if (content[i] === '}') d--
+            i++
+          }
+          continue
+        }
+        i++
+      }
+      continue
+    }
+    if (ch === '(') { depth++; i++; continue }
+    if (ch === ')') { depth--; if (depth === 0) return i; i++; continue }
+    i++
+  }
+  return -1
+}
+
+function _typedEscapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function _typedShortNameMatches(lineText, names) {
+  // Whole-word match inside name= / id= argument values. Skips substring
+  // false-positives ("q" inside "query") that a naive includes() would hit.
+  if (!names || !names.length) return false
+  const attrRe = /\b(?:name|id)\s*[:=]\s*(["'])((?:\\.|(?!\1).)*)\1/gi
+  let m
+  while ((m = attrRe.exec(lineText)) !== null) {
+    const value = m[2]
+    for (const name of names) {
+      if (!name) continue
+      const wordRe = new RegExp('\\b' + _typedEscapeRegex(name) + '\\b')
+      if (wordRe.test(value)) return true
+    }
+  }
+  return false
+}
+
+function _classifyTypedInput(locatorChain, lineText, config) {
+  // Returns { confidence: 'high'|'medium'|'low', signal: string }.
+  // First match wins; checked in priority order.
+  const chainText = locatorChain || ''
+  for (const sig of (config.high_confidence_signals || [])) {
+    if (sig && chainText.indexOf(sig) !== -1) {
+      const key = sig.indexOf('searchbox') !== -1 ? 'role-searchbox'
+                : sig.indexOf('combobox')  !== -1 ? 'role-combobox'
+                : 'input-type-search'
+      return { confidence: 'high', signal: key }
+    }
+  }
+  const lowerChain = chainText.toLowerCase()
+  for (const word of (config.keyword_signals || [])) {
+    if (word && lowerChain.indexOf(word.toLowerCase()) !== -1) {
+      return { confidence: 'medium', signal: 'keyword' }
+    }
+  }
+  if (_typedShortNameMatches(lineText, config.short_name_signals)) {
+    return { confidence: 'medium', signal: 'short-name' }
+  }
+  return { confidence: 'low', signal: 'none' }
+}
+
+function _parseTypedInputCandidates(content, config) {
+  // Find every `.fill(` call inside the editable action range and produce a
+  // candidate per call. Step numbers count over ALL action statements so
+  // they match _parseActionCalls and the user's mental count.
+  const range = _findActionRanges(content)
+  const from = range ? range.editableFrom : 0
+  const to = range ? range.editableTo : content.length
+  const region = content.slice(from, to)
+  const lines = region.split('\n')
+
+  const records = []
+  let offset = from
+  for (const text of lines) {
+    records.push({ text, start: offset, end: offset + text.length })
+    offset += text.length + 1
+  }
+
+  const fillMarker = config.fill_marker || '.fill('
+  const typedMarker = config.typed_marker || 'pressSequentially'
+
+  const candidates = []
+  let stepCount = 0
+  for (let i = 0; i < records.length; i++) {
+    const { text, start } = records[i]
+    const trimmed = text.trim()
+    if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('#')) continue
+    // A settle line is scaffolding, not an action step — keep the count aligned
+    // with _parseActionCalls.
+    if (trimmed.indexOf('_waitForNetworkSettle') !== -1 ||
+        trimmed.indexOf('_wait_for_network_settle') !== -1) continue
+    stepCount++
+
+    // Walk the line for one or more `.fill(` calls. Rare to have >1 per line
+    // in codegen output, but supported.
+    let cursor = 0
+    while (true) {
+      const local = text.indexOf(fillMarker, cursor)
+      if (local === -1) break
+      const openParen = local + fillMarker.length - 1  // index of '('
+      const absOpen = start + openParen
+      const absClose = _findMatchingClose(content, absOpen)
+      if (absClose === -1) break  // unbalanced — bail rather than corrupt
+      const fillStart = start + local
+      const fillEnd = absClose + 1
+      const fillArg = content.slice(absOpen + 1, absClose)
+      const locatorChain = text.slice(0, local)
+
+      const alreadyTyped = text.indexOf(typedMarker) !== -1
+      const cls = _classifyTypedInput(locatorChain, text, config)
+
+      candidates.push({
+        index: candidates.length,
+        stepNumber: stepCount,
+        lineNumber: _lineNumberAt(content, start),
+        lineText: text,
+        locatorChain,
+        fillArg,
+        fillStart,
+        fillEnd,
+        label: _describeAction(text, 'fill'),
+        signal: cls.signal,
+        confidence: cls.confidence,
+        alreadyTyped,
+        recommended: alreadyTyped || cls.confidence === 'high' || cls.confidence === 'medium',
+      })
+      cursor = local + fillMarker.length
+    }
+  }
+  return candidates
+}
+
+function _typedInputReasonText(c) {
+  if (c.alreadyTyped) return 'Already converted.'
+  if (c.confidence === 'high') return 'Recommended — this looks like a search field.'
+  if (c.confidence === 'medium') return 'Recommended — the field name suggests it is a search or filter.'
+  return 'Usually not needed — regular form field.'
+}
+
+function _renderTypedCallFromTemplate(template, fillArg) {
+  // Backend ships e.g. ".pressSequentially({value}, { delay: 50 })" — substitute
+  // {value} verbatim so template tokens / expressions / quote style stay intact.
+  return (template || '').replace('{value}', fillArg)
+}
+
+function _rewriteScriptWithTypedInputs(content, candidates, pickedIndices, typedCallTemplate) {
+  // Two states per candidate (we never revert a typed call back to .fill —
+  // that would require re-deriving the original arg and is out of scope):
+  //   was off, now on   -> REPLACE `.fill(<arg>)` with the typed-call form
+  //   anything else     -> noop (already-typed rows are pre-ticked and
+  //                        flagged, so they fall through as noops here)
+  const picked = new Set(pickedIndices)
+  const ops = []
+  for (const c of candidates) {
+    if (c.alreadyTyped) continue
+    if (!picked.has(c.index)) continue
+    ops.push({
+      start: c.fillStart,
+      end: c.fillEnd,
+      text: _renderTypedCallFromTemplate(typedCallTemplate, c.fillArg),
+    })
+  }
+  ops.sort((a, b) => b.start - a.start)
+  let result = content
+  for (const op of ops) {
+    result = result.slice(0, op.start) + op.text + result.slice(op.end)
+  }
+  return result
+}
+
+function _qcTypedReviewSync() {
+  const root = window._qcTypedReviewRoot
+  if (!root) return
+  let n = 0
+  root.querySelectorAll('.typed-review-row input[type=checkbox]').forEach(b => {
+    const wasOn = b.getAttribute('data-already') === '1'
+    if (b.checked !== wasOn) n++
+  })
+  const applyBtn = root.querySelector('[data-btn-idx="1"]')
+  if (applyBtn) {
+    applyBtn.textContent = `Convert Steps (${n})`
+    applyBtn.disabled = n === 0
+  }
+  if (typeof window._qcWizardSyncCurrent === 'function') window._qcWizardSyncCurrent()
+}
+
+function _qcTypedReviewSetAll(val) {
+  const root = window._qcTypedReviewRoot
+  if (!root) return
+  root.querySelectorAll('.typed-review-row input[type=checkbox]').forEach(b => {
+    if (!b.disabled) b.checked = val
+  })
+  _qcTypedReviewSync()
+}
+
+function _qcTypedReviewToggleLow() {
+  const root = window._qcTypedReviewRoot
+  if (!root) return
+  const block = root.querySelector('[data-typed-low]')
+  if (block) block.hidden = !block.hidden
+}
+
+async function _showTypedInputReviewModalCore({ candidates, originalContent, typedCallTemplate, onApply, onSkip, useOverlay = false, wizardStepper = '', mountInto = null }) {
+  const modalShowFn = useOverlay ? showOverlayModal : showModal
+  const modalCloseFn = useOverlay ? closeOverlayModal : closeModal
+  const modalTitle = wizardStepper ? 'Review &amp; Improve' : 'Convert Search Inputs'
+
+  if (!candidates || candidates.length === 0) {
+    if (mountInto) {
+      mountInto.innerHTML = `<p style="margin:0">Nothing to convert here — this script does not type into any inputs.</p>`
+      return {
+        apply: async () => ({ newContent: originalContent, meta: { converted: 0 } }),
+        dispose: () => {},
+        sync: () => 0,
+        empty: true,
+      }
+    }
+    modalShowFn(modalTitle,
+      `${wizardStepper}<p>Nothing to convert here — this script does not type into any inputs.</p>`,
+      [{ label: 'Close', cls: 'btn-ghost', action: modalCloseFn }], '', 'lg')
+    onSkip && onSkip()
+    return
+  }
+
+  const renderRow = (c) => {
+    // alreadyTyped rows: pre-ticked, disabled (no change possible).
+    // high/medium: pre-ticked.
+    // low: unticked, hidden behind "Show all type steps" by default.
+    const checked = (c.alreadyTyped || c.confidence === 'high' || c.confidence === 'medium') ? 'checked' : ''
+    const disabled = c.alreadyTyped ? 'disabled' : ''
+    const heading = c.label ? `Step ${c.stepNumber} — ${c.label}` : `Step ${c.stepNumber}`
+    const src = c.lineText.trim()
+    return `
+      <div class="typed-review-row" style="display:flex;gap:12px;align-items:flex-start;padding:11px 2px;border-bottom:1px solid var(--border-subtle)">
+        <label class="qc-toggle" style="margin-top:1px" title="Convert this step to typed input">
+          <input type="checkbox" data-cand-index="${c.index}" data-already="${c.alreadyTyped ? '1' : '0'}"
+                 ${checked} ${disabled} onchange="_qcTypedReviewSync()">
+          <span class="qc-toggle-track"></span>
+        </label>
+        <span style="flex:1;min-width:0">
+          <strong style="color:var(--text-primary)">${escHtml(heading)}</strong>
+          <span style="display:block;font-size:13px;color:var(--text-secondary);margin-top:2px">${escHtml(_typedInputReasonText(c))}</span>
+          <code style="display:block;font-size:11px;color:var(--text-secondary);margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word">line ${c.lineNumber}: ${escHtml(src)}</code>
+        </span>
+      </div>`
+  }
+
+  const recommended = candidates.filter(c => !c.alreadyTyped && (c.confidence === 'high' || c.confidence === 'medium'))
+  const lowConf = candidates.filter(c => !c.alreadyTyped && c.confidence === 'low')
+  const alreadyDone = candidates.filter(c => c.alreadyTyped)
+
+  const recSection = `
+    <div style="font-weight:600;color:var(--text-primary);margin:8px 0 2px">Recommended (${recommended.length})</div>
+    ${recommended.length
+      ? recommended.map(renderRow).join('')
+      : `<p style="font-size:13px;color:var(--text-secondary);margin:4px 0">No search-style fields detected. Click "Show all type steps" if your app has a search field with an unusual name.</p>`}`
+
+  const lowSection = lowConf.length ? `
+    <div data-typed-low hidden style="margin-top:10px">
+      <div style="font-weight:600;color:var(--text-secondary);font-size:13px;margin:6px 0 2px">All other type steps (${lowConf.length})</div>
+      ${lowConf.map(renderRow).join('')}
+    </div>` : ''
+
+  const doneSection = alreadyDone.length ? `
+    <details style="margin-top:14px">
+      <summary style="cursor:pointer;font-weight:600;font-size:13px;color:var(--text-secondary)">Already converted (${alreadyDone.length})</summary>
+      <div style="margin-top:4px">${alreadyDone.map(renderRow).join('')}</div>
+    </details>` : ''
+
+  const body = `
+    ${wizardStepper}
+    <p style="margin-top:0">Some inputs only react when you type, letter by letter — search boxes, autocomplete fields, filter pickers. Test recordings fill these in one shot, so the search never runs and the test fails even though your app is fine.</p>
+    <p>Converting a step makes the test type into it character by character, like a real person. We've pre-selected the steps that look like search fields — adjust if you know your app better.</p>
+    <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:12px 0">
+      <button type="button" class="btn btn-sm btn-ghost" onclick="_qcTypedReviewSetAll(true)">Convert every step</button>
+      <button type="button" class="btn btn-sm btn-ghost" onclick="_qcTypedReviewSetAll(false)">Clear all</button>
+      ${lowConf.length ? `<button type="button" class="btn btn-sm btn-ghost" onclick="_qcTypedReviewToggleLow()">Show all type steps</button>` : ''}
+      <span style="font-size:12px;color:var(--text-secondary)">"Convert every step" risks slowing typing in regular forms.</span>
+    </div>
+    ${recSection}
+    ${lowSection}
+    ${doneSection}`
+
+  const collectTypedResult = (root) => {
+    const pickedArr = []
+    if (root) root.querySelectorAll('.typed-review-row input[type=checkbox]').forEach(b => {
+      if (b.checked) pickedArr.push(parseInt(b.getAttribute('data-cand-index'), 10))
+    })
+    const pickedSet = new Set(pickedArr)
+    const converted = candidates.filter(c => pickedSet.has(c.index) && !c.alreadyTyped).length
+    const newContent = _rewriteScriptWithTypedInputs(originalContent, candidates, pickedArr, typedCallTemplate)
+    return { newContent, meta: { converted } }
+  }
+
+  if (mountInto) {
+    mountInto.innerHTML = body
+    window._qcTypedReviewRoot = mountInto
+    _qcTypedReviewSync()
+    return {
+      apply: async () => collectTypedResult(mountInto),
+      dispose: () => { if (window._qcTypedReviewRoot === mountInto) window._qcTypedReviewRoot = null },
+      sync: () => {
+        let n = 0
+        mountInto.querySelectorAll('.typed-review-row input[type=checkbox]').forEach(b => {
+          const wasOn = b.getAttribute('data-already') === '1'
+          if (b.checked !== wasOn) n++
+        })
+        return n
+      },
+      empty: false,
+    }
+  }
+
+  modalShowFn(modalTitle, body, [
+    { label: 'Skip for now', cls: 'btn-ghost', action: () => {
+      modalCloseFn()
+      window._qcTypedReviewRoot = null
+      onSkip && onSkip()
+    }},
+    { label: 'Convert Steps (0)', cls: 'btn-primary', action: async () => {
+      const root = window._qcTypedReviewRoot
+      const { newContent, meta } = collectTypedResult(root)
+      modalCloseFn()
+      window._qcTypedReviewRoot = null
+      if (meta.converted === 0) { onSkip && onSkip(); return }
+      if (onApply) await onApply(newContent, meta)
+    }},
+  ], '', 'lg')
+
+  window._qcTypedReviewRoot = useOverlay
+    ? document.getElementById('modal-overlay-root')
+    : document.getElementById('modal-root')
+  _qcTypedReviewSync()
+}
+
+async function scanAndConvertTypedInputsFromEditor() {
+  const editor = window._qcCurrentEditor
+  if (!editor) return
+  const content = editor.getValue()
+  const language = _detectScriptLanguage(content)
+  const cfg = await api('GET', '/scripts/typed-input-config?language=' + encodeURIComponent(language))
+  if (cfg.ok === false) { toast(cfg.error || 'Could not load typed-input settings', 'error'); return }
+  const candidates = _parseTypedInputCandidates(content, cfg)
+  await _showTypedInputReviewModalCore({
+    candidates,
+    originalContent: content,
+    typedCallTemplate: cfg.typed_call_template,
+    useOverlay: true,
+    onApply: (newContent, { converted }) => {
+      const ed = window._qcCurrentEditor
+      if (ed) { ed.setValue(newContent); ed.focus() }
+      toast(`Converted ${converted} step${converted === 1 ? '' : 's'} to typed input.`)
+    },
+    onSkip: () => {},
+  })
+}
+
+// Exposed for devtools + dropdown menu shortcut.
+window.scanAndConvertTypedInputsFromEditor = scanAndConvertTypedInputsFromEditor
+
+// ── Review & Improve wizard ────────────────────────────────────────────────
+// Sequences the three scans (Bind → Wait → Typed) into one flow. Two contexts:
+//   source: 'editor'      — invoked from inside a script-edit modal. Each
+//                           phase opens as an overlay; rewrites land in the
+//                           live editor; user saves via the host modal's Save.
+//   source: 'post-record' — invoked after a fresh recording. Each phase is a
+//                           standalone modal; rewrites PUT directly to the
+//                           script. No host modal present.
+// See docs/review-wizard-plan.md §§2.2, 4.
+
+async function _wizardLoadContext(source, scriptId) {
+  // Returns { content, language, error? }. For editor source, content comes
+  // straight from the live editor; for post-record we GET the script row.
+  if (source === 'editor') {
+    const editor = window._qcCurrentEditor
+    if (!editor) return { error: 'No script editor open' }
+    return { content: editor.getValue(), language: _detectScriptLanguage(editor.getValue()) }
+  }
+  const sRes = await api('GET', '/scripts/' + scriptId)
+  if (sRes.ok === false) return { error: sRes.error || 'Could not load script' }
+  const script = sRes.script || sRes
+  const content = script.content || ''
+  return { content, language: script.language || _detectScriptLanguage(content) }
+}
+
+async function _wizardCommit(source, scriptId, newContent) {
+  // Persist newContent. Editor source writes to the live editor (user saves
+  // via the host modal); post-record source PUTs immediately.
+  if (source === 'editor') {
+    const ed = window._qcCurrentEditor
+    if (ed) { ed.setValue(newContent); ed.focus() }
+    return { ok: true }
+  }
+  const r = await api('PUT', '/scripts/' + scriptId, { content: newContent })
+  if (r.ok === false) { toast(r.error || 'Could not save script', 'error'); return { ok: false } }
+  return { ok: true }
+}
+
+// ── Per-phase scan helpers — keep counts and configs hot in wizard state ──
+
+async function _wizardScanBind(state) {
+  const fills = _parseFillCalls(state.content)
+  state.phases[0].count = fills.length
+  state.phases[0]._scan = { fills }
+  if (state.cfgs.bind) return  // patterns load once
+  const patternsRes = await api('GET', '/scripts/sensitive-patterns')
+  state.cfgs.bind = {
+    patterns: patternsRes.patterns || {},
+    secretCats: patternsRes.secret_categories || [],
+  }
+}
+
+async function _wizardScanWait(state) {
+  if (!state.cfgs.wait) {
+    const cfg = await api('GET', '/scripts/wait-config?language=' + encodeURIComponent(state.language))
+    if (cfg.ok === false) { state.phases[1].count = 0; return }
+    state.cfgs.wait = cfg
+  }
+  const cfg = state.cfgs.wait
+  const candidates = _parseActionCalls(state.content, cfg.settle_marker, cfg.recommend_words)
+  state.phases[1].count = candidates.length
+  state.phases[1]._scan = { candidates }
+}
+
+async function _wizardScanTyped(state) {
+  if (!state.cfgs.typed) {
+    const cfg = await api('GET', '/scripts/typed-input-config?language=' + encodeURIComponent(state.language))
+    if (cfg.ok === false) { state.phases[2].count = 0; return }
+    state.cfgs.typed = cfg
+  }
+  const cfg = state.cfgs.typed
+  const candidates = _parseTypedInputCandidates(state.content, cfg)
+  state.phases[2].count = candidates.length
+  state.phases[2]._scan = { candidates }
+}
+
+async function _wizardScanAll(state) {
+  // Re-scan every phase against state.content. Called after each apply so
+  // stepper counts reflect the latest script.
+  await _wizardScanBind(state)
+  await _wizardScanWait(state)
+  await _wizardScanTyped(state)
+}
+
+// ── Persistent wizard shell — single modal, body swap ─────────────────────
+//
+// Architecture: one modal opens; tabs at top swap phase bodies in-place. No
+// modal close/reopen between phases. Each phase modal core exposes a
+// `mountInto` path that returns { apply, dispose, sync } so the wizard's
+// shared footer (Skip step / Apply) can drive the current phase's logic.
+
+function _wizardTabsHTML(state) {
+  return state.phases.map((p, i) => {
+    const isCurrent = i === state.currentIdx
+    const cls = ['qc-wizard-tab']
+    if (isCurrent) cls.push('is-current')
+    if (p.status === 'applied') cls.push('is-applied')
+    if (p.status === 'skipped') cls.push('is-skipped')
+    if (p.count === 0 && p.status === 'pending') cls.push('is-empty')
+    const isJumpable = !isCurrent && p.count > 0
+    const disabled = isJumpable ? '' : 'disabled'
+    const countTxt = p.count > 0 ? `<span class="qc-wizard-tab-count">${p.count}</span>` : ''
+    let icon = ''
+    if (p.status === 'applied') icon = '<span class="qc-wizard-tab-icon">✓</span>'
+    else if (p.status === 'skipped') icon = '<span class="qc-wizard-tab-icon qc-wizard-tab-icon-skip">–</span>'
+    return `<button type="button" class="${cls.join(' ')}" data-tab-idx="${i}"
+                    onclick="_qcWizardSwitchTo(${i})" ${disabled}>
+              <span class="qc-wizard-tab-label">${escHtml(p.label)}</span>
+              ${countTxt}${icon}
+            </button>`
+  }).join('')
+}
+
+function _wizardRenderTabs(state) {
+  const el = document.getElementById('qc-wizard-tabs')
+  if (el) el.innerHTML = _wizardTabsHTML(state)
+}
+
+window._qcWizardSwitchTo = async function(idx) {
+  const w = window._qcWizardActive
+  if (!w) return
+  if (idx === w.state.currentIdx) return
+  if (w.state.phases[idx].count === 0) return  // empty phase tab is disabled
+  if (w.current?.handler?.dispose) w.current.handler.dispose()
+  w.state.currentIdx = idx
+  await _qcWizardMountCurrent()
+}
+
+async function _qcWizardMountCurrent() {
+  const w = window._qcWizardActive
+  if (!w) return
+  const slot = document.getElementById('qc-wizard-body')
+  if (!slot) return
+  const state = w.state
+  const phase = state.phases[state.currentIdx]
+  let handler = null
+  if (phase.id === 'bind')       handler = await _wizardMountBind(state, slot)
+  else if (phase.id === 'wait')  handler = await _wizardMountWait(state, slot)
+  else if (phase.id === 'typed') handler = await _wizardMountTyped(state, slot)
+  w.current = { phaseId: phase.id, handler }
+  _wizardRenderTabs(state)
+  _qcWizardSyncCurrent()
+}
+
+function _qcWizardGetFooterBtn(id) {
+  const root = document.getElementById('modal-overlay-root') || document.getElementById('modal-root')
+  if (!root) return null
+  return root.querySelector(`.modal-footer button[data-wizard-btn="${id}"]`)
+}
+
+window._qcWizardSyncCurrent = function() {
+  const w = window._qcWizardActive
+  if (!w || !w.current || !w.current.handler) return
+  const applyBtn = _qcWizardGetFooterBtn('apply')
+  if (!applyBtn) return
+  const handler = w.current.handler
+  const phase = w.state.phases[w.state.currentIdx]
+  const n = handler.sync ? handler.sync() : 0
+  let label = 'Apply'
+  if (phase.id === 'bind')       label = `Apply Bindings (${n})`
+  else if (phase.id === 'wait')  label = `Apply Waits (${n})`
+  else if (phase.id === 'typed') label = `Convert Steps (${n})`
+  applyBtn.textContent = label
+  let disabled = (n === 0)
+  if (phase.id === 'bind' && handler.canApply && !handler.canApply()) disabled = true
+  applyBtn.disabled = disabled
+}
+
+async function _wizardMountBind(state, slot) {
+  const fills = state.phases[0]._scan?.fills || []
+  if (fills.length === 0) {
+    slot.innerHTML = '<p style="margin:0;color:var(--text-secondary)">No <code>.fill()</code> calls in this script.</p>'
+    return { apply: async () => null, dispose: () => {}, sync: () => 0, empty: true }
+  }
+  const bindCfg = state.cfgs.bind || {}
+  const patterns = bindCfg.patterns || {}
+  const secretCats = bindCfg.secretCats || []
+  let resolvedEnvName = state.envName || ''
+  if (!resolvedEnvName && state.source === 'editor') {
+    resolvedEnvName = document.getElementById('insert-var-env')?.value || ''
+  }
+  let envVars = []
+  if (resolvedEnvName) {
+    const eRes = await api('GET', '/envs/' + encodeURIComponent(resolvedEnvName))
+    envVars = eRes.variables || []
+  } else if (state.source === 'editor') {
+    const envsRes = await api('GET', '/envs')
+    for (const e of (envsRes.environments || [])) {
+      const r = await api('GET', '/envs/' + encodeURIComponent(e.name))
+      for (const v of (r.variables || [])) {
+        if (!envVars.find(x => x.key === v.key)) envVars.push(v)
+      }
+    }
+  }
+  const categorized = fills.map((f, i) => ({
+    ...f, index: i, category: _categorizeField(f.locator, patterns),
+  }))
+  return await _showFieldReviewModalCore({
+    fills: categorized,
+    originalContent: state.content,
+    envVars,
+    secretCats,
+    envName: resolvedEnvName,
+    patterns,
+    mountInto: slot,
+  })
+}
+
+async function _wizardMountWait(state, slot) {
+  const candidates = state.phases[1]._scan?.candidates || []
+  if (!state.cfgs.wait) return null
+  return await _showWaitReviewModalCore({
+    candidates,
+    originalContent: state.content,
+    settleSnippet: state.cfgs.wait.settle_snippet,
+    mountInto: slot,
+  })
+}
+
+async function _wizardMountTyped(state, slot) {
+  const candidates = state.phases[2]._scan?.candidates || []
+  if (!state.cfgs.typed) return null
+  return await _showTypedInputReviewModalCore({
+    candidates,
+    originalContent: state.content,
+    typedCallTemplate: state.cfgs.typed.typed_call_template,
+    mountInto: slot,
+  })
+}
+
+window._qcWizardSkip = async function() {
+  const w = window._qcWizardActive
+  if (!w) return
+  w.state.phases[w.state.currentIdx].status = 'skipped'
+  await _qcWizardAdvance()
+}
+
+window._qcWizardApply = async function() {
+  const w = window._qcWizardActive
+  if (!w || !w.current?.handler?.apply) return
+  const result = await w.current.handler.apply()
+  if (result === null) return  // e.g. bind: env not picked, error toasted
+  const phase = w.state.phases[w.state.currentIdx]
+  let appliedCount = 0
+  if (phase.id === 'bind')       appliedCount = result.meta.count || 0
+  else if (phase.id === 'wait')  appliedCount = result.meta.added || 0
+  else if (phase.id === 'typed') appliedCount = result.meta.converted || 0
+  if (result.newContent !== w.state.content && appliedCount > 0) {
+    const commitRes = await _wizardCommit(w.state.source, w.state.scriptId, result.newContent)
+    if (!commitRes.ok) return  // toast already fired
+    w.state.content = result.newContent
+    phase.status = 'applied'
+    phase.applied = (phase.applied || 0) + appliedCount
+    await _wizardScanAll(w.state)
+  } else {
+    // No-op apply (no ticks). Treat as skip so we move on.
+    phase.status = 'skipped'
+  }
+  await _qcWizardAdvance()
+}
+
+async function _qcWizardAdvance() {
+  const w = window._qcWizardActive
+  if (!w) return
+  if (w.current?.handler?.dispose) w.current.handler.dispose()
+  const s = w.state
+  let nextIdx = -1
+  for (let i = s.currentIdx + 1; i < s.phases.length; i++) {
+    if (s.phases[i].status === 'pending' && s.phases[i].count > 0) { nextIdx = i; break }
+  }
+  if (nextIdx === -1) {
+    for (let i = 0; i < s.currentIdx; i++) {
+      if (s.phases[i].status === 'pending' && s.phases[i].count > 0) { nextIdx = i; break }
+    }
+  }
+  if (nextIdx === -1) {
+    _wizardSummaryToast(s)
+    _qcWizardClose()
+    return
+  }
+  s.currentIdx = nextIdx
+  await _qcWizardMountCurrent()
+}
+
+function _qcWizardClose() {
+  const w = window._qcWizardActive
+  if (w?.current?.handler?.dispose) w.current.handler.dispose()
+  window._qcWizardActive = null
+  if (document.getElementById('modal-overlay-root')) closeOverlayModal()
+  else closeModal()
+}
+
+window._qcWizardClose = _qcWizardClose
+
+function _wizardSummaryToast(state) {
+  const parts = []
+  if (state.phases[0].applied > 0) parts.push(`${state.phases[0].applied} binding${state.phases[0].applied === 1 ? '' : 's'}`)
+  if (state.phases[1].applied > 0) parts.push(`${state.phases[1].applied} wait${state.phases[1].applied === 1 ? '' : 's'}`)
+  if (state.phases[2].applied > 0) parts.push(`${state.phases[2].applied} typed input${state.phases[2].applied === 1 ? '' : 's'}`)
+  if (parts.length === 0) return
+  toast(`Review complete. Applied: ${parts.join(', ')}.`)
+}
+
+async function openReviewWizard(scriptId, opts = {}) {
+  const source = opts.source || 'editor'
+  const envName = opts.envName || ''
+  if (source === 'post-record' && !scriptId) {
+    toast('Wizard called without a script id', 'error')
+    return
+  }
+  const initCtx = await _wizardLoadContext(source, scriptId)
+  if (initCtx.error) { toast(initCtx.error, 'error'); return }
+
+  const state = {
+    source, scriptId, envName,
+    language: initCtx.language,
+    content: initCtx.content,
+    cfgs: {},
+    phases: [
+      { id: 'bind',  label: 'Bind',  status: 'pending', count: 0, applied: 0 },
+      { id: 'wait',  label: 'Waits', status: 'pending', count: 0, applied: 0 },
+      { id: 'typed', label: 'Typed', status: 'pending', count: 0, applied: 0 },
+    ],
+    currentIdx: 0,
+  }
+
+  await _wizardScanAll(state)
+
+  const firstWithCands = state.phases.findIndex(p => p.count > 0)
+  if (firstWithCands === -1) {
+    toast('Nothing to review — script looks clean.')
+    return
+  }
+  state.currentIdx = firstWithCands
+
+  const useOverlay = source === 'editor'
+  const modalShowFn = useOverlay ? showOverlayModal : showModal
+
+  const shellHTML = `
+    <div class="qc-wizard-tabs" id="qc-wizard-tabs">${_wizardTabsHTML(state)}</div>
+    <div id="qc-wizard-body" class="qc-wizard-body"></div>
+  `
+
+  modalShowFn('Review & Improve', shellHTML, [
+    { label: 'Skip step', cls: 'btn-ghost', action: () => _qcWizardSkip() },
+    { label: 'Apply', cls: 'btn-primary', action: () => _qcWizardApply() },
+  ], '', 'lg')
+
+  // Tag the footer buttons so _qcWizardSyncCurrent can find the Apply pill.
+  const modalRoot = useOverlay
+    ? document.getElementById('modal-overlay-root')
+    : document.getElementById('modal-root')
+  const footerBtns = modalRoot ? modalRoot.querySelectorAll('.modal-footer button') : []
+  if (footerBtns[0]) footerBtns[0].setAttribute('data-wizard-btn', 'skip')
+  if (footerBtns[1]) footerBtns[1].setAttribute('data-wizard-btn', 'apply')
+
+  window._qcWizardActive = { state, current: null }
+  await _qcWizardMountCurrent()
+}
+
+window.openReviewWizard = openReviewWizard
+
+// ── Review & Improve dropdown menu ─────────────────────────────────────────
+// Toggleable shortcut menu next to the main button. Click-outside closes it.
+
+function _toggleReviewMenu(ev) {
+  ev.stopPropagation()
+  const btn = ev.currentTarget
+  const wrap = btn.closest('.qc-review-improve-wrap')
+  if (!wrap) return
+  const menu = wrap.querySelector('.qc-review-menu')
+  if (!menu) return
+  const isOpen = !menu.hidden
+  document.querySelectorAll('.qc-review-menu').forEach(m => { m.hidden = true })
+  menu.hidden = isOpen
+  if (!menu.hidden) {
+    const closeOnce = (e) => {
+      if (wrap.contains(e.target)) return
+      menu.hidden = true
+      document.removeEventListener('mousedown', closeOnce, true)
+    }
+    document.addEventListener('mousedown', closeOnce, true)
+  }
+}
+
+function _runReviewWizardFromEditor(menuItem) {
+  if (menuItem) {
+    const wrap = menuItem.closest('.qc-review-improve-wrap')
+    if (wrap) {
+      const menu = wrap.querySelector('.qc-review-menu')
+      if (menu) menu.hidden = true
+    }
+  }
+  return openReviewWizard(null, { source: 'editor' })
+}
+
+function _runSinglePhaseFromMenu(menuItem, fn) {
+  const wrap = menuItem.closest('.qc-review-improve-wrap')
+  if (wrap) {
+    const menu = wrap.querySelector('.qc-review-menu')
+    if (menu) menu.hidden = true
+  }
+  fn()
+}
+
+window._toggleReviewMenu = _toggleReviewMenu
+window._runReviewWizardFromEditor = _runReviewWizardFromEditor
+window._runSinglePhaseFromMenu = _runSinglePhaseFromMenu
+
+function _reviewImproveButtonsHTML(size = 'sm') {
+  // The single Review & Improve entry point + chevron + dropdown menu. Used
+  // in all four script-editor toolbar locations (createScriptModal,
+  // _openImportedScriptEditor, _renderImportBanner, editScriptModal).
+  const sz = size === 'xs' ? 'btn-xs' : 'btn-sm'
+  return `
+    <span class="qc-review-improve-wrap" style="position:relative;display:inline-flex">
+      <button type="button" class="btn ${sz} btn-ghost qc-review-improve-main"
+              onclick="_runReviewWizardFromEditor(this)"
+              title="Scan and improve this script — bind data, add waits, convert search inputs">Review &amp; Improve</button>
+      <button type="button" class="btn ${sz} btn-ghost qc-review-improve-chevron"
+              onclick="_toggleReviewMenu(event)"
+              aria-haspopup="true" aria-label="Review &amp; Improve menu">▾</button>
+      <div class="qc-review-menu" hidden>
+        <button type="button" onclick="_runReviewWizardFromEditor(this)">Run full review (Bind → Waits → Typed inputs)</button>
+        <button type="button" onclick="_runSinglePhaseFromMenu(this, scanAndBindFromEditor)">Bind data only</button>
+        <button type="button" onclick="_runSinglePhaseFromMenu(this, scanAndAddWaitsFromEditor)">Add waits only</button>
+        <button type="button" onclick="_runSinglePhaseFromMenu(this, scanAndConvertTypedInputsFromEditor)">Convert search inputs only</button>
+      </div>
+    </span>`
+}
+window._reviewImproveButtonsHTML = _reviewImproveButtonsHTML
 
 async function deleteScript(id, name) {
   showModal('Delete Script', `

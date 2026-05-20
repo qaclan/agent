@@ -37,6 +37,110 @@ def get_sensitive_patterns():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+# Default-tick heuristic for Scan & Add Smart Waits (auto-wait-plan.md §4.5).
+# A button/generic click whose locator name contains one of these words
+# usually sends a request or loads data. Navigational roles (link, row, etc.)
+# and getByText clicks are recommended by role on the client, independent of
+# this list.
+_WAIT_RECOMMEND_WORDS = [
+    "login", "log in", "signin", "sign in", "signup", "sign up",
+    "submit", "search", "save", "continue", "next", "apply", "create",
+    "add", "delete", "remove", "update", "refresh", "load", "list", "view",
+    "open", "go", "send", "confirm", "ok", "run", "filter", "fetch",
+    "import", "export", "upload", "download", "proceed", "finish",
+]
+
+
+@bp.route('/api/scripts/wait-config', methods=['GET'])
+def get_wait_config():
+    """Return per-language config for the Scan & Add Smart Waits flow.
+
+    The scan/rewrite runs client-side (mirroring Scan & Bind); this serves the
+    language-specific settle snippet, the already-waited marker, and the
+    default-tick word list. See docs/auto-wait-plan.md §5.3.
+    """
+    try:
+        language = (request.args.get('language') or '').strip()
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                "ok": False,
+                "error": f"Unknown language '{language}'. "
+                         f"Expected one of {sorted(SUPPORTED_LANGUAGES)}.",
+            }), 400
+        strategy = get_strategy(language)
+        return jsonify({
+            "ok": True,
+            "settle_snippet": strategy.settle_call_snippet(),
+            "settle_marker": strategy.settle_marker(),
+            "recommend_words": _WAIT_RECOMMEND_WORDS,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# Default-tick heuristics for Scan & Convert Search Inputs
+# (docs/typed-input-plan.md §4.3, docs/review-wizard-plan.md §3.2).
+#
+# Three tiers, scored top-to-bottom on the locator-chain source text:
+# - high_confidence_signals: semantic role / type markers — searchbox / combobox
+#   / type=search inputs are typed-search by definition.
+# - keyword_signals: name / placeholder / label / aria-label tokens that
+#   strongly suggest a search or filter field.
+# - short_name_signals: whole-word matches inside name= / id= arguments —
+#   conventional short identifiers for search inputs.
+_TYPED_INPUT_HIGH_CONFIDENCE_SIGNALS = [
+    "getByRole('searchbox'",
+    "getByRole(\"searchbox\"",
+    "getByRole('combobox'",
+    "getByRole(\"combobox\"",
+    "get_by_role('searchbox'",
+    "get_by_role(\"searchbox\"",
+    "get_by_role('combobox'",
+    "get_by_role(\"combobox\"",
+    "type=\"search\"",
+    "type='search'",
+]
+
+_TYPED_INPUT_KEYWORD_SIGNALS = [
+    "search", "filter", "query", "find", "lookup",
+    "autocomplete", "suggest", "typeahead", "keyword",
+    "search by", "type to search", "start typing", "search anything",
+]
+
+_TYPED_INPUT_SHORT_NAME_SIGNALS = ["q", "s", "searchTerm", "keyword"]
+
+
+@bp.route('/api/scripts/typed-input-config', methods=['GET'])
+def get_typed_input_config():
+    """Return per-language config for the Scan & Convert Search Inputs flow.
+
+    The scan/rewrite runs client-side; this serves the language-specific
+    `.fill(` anchor, the already-converted marker, the rewrite template, and
+    the confidence-tier signal lists. See docs/typed-input-plan.md §4.3 and
+    docs/review-wizard-plan.md §3.2.
+    """
+    try:
+        language = (request.args.get('language') or '').strip()
+        if language not in SUPPORTED_LANGUAGES:
+            return jsonify({
+                "ok": False,
+                "error": f"Unknown language '{language}'. "
+                         f"Expected one of {sorted(SUPPORTED_LANGUAGES)}.",
+            }), 400
+        strategy = get_strategy(language)
+        return jsonify({
+            "ok": True,
+            "fill_marker": strategy.fill_call_marker(),
+            "typed_marker": strategy.typed_fill_marker(),
+            "typed_call_template": strategy.typed_fill_call_template(),
+            "high_confidence_signals": _TYPED_INPUT_HIGH_CONFIDENCE_SIGNALS,
+            "keyword_signals": _TYPED_INPUT_KEYWORD_SIGNALS,
+            "short_name_signals": _TYPED_INPUT_SHORT_NAME_SIGNALS,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/settings', methods=['GET'])
 def get_settings():
     """Return agent settings the frontend needs on startup."""
