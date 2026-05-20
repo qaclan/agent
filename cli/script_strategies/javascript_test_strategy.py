@@ -42,6 +42,45 @@ const _networkFailures = [];
 // it otherwise. See docs/error-reporting-plan.md (section 2.1).
 let _scriptError = null;
 
+// --- Smart-wait network tracking (docs/auto-wait-plan.md) ---
+let _inFlight = 0;
+function _trackNetwork(page) {
+  page.on('request', req => {
+    const t = req.resourceType();
+    if (t === 'xhr' || t === 'fetch') _inFlight++;
+  });
+  const done = req => {
+    const t = req.resourceType();
+    if (t === 'xhr' || t === 'fetch') _inFlight = Math.max(0, _inFlight - 1);
+  };
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
+}
+
+// Wait until in-flight XHR/fetch stays 0 for `quietMs`, capped at `timeoutMs`.
+// Two-step grace probe (150ms then graceMs) catches debounced inputs whose
+// XHR has not fired yet at 150ms.
+async function _waitForNetworkSettle(page, { graceMs = 700, quietMs = 400, timeoutMs = 15000 } = {}) {
+  await page.waitForTimeout(150);
+  if (_inFlight === 0) {
+    const extra = Math.max(0, graceMs - 150);
+    if (extra > 0) await page.waitForTimeout(extra);
+    if (_inFlight === 0) return;
+  }
+  const deadline = Date.now() + timeoutMs;
+  let quietSince = null;
+  while (Date.now() < deadline) {
+    if (_inFlight === 0) {
+      if (quietSince === null) quietSince = Date.now();
+      else if (Date.now() - quietSince >= quietMs) return;
+    } else {
+      quietSince = null;
+    }
+    await page.waitForTimeout(50);
+  }
+  // Soft cap: do not throw.
+}
+
 test('qaclan', async ({ page, context }) => {
   page.setDefaultTimeout(_ACTION_TIMEOUT);
   page.on('console', msg => {
@@ -57,6 +96,7 @@ test('qaclan', async ({ page, context }) => {
       failure: req.failure() ? req.failure().errorText : null,
     });
   });
+  _trackNetwork(page);
   try {
 {ACTIONS}
   } catch (err) {

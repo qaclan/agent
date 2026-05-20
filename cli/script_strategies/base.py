@@ -85,6 +85,54 @@ class ScriptStrategy(ABC):
         will share."""
         return None
 
+    # ---- Smart waits (Scan & Add Smart Waits — docs/auto-wait-plan.md) ----
+
+    def settle_call_snippet(self) -> str:
+        """Return the settle-call line injected after a chosen action.
+
+        Default is the JS/TS form (`await _waitForNetworkSettle(page);`),
+        shared by JavaScript, JavaScript-test, TypeScript and TypeScript-test.
+        Python overrides with the sync-API form.
+        """
+        return "await _waitForNetworkSettle(page);"
+
+    def settle_marker(self) -> str:
+        """Return the substring that identifies an existing settle call.
+
+        Used to set `alreadyWaited` on re-scan so a wait is not double-injected.
+        """
+        return "_waitForNetworkSettle"
+
+    def is_settle_call(self, line: str) -> bool:
+        """True if ``line`` already is a settle call for this language."""
+        return self.settle_marker() in line
+
+    # ---- Typed-input conversion (Scan & Convert Search Inputs —
+    # docs/typed-input-plan.md, docs/review-wizard-plan.md §3) ----
+
+    def fill_call_marker(self) -> str:
+        """Substring used by the client-side scanner to anchor on `.fill(`
+        candidates. JS / TS / Python all share the same locator method name."""
+        return ".fill("
+
+    def typed_fill_marker(self) -> str:
+        """Substring that identifies an already-converted typed-input call.
+
+        Default is the JS/TS form (`pressSequentially`); Python overrides with
+        the snake_case form.
+        """
+        return "pressSequentially"
+
+    def typed_fill_call_template(self) -> str:
+        """Return the per-language replacement template for `.fill(<value>)`.
+
+        The literal substring `{value}` is the placeholder the client-side
+        rewriter substitutes with the verbatim source-text of the original
+        `.fill()` argument (preserving template tokens, expressions, quoting).
+        Default is JS/TS form; Python overrides.
+        """
+        return ".pressSequentially({value}, { delay: 50 })"
+
     def escape_for_literal(self, value: str) -> str:
         """Escape ``value`` so it can be safely spliced into a string literal
         of the target language. Default implementation handles Python/JSON-like

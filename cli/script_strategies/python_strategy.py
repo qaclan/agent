@@ -33,6 +33,7 @@ _HARNESS_TEMPLATE = '''\
 import json
 import os
 import sys
+import time
 import traceback
 
 from playwright.sync_api import sync_playwright, expect
@@ -106,6 +107,54 @@ def _on_requestfailed(req):
     })
 
 
+# --- Smart-wait network tracking (docs/auto-wait-plan.md) ---
+# Counts in-flight XHR/fetch requests so _wait_for_network_settle can block
+# until a slow-loading page (table fed by an XHR) finishes.
+_in_flight = 0
+
+
+def _track_network(page):
+    def _on_request(req):
+        global _in_flight
+        if req.resource_type in ("xhr", "fetch"):
+            _in_flight += 1
+
+    def _on_done(req):
+        global _in_flight
+        if req.resource_type in ("xhr", "fetch"):
+            _in_flight = max(0, _in_flight - 1)
+
+    page.on("request", _on_request)
+    page.on("requestfinished", _on_done)
+    page.on("requestfailed", _on_done)
+
+
+def _wait_for_network_settle(page, grace_ms=700, quiet_ms=400, timeout_ms=15000):
+    # Wait until in-flight XHR/fetch stays 0 for `quiet_ms`, capped at
+    # `timeout_ms`. Two-step grace probe: fast 150ms check catches the common
+    # case; a second probe at `grace_ms` (default 700ms) catches debounced
+    # inputs whose XHR has not fired yet at 150ms.
+    page.wait_for_timeout(150)
+    if _in_flight == 0:
+        extra = max(0, grace_ms - 150)
+        if extra > 0:
+            page.wait_for_timeout(extra)
+        if _in_flight == 0:
+            return
+    deadline = time.monotonic() + timeout_ms / 1000.0
+    quiet_since = None
+    while time.monotonic() < deadline:
+        if _in_flight == 0:
+            if quiet_since is None:
+                quiet_since = time.monotonic()
+            elif time.monotonic() - quiet_since >= quiet_ms / 1000.0:
+                return
+        else:
+            quiet_since = None
+        page.wait_for_timeout(50)
+    # Soft cap: do not raise — let the next real action surface the failure.
+
+
 def run():
     with sync_playwright() as playwright:
         browser = getattr(playwright, _BROWSER).launch(headless=_HEADLESS)
@@ -116,6 +165,7 @@ def run():
         page.on("console", _on_console)
         page.on("pageerror", _on_pageerror)
         page.on("requestfailed", _on_requestfailed)
+        _track_network(page)
         try:
 {ACTIONS}
         except Exception:
@@ -168,6 +218,18 @@ class PythonStrategy(ScriptStrategy):
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
         return self._render_harness(actions)
+
+    def settle_call_snippet(self) -> str:
+        return "_wait_for_network_settle(page)"
+
+    def settle_marker(self) -> str:
+        return "_wait_for_network_settle"
+
+    def typed_fill_marker(self) -> str:
+        return "press_sequentially"
+
+    def typed_fill_call_template(self) -> str:
+        return ".press_sequentially({value}, delay=50)"
 
     def rewrite_url_template(self, content: str, base_value: str, key_name: str) -> str:
         if not base_value or not key_name:
@@ -328,6 +390,7 @@ class PythonStrategy(ScriptStrategy):
             "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
             "_SCREENSHOT", "_console_errors", "_network_failures", "_context_opts",
             "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
+            "_in_flight",
         ):
             if re.search(r'^\s*' + re.escape(name) + r'\s*=', dedented, re.MULTILINE):
                 warnings.append(ImportWarning(
