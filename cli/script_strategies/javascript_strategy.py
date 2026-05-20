@@ -43,6 +43,49 @@ const _ACTION_TIMEOUT = parseInt(process.env.QACLAN_ACTION_TIMEOUT || '30000', 1
 const _consoleErrors = [];
 const _networkFailures = [];
 
+// --- Smart-wait network tracking (docs/auto-wait-plan.md) ---
+// Counts in-flight XHR/fetch requests so _waitForNetworkSettle can block
+// until a slow-loading page (table fed by an XHR) finishes.
+let _inFlight = 0;
+function _trackNetwork(page) {
+  page.on('request', req => {
+    const t = req.resourceType();
+    if (t === 'xhr' || t === 'fetch') _inFlight++;
+  });
+  const done = req => {
+    const t = req.resourceType();
+    if (t === 'xhr' || t === 'fetch') _inFlight = Math.max(0, _inFlight - 1);
+  };
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
+}
+
+// Wait until in-flight XHR/fetch stays 0 for `quietMs`, capped at `timeoutMs`.
+// Two-step grace probe: fast 150ms check catches the common case (request
+// already in-flight) cheaply; a second probe at `graceMs` (default 700ms)
+// catches debounced inputs that delay before firing. Only after BOTH probes
+// see zero do we treat the action as non-network and return.
+async function _waitForNetworkSettle(page, { graceMs = 700, quietMs = 400, timeoutMs = 15000 } = {}) {
+  await page.waitForTimeout(150);
+  if (_inFlight === 0) {
+    const extra = Math.max(0, graceMs - 150);
+    if (extra > 0) await page.waitForTimeout(extra);
+    if (_inFlight === 0) return;               // truly no network -> cost ~graceMs
+  }
+  const deadline = Date.now() + timeoutMs;
+  let quietSince = null;
+  while (Date.now() < deadline) {
+    if (_inFlight === 0) {
+      if (quietSince === null) quietSince = Date.now();
+      else if (Date.now() - quietSince >= quietMs) return;
+    } else {
+      quietSince = null;
+    }
+    await page.waitForTimeout(50);
+  }
+  // Soft cap: do not throw — let the next real action's auto-wait surface it.
+}
+
 function _contextOpts() {
   const opts = {};
   if (_STATE && fs.existsSync(_STATE)) {
@@ -95,6 +138,7 @@ async function run() {
       failure: req.failure() ? req.failure().errorText : null,
     });
   });
+  _trackNetwork(page);
   try {
 {ACTIONS}
   } catch (err) {
@@ -129,7 +173,7 @@ run().then(() => {
 _QACLAN_JS_NAMES = (
     "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
     "_SCREENSHOT", "_consoleErrors", "_networkFailures", "_contextOpts",
-    "_writeArtifacts", "_browsers", "_browserType",
+    "_writeArtifacts", "_browsers", "_browserType", "_inFlight",
 )
 
 

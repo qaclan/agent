@@ -1227,3 +1227,176 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   opacity: 0.45;
   filter: saturate(0.7);
 }
+
+/* Toggle switch — Scan & Add Smart Waits review modal */
+.qc-toggle {
+  position: relative;
+  display: inline-block;
+  width: 38px;
+  height: 22px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.qc-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.qc-toggle-track {
+  position: absolute;
+  inset: 0;
+  background: var(--border-strong);
+  border-radius: 22px;
+  transition: background 0.15s ease;
+}
+.qc-toggle-track::before {
+  content: '';
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  left: 3px;
+  top: 3px;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.15s ease;
+}
+.qc-toggle input:checked + .qc-toggle-track {
+  background: var(--accent);
+}
+.qc-toggle input:checked + .qc-toggle-track::before {
+  transform: translateX(16px);
+}
+.qc-toggle input:disabled + .qc-toggle-track {
+  opacity: 0.5;
+}
+.qc-toggle input:disabled ~ * { cursor: not-allowed; }
+.qc-toggle input:focus-visible + .qc-toggle-track {
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* ── Review & Improve wizard entry point (review-wizard-plan §4.1) ────── */
+/* Hide legacy single-feature scan buttons. The wrapper stays in DOM so the
+   buttons remain JS-callable and a rollback is one attribute flip away. */
+.qc-legacy-scan-buttons { display: none; }
+
+.qc-review-improve-wrap { gap: 0; }
+.qc-review-improve-main { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.qc-review-improve-chevron {
+  border-top-left-radius: 0; border-bottom-left-radius: 0;
+  padding-left: 6px; padding-right: 6px; margin-left: -1px;
+}
+.qc-review-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  min-width: 260px;
+  background: var(--bg-surface, #1f2937);
+  border: 1px solid var(--border-default, rgba(148,163,184,0.25));
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.25);
+  padding: 4px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.qc-review-menu[hidden] { display: none; }
+.qc-review-menu button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  text-align: left;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.qc-review-menu button:hover { background: var(--bg-base, rgba(255,255,255,0.05)); }
+.qc-review-menu button:first-child {
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-subtle, rgba(148,163,184,0.15));
+  margin-bottom: 2px;
+  padding-bottom: 10px;
+}
+
+/* ── Wizard tabs (compact, tabular header) ───────────────────────────── */
+/* Single persistent wizard modal. Tabs at the top swap the body in-place
+   on click — no modal close/reopen. Compact: single-line pills with count
+   badges, like browser tabs. */
+.qc-wizard-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin: -8px -8px 12px;
+  padding: 0 0 0 0;
+  border-bottom: 1px solid var(--border-subtle, rgba(148,163,184,0.18));
+}
+.qc-wizard-tab {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  margin-bottom: -1px;  /* overlap the row border on the active tab */
+  white-space: nowrap;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.qc-wizard-tab:hover:not([disabled]) {
+  color: var(--text-primary);
+}
+.qc-wizard-tab[disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+.qc-wizard-tab.is-current {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent, #60a5fa);
+  font-weight: 600;
+}
+.qc-wizard-tab.is-applied { color: #4ade80; }
+.qc-wizard-tab.is-applied.is-current { border-bottom-color: #4ade80; }
+.qc-wizard-tab.is-skipped { color: var(--text-muted, #94a3b8); }
+.qc-wizard-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--bg-surface, rgba(148,163,184,0.18));
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.qc-wizard-tab.is-current .qc-wizard-tab-count {
+  background: var(--accent, #60a5fa);
+  color: #fff;
+}
+.qc-wizard-tab.is-applied .qc-wizard-tab-count {
+  background: rgba(34, 197, 94, 0.22);
+  color: #4ade80;
+}
+.qc-wizard-tab-icon {
+  font-size: 11px;
+  color: #4ade80;
+  margin-left: 2px;
+}
+.qc-wizard-tab-icon-skip { color: var(--text-muted, #94a3b8); }
+.qc-wizard-body {
+  /* Body slot — phase content renders here */
+  min-height: 200px;
+}
