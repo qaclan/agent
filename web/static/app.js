@@ -3927,6 +3927,7 @@ function showRunResults(run, suiteName) {
       <div class="stat-card"><div class="stat-value">${skipped}</div><div class="stat-label">Skipped</div></div>
     </div>
     ${failureSummary}
+    <div class="run-history-scroll">
     ${scripts.map(s => {
       const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
       const badge = s.status === 'PASSED'
@@ -4054,7 +4055,8 @@ function showRunResults(run, suiteName) {
         ${errorBlock}
         ${diagnosticsBlock}
       </div>`
-    }).join('')}`
+    }).join('')}
+    </div>`
 
   const reportBtn = run.id
     ? [{ label: 'Download report', cls: 'btn-ghost', keepOpen: true, action: () => {
@@ -4064,7 +4066,7 @@ function showRunResults(run, suiteName) {
   showModal('Execution History', body, [
     ...reportBtn,
     { label: 'Close', cls: 'btn-ghost', action: () => { closeModal(); renderSuitesPage() } }
-  ], suiteName + ' \u00b7 ' + statusBadge)
+  ], suiteName + ' \u00b7 ' + statusBadge, 'report')
 }
 
 async function deleteSuite(id, name) {

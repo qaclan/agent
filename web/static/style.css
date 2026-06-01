@@ -662,8 +662,11 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
 }
 #modal-root:has(.modal-lg) { max-width: 960px; max-height: 92vh; }
 #modal-root:has(.modal-xl) { max-width: 1280px; max-height: 92vh; }
+/* Run history: width mapped to the HTML report's .wrap (900px) + modal padding. */
+#modal-root:has(.modal-report) { max-width: 944px; max-height: 92vh; }
 #modal-root:has(.modal-lg) .modal-card,
-#modal-root:has(.modal-xl) .modal-card { max-height: 92vh; }
+#modal-root:has(.modal-xl) .modal-card,
+#modal-root:has(.modal-report) .modal-card { max-height: 92vh; }
 #modal-root:has(.modal-lg) textarea#edit-script-content,
 #modal-root:has(.modal-lg) textarea#script-content { min-height: 55vh; }
 
@@ -737,6 +740,20 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   padding: 22px;
   overflow-y: auto;
   flex: 1;
+}
+/* Run history modal: stats row + failure summary stay fixed at the top;
+   only the script-card list scrolls. */
+.modal-body:has(.run-history-scroll) {
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.run-history-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  margin: 0 -22px -22px;
+  padding: 0 22px 22px;
 }
 .modal-footer {
   padding: 14px 22px;
