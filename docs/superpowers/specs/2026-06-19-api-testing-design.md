@@ -287,16 +287,19 @@ After Send, inline pass/fail per row:
 ```
 API
 ├── Collections
-│   ├── Auth Flows
+│   ├── Auth Flows               [▶ Run] [⋯ Export]
 │   │   ├── POST /login
 │   │   └── POST /refresh
-│   └── User Management
+│   └── User Management          [▶ Run] [⋯ Export]
 │       ├── GET /users
 │       ├── POST /users
 │       └── DELETE /users/:id
 ├── Requests (ungrouped)
 └── [+ Discover]
 ```
+
+- **[▶ Run]** — runs all requests in the collection sequentially, same output as `qaclan api run --collection`. Results shown in a lightweight run panel (not a full suite run — no `suite_runs` row created).
+- **[⋯ Export]** — exports collection to Bruno-compatible `.bru` files. Downloads as a zip or writes to a user-chosen local path.
 
 One level of nesting only. No folder-within-folder (avoids Postman hierarchy hell).
 
@@ -426,8 +429,12 @@ Per endpoint generates:
 [+ Discover]
   ├── From Playwright run capture
   ├── Import HAR file
-  └── Import OpenAPI / Swagger
+  ├── Import OpenAPI / Swagger
+  ├── Import Postman collection
+  └── Import Bruno files
 ```
+
+All five options open a modal with file upload (or URL for OpenAPI/Postman). After parsing, user sees a preview list with checkboxes before confirming import.
 
 ---
 
