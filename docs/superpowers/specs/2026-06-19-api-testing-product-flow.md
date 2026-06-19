@@ -489,54 +489,56 @@ Collections sidebar → Auth Flows → [⋯] → Export
 ## Full Feature Map (User Perspective)
 
 ```
-                          ┌──────────────┐
-                          │  API Section  │
-                          └──────┬───────┘
-                                 │
-             ┌───────────────────┼───────────────────┐
-             │                   │                   │
-     ┌───────▼──────┐   ┌────────▼───────┐   ┌──────▼──────┐
-     │  Collections  │   │    Requests    │   │  + Discover  │
-     └───────┬───────┘   └────────┬───────┘   └──────┬──────┘
-             │                   │                   │
-     [▶ Run] [Export]     [Open editor]      ┌───────┴────────┐
-             │                   │           │  Import from:  │
-             │            ┌──────▼──────┐    │  • Playwright  │
-             │            │  Request    │    │  • HAR file    │
-             │            │  Editor     │    │  • OpenAPI     │
-             │            ├─────────────┤    │  • Postman     │
-             │            │ URL/Method  │    │  • Bruno       │
-             │            │ Params      │    └───────┬────────┘
-             │            │ Headers     │            │
-             │            │ Body        │     Requests created
-             │            │ Auth        │     pre-filled
-             │            │ Pre-script  │
-             │            │ Assertions  │
-             │            │ Post-script │
-             │            └──────┬──────┘
-             │                   │
-             │              [Send] → Response + Assertion Results
-             │
-             └──────────────────┐
-                                │
-                    ┌───────────▼──────────┐
-                    │   Add to Suite       │
-                    │   (mix with E2E)     │
-                    └───────────┬──────────┘
-                                │
-                    ┌───────────▼──────────┐
-                    │   Suite Builder      │
-                    │   with state flow    │
-                    │   indicators         │
-                    └───────────┬──────────┘
-                                │
-                            [Run Suite]
-                                │
-                    ┌───────────▼──────────┐
-                    │   Unified Report     │
-                    │   API + E2E steps    │
-                    │   one timeline       │
-                    └──────────────────────┘
+  E2E Section (existing)                    API Section
+  ──────────────────────                    ──────────────────────────────────
+                                                      ┌──────────────┐
+  User runs any browser test                          │  API Section  │
+          │                                           └──────┬───────┘
+          ▼                                                  │
+  Run completes                          ┌───────────────────┼───────────────────┐
+          │                              │                   │                   │
+          ▼                      ┌───────▼──────┐   ┌────────▼───────┐   ┌──────▼──────┐
+  Run detail page                │  Collections  │   │    Requests    │   │  + Discover  │
+  [Steps][Screenshots]           └───────┬───────┘   └────────┬───────┘   └──────┬──────┘
+  [Captured Requests ●]  ◄──────         │                   │                   │
+          │              captured  [▶ Run] [Export]     [Open editor]      ┌──────┴───────┐
+          │              during           │                   │            │ Import from: │
+          ▼              run              │            ┌──────▼──────┐     │ • HAR file   │
+  List of API calls                       │            │  Request    │     │ • OpenAPI    │
+  browser made                            │            │  Editor     │     │ • Postman    │
+          │                               │            ├─────────────┤     │ • Bruno      │
+  User checks & clicks                    │            │ URL/Method  │     └──────┬───────┘
+  [Save Selected]                         │            │ Params      │            │
+          │                               │            │ Headers     │     Requests created
+          │                               │            │ Body        │     pre-filled
+          └───────────────────────────────┼────────────│ Auth        │
+                                          │            │ Pre-script  │
+                    Requests appear       │            │ Assertions  │
+                    in API section        │            │ Post-script │
+                    pre-filled            │            └──────┬──────┘
+                                          │                   │
+                                          │              [Send] → Response + Assertion Results
+                                          │
+                                          └──────────────────┐
+                                                             │
+                                             ┌───────────────▼──────────┐
+                                             │   Add to Suite           │
+                                             │   (mix with E2E)         │
+                                             └───────────────┬──────────┘
+                                                             │
+                                             ┌───────────────▼──────────┐
+                                             │   Suite Builder          │
+                                             │   with state flow        │
+                                             │   indicators             │
+                                             └───────────────┬──────────┘
+                                                             │
+                                                         [Run Suite]
+                                                             │
+                                             ┌───────────────▼──────────┐
+                                             │   Unified Report         │
+                                             │   API + E2E steps        │
+                                             │   one timeline           │
+                                             └──────────────────────────┘
 ```
 
 ---
