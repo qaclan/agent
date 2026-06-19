@@ -305,16 +305,25 @@ One level of nesting only. No folder-within-folder (avoids Postman hierarchy hel
 
 ### Suite builder
 
-"Add API Request" button alongside existing "Add Script":
+"Add API Request" button alongside existing "Add Script". Suite gains a **description field** — one sentence about what the suite tests. Shown prominently in run report header so "Suite X failed" has immediate context.
 
 ```
 Suite: Checkout Flow
-├── [API]  POST /users            creates test user
-├── [E2E]  login-flow.py          logs in as test user
-├── [E2E]  checkout.py            completes purchase
-└── [API]  DELETE /users/:id      cleanup
+Description: Creates a test user, completes a purchase, then cleans up.
+
+├── [API]  POST /users         writes → user_id, token
+│                                       ↓        ↓
+├── [E2E]  login-flow.py       reads  ← token
+│                                       ↓
+├── [E2E]  checkout.py         reads  ← (nothing from prev)   ⚠
+│
+└── [API]  DELETE /users/:id   reads  ← user_id
 [+ Add Script]  [+ Add API Request]
 ```
+
+**State flow indicators** — each item shows what it writes to and reads from `state.json`. Derived at display time by scanning pre/post scripts and Playwright `os.environ["QACLAN_STATE_*"]` reads.
+
+**⚠ no bridge indicator** — shown when a step reads nothing from the previous step's output. Not a block, not an error — a visual cue that the step is self-contained relative to its neighbor. One or two is normal. Three in a row suggests an incoherent suite.
 
 ### Run report (unified timeline)
 
