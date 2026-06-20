@@ -1417,3 +1417,200 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   /* Body slot — phase content renders here */
   min-height: 200px;
 }
+
+/* ── API Testing Section ──────────────────────────────────────── */
+.api-layout {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+}
+.api-sidebar {
+  width: 280px;
+  min-width: 220px;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 12px 0;
+  flex-shrink: 0;
+}
+.api-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px 10px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+.api-sidebar-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+.api-main {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px;
+}
+.request-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.request-editor-url-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.method-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.method-GET    { background: #d1fae5; color: #065f46; }
+.method-POST   { background: #dbeafe; color: #1e40af; }
+.method-PUT    { background: #fef3c7; color: #92400e; }
+.method-PATCH  { background: #fef3c7; color: #92400e; }
+.method-DELETE { background: #fee2e2; color: #991b1b; }
+.response-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+.response-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  background: var(--surface-2, var(--bg-secondary));
+  border-bottom: 1px solid var(--border);
+}
+.response-tab {
+  background: none;
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.response-tab.active {
+  background: var(--primary-light, #dbeafe);
+  color: var(--primary, #2563eb);
+  font-weight: 600;
+}
+.response-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 4px;
+  margin-right: 8px;
+}
+.response-status-ok  { background: #d1fae5; color: #065f46; }
+.response-status-err { background: #fee2e2; color: #991b1b; }
+.response-status-warn { background: #fef3c7; color: #92400e; }
+.response-content {
+  padding: 12px;
+  overflow: auto;
+  max-height: 380px;
+}
+.response-body-pre {
+  margin: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.assertion-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.assertion-result-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+.assertion-pass { background: #f0fdf4; }
+.assertion-fail { background: #fef2f2; }
+.assertion-icon { font-weight: 700; }
+.assertion-pass .assertion-icon { color: #16a34a; }
+.assertion-fail .assertion-icon { color: #dc2626; }
+.assertion-actual { color: var(--text-muted); font-size: 11px; margin-left: auto; }
+.kv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.kv-table th { text-align: left; padding: 4px 6px; color: var(--text-muted); font-weight: 500; }
+.kv-table td { padding: 3px 6px; }
+.kv-table .kv-key,
+.kv-table .kv-value { width: 100%; }
+.input-sm { padding: 4px 8px; font-size: 13px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-input, #fff); }
+.input-sm:focus { outline: none; border-color: var(--primary, #2563eb); }
+.api-collection-item {
+  padding: 6px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 0;
+}
+.api-collection-item:hover { background: var(--bg-hover); }
+.api-request-item {
+  padding: 5px 14px 5px 28px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.api-request-item:hover { background: var(--bg-hover); }
+.api-request-item.active { background: var(--primary-light, #dbeafe); }
+.editor-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 10px 0 4px;
+  cursor: pointer;
+  user-select: none;
+}
+.discover-modal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+  padding: 8px 0;
+}
+.discover-option-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px 14px;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color .15s, background .15s;
+}
+.discover-option-card:hover {
+  border-color: var(--primary, #2563eb);
+  background: var(--primary-light, #dbeafe);
+}
+.discover-option-icon { font-size: 28px; margin-bottom: 8px; }
+.discover-option-title { font-weight: 600; font-size: 13px; }
+.discover-option-desc { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.record-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.record-status-badge.recording { background: #fee2e2; color: #dc2626; }
+.record-status-badge.stopped   { background: #f0fdf4; color: #16a34a; }

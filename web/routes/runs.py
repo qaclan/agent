@@ -382,19 +382,30 @@ def execute_run():
 
             if stopped:
                 logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item.get("script_name") or item.get("api_request_id"))
-                conn.execute(
-                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
-                    (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
-                )
-                skipped += 1
-                script_results.append({
-                    "script_id": item["script_id"],
-                    "name": item.get("script_name") or item.get("api_request_id"),
-                    "status": "SKIPPED",
-                    "duration_ms": 0,
-                    "error_message": None,
-                })
+                if item["item_type"] == "api_request":
+                    skipped += 1
+                    script_results.append({
+                        "item_type": "api_request",
+                        "api_request_id": item["api_request_id"],
+                        "name": item.get("api_request_id"),
+                        "status": "SKIPPED",
+                        "duration_ms": 0,
+                        "error_message": None,
+                    })
+                else:
+                    conn.execute(
+                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
+                        (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
+                    )
+                    skipped += 1
+                    script_results.append({
+                        "script_id": item["script_id"],
+                        "name": item.get("script_name") or item.get("api_request_id"),
+                        "status": "SKIPPED",
+                        "duration_ms": 0,
+                        "error_message": None,
+                    })
                 continue
 
             # --- API request item branch ---

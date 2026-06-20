@@ -221,6 +221,13 @@ const routes = {
   runs:     renderRunsPage,
   envs:     renderEnvsPage,
   settings: renderSettingsPage,
+  api: () => {
+    if (window.__qaclanApi) {
+      window.__qaclanApi.render(document.getElementById('page-content'));
+    } else {
+      document.getElementById('page-content').innerHTML = '<div class="empty-state">Loading API module...</div>';
+    }
+  },
 }
 
 // Shared resolution presets used by record + run modals.
@@ -356,6 +363,12 @@ function renderSidebar() {
       </div>
       <div class="nav-item sub ${p==='runs'?'active':''}" onclick="navigate('runs')">
         ${iconRun()} Runs
+      </div>
+    </div>
+    <div class="nav-section">
+      <div class="nav-label">API Testing</div>
+      <div class="nav-item sub ${p==='api'?'active':''}" onclick="navigate('api')">
+        ${iconDiscover()} API
       </div>
     </div>
     <div class="nav-section nav-section-bottom">
