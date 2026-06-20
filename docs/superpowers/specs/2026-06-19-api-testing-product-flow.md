@@ -39,7 +39,7 @@ The key difference from every other API tool: **API tests and browser tests live
 │   └──────┬───────┘   └──────┬───────┘   └────────┬─────────┘  │
 │          │                  │                     │            │
 │          ▼                  ▼                     ▼            │
-│   Browse & run         Open & edit         Import from:        │
+│   Browse & run         Open & edit         • Record APIs       │
 │   collections          any request         • Playwright run    │
 │                                            • HAR file          │
 │                                            • OpenAPI spec      │
@@ -97,9 +97,67 @@ API
 
 ## User Flow 2: Discovery — Finding APIs Without Typing
 
-### 2A — From a Playwright Run (Zero Extra Work)
+Three paths depending on who the user is. All end at the same place: a pre-filled request in the API editor.
 
-Every time a browser test runs, QAClan silently records all the API calls the browser made in the background.
+```
+Who are you?
+│
+├── "I have no browser scripts, just want API testing"
+│        → Flow 2A: Record APIs mode
+│
+├── "I already have browser tests running"
+│        → Flow 2B: Capture from Playwright run
+│
+└── "I want to import from a file or spec"
+         ├── Flow 2C: HAR file (Chrome DevTools export)
+         └── Flow 2D: OpenAPI / Postman / Bruno
+```
+
+---
+
+### 2A — Record APIs Mode (pure API users, no existing scripts)
+
+User has no browser tests. Does not know what a HAR file is. Just wants to browse the app and capture the APIs it talks to.
+
+```
+API → + Discover → Record APIs
+         │
+         ▼
+QAClan opens a browser window.
+A floating bar appears at the top:
+
+┌──────────────────────────────────────────────────────┐
+│  ● Recording APIs...   23 captured          [Stop]   │
+└──────────────────────────────────────────────────────┘
+
+User navigates the app normally — logs in, clicks around,
+goes through the flow they want to test.
+         │
+         ▼
+User clicks [Stop]
+         │
+         ▼
+┌──────────────────────────────────────────────────────┐
+│ Captured 23 requests                                 │
+│ Showing API calls only (static assets hidden)        │
+├──────────────────────────────────────────────────────┤
+│ ☑  POST  /api/auth/login          200   142ms        │
+│ ☑  GET   /api/users/me            200    89ms        │
+│ ☑  POST  /api/orders              201   310ms        │
+│ ☐  GET   /static/icons/logo.svg   200     3ms        │  ← hidden by default
+├──────────────────────────────────────────────────────┤
+│ Add to collection: [New collection... ▾]             │
+│                          [Save Selected as Requests] │
+└──────────────────────────────────────────────────────┘
+```
+
+Passwords and tokens auto-replaced with `{{variable}}` placeholders before saving.
+
+---
+
+### 2B — From a Playwright Run (users with existing scripts)
+
+Every time any browser test runs, QAClan silently records all the API calls the browser made. Zero extra work from the user.
 
 ```
 User runs any browser test
@@ -126,11 +184,11 @@ User clicks "Captured Requests"
 └──────────────────────────────────────────────────────┘
 ```
 
-User checks what they want → clicks Save → requests appear in the API section, pre-filled with method, URL, headers, body. Sensitive values (passwords, tokens) are automatically replaced with `{{variable}}` placeholders.
+User checks what they want → clicks Save → requests appear in the API section, pre-filled. Sensitive values auto-replaced with `{{variable}}` placeholders.
 
 ---
 
-### 2B — Import a HAR File
+### 2C — Import a HAR File
 
 HAR = a file browsers can export from DevTools that contains a recording of all network traffic.
 
@@ -163,7 +221,7 @@ In QAClan: API → + Discover → Import HAR file
 
 ---
 
-### 2C — Import from OpenAPI / Swagger Spec
+### 2D — Import from OpenAPI / Swagger Spec
 
 If the backend has API documentation (OpenAPI or Swagger), QAClan can read it and generate all request stubs automatically.
 
@@ -196,7 +254,7 @@ QAClan generates request stubs with sample bodies from the spec and auto-creates
 
 ---
 
-### 2D — Import from Postman / Bruno
+### 2E — Import from Postman / Bruno
 
 Teams migrating from Postman or Bruno can bring their existing collections in one click.
 
@@ -486,59 +544,84 @@ Collections sidebar → Auth Flows → [⋯] → Export
 
 ---
 
+## User Flow 10: Individual Script Run
+
+Today scripts only run as part of a suite. With API testing introducing a "Send" button for individual requests, scripts gain the same capability — a "Run" button on the script detail page, outside any suite.
+
+```
+Scripts → open any script → [Run Script]
+         │
+         ▼
+Lightweight run panel appears (no suite needed):
+
+┌──────────────────────────────────────────────────────┐
+│ Running: login-flow.py                   [Stop]      │
+│ ──────────────────────────────────────────────────── │
+│  ● Step 1: goto /login          done  0.3s          │
+│  ● Step 2: fill #email          done  0.1s          │
+│  ● Step 3: click [Sign In]      done  0.2s          │
+│  ○ Step 4: wait for dashboard   ...                 │
+└──────────────────────────────────────────────────────┘
+
+Completes:
+
+┌──────────────────────────────────────────────────────┐
+│ ✓  login-flow.py   PASSED   4.2s                    │
+│    [View Steps]  [View Screenshots]                  │
+└──────────────────────────────────────────────────────┘
+```
+
+Same runner, same step tracking, same screenshots. Just no suite wrapper. Results saved and viewable in the script's run history.
+
+---
+
 ## Full Feature Map (User Perspective)
 
 ```
-  E2E Section (existing)                    API Section
-  ──────────────────────                    ──────────────────────────────────
-                                                      ┌──────────────┐
-  User runs any browser test                          │  API Section  │
-          │                                           └──────┬───────┘
-          ▼                                                  │
-  Run completes                          ┌───────────────────┼───────────────────┐
-          │                              │                   │                   │
-          ▼                      ┌───────▼──────┐   ┌────────▼───────┐   ┌──────▼──────┐
-  Run detail page                │  Collections  │   │    Requests    │   │  + Discover  │
-  [Steps][Screenshots]           └───────┬───────┘   └────────┬───────┘   └──────┬──────┘
-  [Captured Requests ●]  ◄──────         │                   │                   │
-          │              captured  [▶ Run] [Export]     [Open editor]      ┌──────┴───────┐
-          │              during           │                   │            │ Import from: │
-          ▼              run              │            ┌──────▼──────┐     │ • HAR file   │
-  List of API calls                       │            │  Request    │     │ • OpenAPI    │
-  browser made                            │            │  Editor     │     │ • Postman    │
-          │                               │            ├─────────────┤     │ • Bruno      │
-  User checks & clicks                    │            │ URL/Method  │     └──────┬───────┘
-  [Save Selected]                         │            │ Params      │            │
-          │                               │            │ Headers     │     Requests created
-          │                               │            │ Body        │     pre-filled
-          └───────────────────────────────┼────────────│ Auth        │
-                                          │            │ Pre-script  │
-                    Requests appear       │            │ Assertions  │
-                    in API section        │            │ Post-script │
-                    pre-filled            │            └──────┬──────┘
-                                          │                   │
-                                          │              [Send] → Response + Assertion Results
-                                          │
-                                          └──────────────────┐
-                                                             │
-                                             ┌───────────────▼──────────┐
-                                             │   Add to Suite           │
-                                             │   (mix with E2E)         │
-                                             └───────────────┬──────────┘
-                                                             │
-                                             ┌───────────────▼──────────┐
-                                             │   Suite Builder          │
-                                             │   with state flow        │
-                                             │   indicators             │
-                                             └───────────────┬──────────┘
-                                                             │
-                                                         [Run Suite]
-                                                             │
-                                             ┌───────────────▼──────────┐
-                                             │   Unified Report         │
-                                             │   API + E2E steps        │
-                                             │   one timeline           │
-                                             └──────────────────────────┘
+  E2E Section (existing)           Pure API user          API Section
+  ──────────────────────           ─────────────          ──────────────────────────────
+                                                                  ┌──────────────┐
+  User runs browser script         Wants API only                 │  API Section  │
+  (existing automated test)        no browser scripts             └──────┬───────┘
+          │                                │                             │
+          ▼                                ▼                ┌────────────┼────────────┐
+  Run completes               API → + Discover          ┌───▼────┐  ┌───▼────┐  ┌────▼────┐
+          │                        → Record APIs        │Collect-│  │Request │  │+Discover│
+          ▼                                │            │ ions   │  │  list  │  │         │
+  [Captured Requests ●]                    ▼            └───┬────┘  └───┬────┘  └────┬────┘
+  tab on run detail page      Browser opens                 │           │            │
+          │                   user navigates          [▶Run] [Export] [editor]  ┌────┴─────┐
+          │                   QAClan captures               │           │        │From run  │
+          ▼                   API calls                     │      ┌────▼────┐   │HAR file  │
+  List of captured APIs                │                    │      │Request  │   │OpenAPI   │
+  user selects & saves                 ▼                    │      │Editor   │   │Postman   │
+          │                   [Stop] → captured list        │      │Send btn │   │Bruno     │
+          │                   user selects & saves          │      └────┬────┘   └────┬─────┘
+          │                            │                    │           │             │
+          └────────────────────────────┴────────────────────┴───────────┴─────────────┘
+                                                            │
+                                              Requests land in API section
+                                              pre-filled, ready to edit & run
+                                                            │
+                              ┌─────────────────────────────┴──────────────────────────┐
+                              │                                                         │
+                    ┌─────────▼──────────┐                               ┌─────────────▼──────┐
+                    │  Run individually   │                               │   Add to Suite      │
+                    │  (Send / Run btn)   │                               │   mix with E2E      │
+                    └─────────┬──────────┘                               └─────────────┬───────┘
+                              │                                                         │
+                    Inline result panel                                   ┌─────────────▼───────┐
+                    no suite needed                                       │   Suite Builder     │
+                                                                          │   state flow badges │
+                                                                          └─────────────┬───────┘
+                                                                                        │
+                                                                                   [Run Suite]
+                                                                                        │
+                                                                          ┌─────────────▼───────┐
+                                                                          │   Unified Report    │
+                                                                          │   API + E2E steps   │
+                                                                          │   one timeline      │
+                                                                          └─────────────────────┘
 ```
 
 ---
@@ -553,7 +636,8 @@ Collections sidebar → Auth Flows → [⋯] → Export
 | Git-friendly export | No — JSON blob | Yes — Bruno format |
 | Secrets visible in UI | Yes — plain text | No — env vars, masked |
 | Test scripts | JavaScript only | JavaScript or Python |
-| Find APIs from existing tests | No | Yes — capture from Playwright runs |
+| Find APIs without writing scripts | No | Yes — Record APIs mode (browse & capture) |
+| Find APIs from existing tests | No | Yes — auto-capture from every Playwright run |
 | Import from OpenAPI spec | Manual | Auto-generate with assertions |
 
 ---

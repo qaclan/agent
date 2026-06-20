@@ -389,11 +389,33 @@ Injects `context.recordHar({path: "session.har"})` into Playwright harness. HAR 
 
 ## Section 5: API Discovery
 
-Three paths to populate requests without manual entry.
+Four paths to populate requests without manual entry. Separated by user type.
 
-### Path 1 — Capture from Playwright run
+### Path 1 — Record APIs Mode (pure API users, no existing scripts)
 
-All script harnesses (Python, JS, TS) gain a capture hook. During any run, all outgoing XHR/fetch calls are recorded to `captured_requests.json` in the run directory.
+Dedicated browser session for API capture only. No Playwright script generated. Target user: wants API testing, has no existing browser scripts, does not know what a HAR file is.
+
+**New CLI command:**
+```bash
+qaclan api record
+```
+
+Launches a Playwright browser (same runtime as codegen). User navigates the app manually. QAClan listens on `page.on("request")` / `page.on("response")` and records all XHR/fetch calls in real time. User closes the browser or clicks Stop in the UI → sees the captured request list → selects and saves.
+
+UI entry: **API → + Discover → Record APIs** → opens browser window with a floating control bar:
+```
+┌─────────────────────────────────────────┐
+│ ● Recording APIs...   47 captured  [Stop] │
+└─────────────────────────────────────────┘
+```
+
+After Stop, same selection UI as Path 2 below.
+
+---
+
+### Path 2 — Capture from Playwright Run (users with existing scripts)
+
+Passive. No extra steps. Every script run already has `page.on("request/response")` listeners injected into the harness. All XHR/fetch calls written to `captured_requests.json` in the run directory.
 
 ```json
 [
@@ -410,20 +432,27 @@ All script harnesses (Python, JS, TS) gain a capture hook. During any run, all o
 ]
 ```
 
-**Python harness:** `page.on("request", ...)` + `page.on("response", ...)` listeners.
-**JS/TS harness:** same via Playwright event listeners.
-
-UI shows "Captured Requests" tab on run detail page. "Save as API Request" button pre-fills editor. Sensitive values auto-detected by key name (`password`, `token`, `secret`, `authorization`) and replaced with `{{var_name}}` placeholders.
+UI shows "Captured Requests" tab on run detail page. "Save as API Request" pre-fills editor. Sensitive values auto-detected by key name (`password`, `token`, `secret`, `authorization`) and replaced with `{{var_name}}` placeholders.
 
 "From last run capture" in Discover modal lists 10 most recent script runs with captured requests.
 
-### Path 2 — HAR import
+---
 
-UI: drag-and-drop HAR file → parse all requests → checkbox selection → "Import Selected" → creates `api_requests` rows. Same auto-suggest logic for assertions and `{{var}}` replacement as Path 1.
+### Path 3 — HAR Import (technical users, external traffic)
 
-Playwright HAR recording enabled via `--record-har` flag (see CLI section).
+For users who recorded browser traffic outside QAClan (Chrome DevTools → Network → Export HAR), or who want to capture traffic from non-browser clients (mobile apps, CLI tools).
 
-### Path 3 — OpenAPI / Swagger import
+UI: drag-and-drop HAR file → parse → checkbox selection → "Import Selected" → creates `api_requests` rows. Same auto-suggest logic for assertions and `{{var}}` replacement as Path 2.
+
+Playwright HAR recording also enabled via CLI flag:
+```bash
+qaclan suite run smoke --record-har=session.har
+```
+Injects `context.recordHar()` into the harness. HAR importable afterward.
+
+---
+
+### Path 4 — OpenAPI / Swagger Import
 
 File upload or URL. Supports OpenAPI 3.x and Swagger 2.x.
 
@@ -432,18 +461,27 @@ Per endpoint generates:
 - Assertions from response schema: expected status codes, required JSON fields present
 - Grouped into `api_collections` by OpenAPI tag
 
+---
+
 ### Discovery UI entry point
 
 ```
 [+ Discover]
-  ├── From Playwright run capture
+  ├── Record APIs            ← new browser session, API capture only
+  ├── From Playwright run    ← pick from recent runs with captured requests
   ├── Import HAR file
   ├── Import OpenAPI / Swagger
   ├── Import Postman collection
   └── Import Bruno files
 ```
 
-All five options open a modal with file upload (or URL for OpenAPI/Postman). After parsing, user sees a preview list with checkboxes before confirming import.
+---
+
+## Section 6: Individual Script Run
+
+Currently scripts only run as suite items. API requests introduced a "Send" button for immediate feedback while building. For consistency, scripts gain an individual "Run" button on the script detail page — outside any suite. Internally implemented as a single-item suite run (reuses existing runner), no new `suite_runs` row created. Results shown in a lightweight panel on the script page.
+
+This closes an existing UX gap: users wanting to test one script without creating a suite first.
 
 ---
 
