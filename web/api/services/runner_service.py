@@ -3,37 +3,9 @@ import json
 import logging
 from cli.db import get_conn
 from cli.config import get_active_project_id
+from cli.env_loader import load_env_vars
 
 logger = logging.getLogger("qaclan.runner_service")
-
-
-def _load_env_vars(project_id: str, env_name: str | None) -> dict:
-    """Load env vars from DB for a named environment. Returns {} if env_name is None."""
-    if not env_name:
-        return {}
-    conn = get_conn()
-    env_row = conn.execute(
-        "SELECT id FROM environments WHERE project_id = ? AND name = ?",
-        (project_id, env_name),
-    ).fetchone()
-    if not env_row:
-        raise LookupError(f"Environment '{env_name}' not found")
-    from cli.crypto import decrypt as _dec
-
-    rows = conn.execute(
-        "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
-        (env_row["id"],),
-    ).fetchall()
-    result = {}
-    for v in rows:
-        val = v["value"]
-        if v["is_secret"] and val:
-            try:
-                val = _dec(val)
-            except Exception:
-                pass
-        result[v["key"]] = val
-    return result
 
 
 class RunnerService:
@@ -46,7 +18,7 @@ class RunnerService:
         if req is None:
             raise LookupError(f"Request {request_id} not found")
 
-        env_vars = _load_env_vars(project_id, env_name)
+        env_vars = load_env_vars(project_id, env_name)
         state: dict = {}
 
         result = run_api_request(req, env_vars, state, state_path=None)
@@ -64,7 +36,7 @@ class RunnerService:
             raise LookupError(f"Collection {collection_id} not found")
 
         requests = RequestRepo().list(project_id, collection_id=collection_id)
-        env_vars = _load_env_vars(project_id, env_name)
+        env_vars = load_env_vars(project_id, env_name)
 
         state: dict = {}
         results = []
