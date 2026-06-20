@@ -17,6 +17,7 @@
 - Add to `requirements.txt`: `httpx>=0.27.0`, `jsonpath-ng>=1.6.0`
 - All new Python modules: `logger = logging.getLogger("qaclan.<module_name>")`
 - JSON columns stored as TEXT; parse with `json.loads()` before use, serialize with `json.dumps()` before save
+- All new Python files include `from __future__ import annotations` as first import to support `X | Y` type unions on Python < 3.10. Files: `cli/api_runner.py`, `cli/env_loader.py`, `cli/api_discovery/har_parser.py`, `cli/api_discovery/openapi_parser.py`, `cli/api_discovery/postman_parser.py`, `cli/api_discovery/bruno_parser.py`, `web/api/repositories/collection_repo.py`, `web/api/repositories/request_repo.py`, `web/api/repositories/api_run_repo.py`, `web/api/services/collection_service.py`, `web/api/services/request_service.py`, `web/api/services/runner_service.py`, `web/api/services/discovery_service.py`, `web/api/routes/collections.py`, `web/api/routes/requests.py`, `web/api/routes/discovery.py`, `web/api/routes/api_runs.py`, `cli/commands/api_cmd.py`
 
 ---
 
@@ -97,6 +98,7 @@ def _migrate_api_tables(conn):
         "SELECT COUNT(*) FROM pragma_table_info('suite_items') WHERE name='item_type'"
     ).fetchone()[0]
     if not has_item_type:
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute("ALTER TABLE suite_items RENAME TO _suite_items_old")
         conn.execute("""
             CREATE TABLE suite_items (
@@ -115,6 +117,7 @@ def _migrate_api_tables(conn):
             FROM _suite_items_old
         """)
         conn.execute("DROP TABLE _suite_items_old")
+        conn.execute("PRAGMA foreign_keys = ON")
 
     # 5. Add description column to suites (safe — nullable, no default needed)
     has_desc = conn.execute(
@@ -175,6 +178,7 @@ sqlite3 ~/.qaclan/qaclan.db "PRAGMA table_info(suite_items);"
 - [ ] Step 2: Create `web/api/repositories/collection_repo.py`:
 
 ```python
+from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
@@ -237,6 +241,7 @@ class CollectionRepo:
 - [ ] Step 3: Create `web/api/repositories/request_repo.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
@@ -358,17 +363,14 @@ class RequestRepo:
         cur = conn.execute("DELETE FROM api_requests WHERE id = ?", (id,))
         conn.commit()
         return cur.rowcount > 0
-
-    def count_by_collection(self, collection_id: str) -> int:
-        conn = get_conn()
-        return conn.execute(
-            "SELECT COUNT(*) FROM api_requests WHERE collection_id = ?", (collection_id,)
-        ).fetchone()[0]
 ```
+
+Note: Request count per collection is retrieved via SQL COUNT in `CollectionRepo.list()` — no separate method needed.
 
 - [ ] Step 4: Create `web/api/repositories/api_run_repo.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
@@ -451,6 +453,7 @@ class ApiRunRepo:
 - [ ] Step 1: Create `cli/api_runner.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 import os
@@ -567,37 +570,44 @@ def _apply_auth(headers: dict, params: dict, auth_type: str, auth_config: dict,
 
 def _build_python_sandbox(script: str, context: dict) -> str:
     ctx_json = json.dumps(context)
-    return f"""import json, os
-_ctx = {ctx_json}
-_output = {{"headers": dict(_ctx.get("headers", {{}})), "params": dict(_ctx.get("params", {{}})), "state": {{}}}}
-class _Qc:
-    def set(self, k, v): _output["state"][k] = v
-    def set_header(self, k, v): _output["headers"][k] = v
-    def set_param(self, k, v): _output["params"][k] = v
-qc = _Qc()
-response_body = _ctx.get("response_body", "")
-response_headers = _ctx.get("response_headers", {{}})
-status_code = _ctx.get("status_code", 0)
-class _Resp:
-    def json(s): return json.loads(response_body)
-    headers = response_headers
-response = _Resp()
-{script}
-_out = os.environ.get("QACLAN_SANDBOX_OUTPUT")
-if _out:
-    with open(_out, "w") as _f: json.dump(_output, _f)
-"""
+    header = (
+        "import json, os\n"
+        "_ctx = " + ctx_json + "\n"
+        '_output = {"headers": dict(_ctx.get("headers", {})), "params": dict(_ctx.get("params", {})), "state": {}}\n'
+        "class _Qc:\n"
+        "    def set(self, k, v): _output['state'][k] = v\n"
+        "    def set_header(self, k, v): _output['headers'][k] = v\n"
+        "    def set_param(self, k, v): _output['params'][k] = v\n"
+        "qc = _Qc()\n"
+        'response_body = _ctx.get("response_body", "")\n'
+        'response_headers = _ctx.get("response_headers", {})\n'
+        'status_code = _ctx.get("status_code", 0)\n'
+        "class _Resp:\n"
+        "    def json(s): return json.loads(response_body)\n"
+        "    headers = response_headers\n"
+        "response = _Resp()\n"
+    )
+    footer = (
+        '\n_out = os.environ.get("QACLAN_SANDBOX_OUTPUT")\n'
+        "if _out:\n"
+        "    with open(_out, 'w') as _f: json.dump(_output, _f)\n"
+    )
+    return header + script + "\n" + footer
 
 
 def _build_js_sandbox(script: str, context: dict) -> str:
     ctx_json = json.dumps(context)
-    return f"""const _ctx = {ctx_json};
-const _output = {{ headers: Object.assign({{}}, _ctx.headers), params: Object.assign({{}}, _ctx.params), state: {{}} }};
-const qc = {{ set:(k,v)=>_output.state[k]=v, setHeader:(k,v)=>_output.headers[k]=v, setParam:(k,v)=>_output.params[k]=v }};
-const response = {{ json:()=>JSON.parse(_ctx.response_body||'null'), headers:_ctx.response_headers||{{}}, status:_ctx.status_code||0 }};
-{script}
-const fs=require('fs'); const out=process.env.QACLAN_SANDBOX_OUTPUT; if(out) fs.writeFileSync(out,JSON.stringify(_output));
-"""
+    header = (
+        "const _ctx = " + ctx_json + ";\n"
+        "const _output = { headers: Object.assign({}, _ctx.headers), params: Object.assign({}, _ctx.params), state: {} };\n"
+        "const qc = { set:(k,v)=>_output.state[k]=v, setHeader:(k,v)=>_output.headers[k]=v, setParam:(k,v)=>_output.params[k]=v };\n"
+        "const response = { json:()=>JSON.parse(_ctx.response_body||'null'), headers:_ctx.response_headers||{}, status:_ctx.status_code||0 };\n"
+    )
+    footer = (
+        "\nconst fs=require('fs'); const out=process.env.QACLAN_SANDBOX_OUTPUT;"
+        " if(out) fs.writeFileSync(out,JSON.stringify(_output));\n"
+    )
+    return header + script + "\n" + footer
 
 
 def _run_script_sandbox(script: str, lang: str, context: dict, state_path: str | None) -> dict:
@@ -616,13 +626,13 @@ def _run_script_sandbox(script: str, lang: str, context: dict, state_path: str |
             wrapper = _build_python_sandbox(script, context)
             script_file = os.path.join(tmpdir, "sandbox.py")
             Path(script_file).write_text(wrapper, encoding="utf-8")
-            venv_python = runtime_setup.venv_python_path()
+            venv_python = runtime_setup.venv_python()
             cmd = [str(venv_python) if venv_python else "python3", script_file]
         else:  # js (default)
             wrapper = _build_js_sandbox(script, context)
             script_file = os.path.join(tmpdir, "sandbox.js")
             Path(script_file).write_text(wrapper, encoding="utf-8")
-            node = runtime_setup.node_path()
+            node = runtime_setup.node_bin("node")
             cmd = [str(node) if node else "node", script_file]
 
         try:
@@ -938,10 +948,59 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 **Interfaces:**
 - Consumes: Task 2 (repos), Task 3 (api_runner)
 - Produces: service classes called by Task 7 routes
+- Note: Collection runs are in-memory only — results NOT persisted to `api_runs`. Only suite-context runs (Task 10) write `api_runs` rows.
+
+- [ ] Step 0: Create `cli/env_loader.py` (shared env loader — eliminates 3× duplication of decrypt+load logic):
+
+```python
+from __future__ import annotations
+import logging
+from cli.db import get_conn
+from cli.crypto import decrypt
+
+logger = logging.getLogger("qaclan.env_loader")
+
+
+def load_env_vars(project_id: str, env_name: str | None) -> dict:
+    """Load and decrypt env vars for a named environment. Returns {} if env_name is None."""
+    if not env_name:
+        return {}
+    conn = get_conn()
+    env_row = conn.execute(
+        "SELECT id FROM environments WHERE project_id = ? AND name = ?",
+        (project_id, env_name),
+    ).fetchone()
+    if not env_row:
+        raise LookupError(f"Environment '{env_name}' not found")
+    rows = conn.execute(
+        "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
+        (env_row["id"],),
+    ).fetchall()
+    result = {}
+    for v in rows:
+        val = v["value"]
+        if v["is_secret"] and val:
+            try:
+                val = decrypt(val)
+            except Exception:
+                pass
+        result[v["key"]] = val
+    logger.debug("load_env_vars: loaded %d vars for env '%s'", len(result), env_name)
+    return result
+```
+
+In `runner_service.py`: replace `_load_env_vars` function definition with `from cli.env_loader import load_env_vars` and replace all calls to `_load_env_vars(...)` with `load_env_vars(...)`.
+
+In `api_cmd.py` (Task 11), replace the inline env-loading block in `api_run` command (the `env_vars = {}` / `if env:` / `env_row = conn.execute(...)` / loop block) with:
+```python
+from cli.env_loader import load_env_vars
+env_vars = load_env_vars(pid, env)
+```
 
 - [ ] Step 1: Create `web/api/services/collection_service.py`:
 
 ```python
+from __future__ import annotations
 import logging
 from web.api.repositories.collection_repo import CollectionRepo
 from web.api.repositories.request_repo import RequestRepo
@@ -986,6 +1045,7 @@ class CollectionService:
 - [ ] Step 2: Create `web/api/services/request_service.py`:
 
 ```python
+from __future__ import annotations
 import logging
 from web.api.repositories.request_repo import RequestRepo
 
@@ -1032,6 +1092,7 @@ class RequestService:
 - [ ] Step 3: Create `web/api/services/runner_service.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 from cli.db import get_conn
@@ -1051,12 +1112,7 @@ def _load_env_vars(project_id: str, env_name: str | None) -> dict:
     ).fetchone()
     if not env_row:
         raise LookupError(f"Environment '{env_name}' not found")
-    from cli.commands.web.auth import decrypt
-    try:
-        from cli.commands.web.auth import decrypt as _decrypt
-        _dec = _decrypt
-    except ImportError:
-        _dec = lambda v: v  # noqa: E731
+    from cli.crypto import decrypt as _dec
 
     rows = conn.execute(
         "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
@@ -1092,13 +1148,10 @@ class RunnerService:
 
     def run_collection(self, collection_id: str, project_id: str,
                        env_name: str | None = None) -> dict:
-        """Run all requests in a collection sequentially. Creates suite_run + api_run rows."""
+        """Run all requests in a collection sequentially. Results returned in-memory, NOT stored in api_runs."""
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
-        from web.api.repositories.api_run_repo import ApiRunRepo
         from cli.api_runner import run_api_request
-        from cli.db import generate_id
-        from datetime import datetime, timezone
 
         col = CollectionRepo().get(collection_id, project_id)
         if col is None:
@@ -1107,35 +1160,12 @@ class RunnerService:
         requests = RequestRepo().list(project_id, collection_id=collection_id)
         env_vars = _load_env_vars(project_id, env_name)
 
-        # Create a synthetic suite_run row for tracking
-        conn = get_conn()
-        suite_run_id = generate_id("run")
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Find any suite that belongs to this project (or use a placeholder)
-        # We need a suite_id FK; use the first suite or create a sentinel
-        suite_row = conn.execute(
-            "SELECT id FROM suites WHERE project_id = ? LIMIT 1", (project_id,)
-        ).fetchone()
-        if not suite_row:
-            raise ValueError("No suite exists in this project. Create one first.")
-        suite_id = suite_row["id"]
-
-        conn.execute(
-            "INSERT INTO suite_runs (id, suite_id, project_id, channel, status, total, started_at) "
-            "VALUES (?, ?, ?, 'web', 'RUNNING', ?, ?)",
-            (suite_run_id, suite_id, project_id, len(requests), now),
-        )
-        conn.commit()
-
-        api_run_repo = ApiRunRepo()
         state: dict = {}
         results = []
         passed = failed = 0
 
         for idx, req in enumerate(requests):
             result = run_api_request(req, env_vars, state, state_path=None)
-            api_run_repo.create(suite_run_id, req["id"], idx, result)
             results.append({
                 "request_id": req["id"],
                 "name": req["name"],
@@ -1149,15 +1179,7 @@ class RunnerService:
                 failed += 1
 
         final_status = "PASSED" if failed == 0 else "FAILED"
-        finished_at = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            "UPDATE suite_runs SET status = ?, passed = ?, failed = ?, finished_at = ? WHERE id = ?",
-            (final_status, passed, failed, finished_at, suite_run_id),
-        )
-        conn.commit()
-
         return {
-            "suite_run_id": suite_run_id,
             "collection_id": collection_id,
             "collection_name": col["name"],
             "status": final_status,
@@ -1190,6 +1212,7 @@ class RunnerService:
 - [ ] Step 2: Create `cli/api_discovery/har_parser.py`:
 
 ```python
+from __future__ import annotations
 import logging
 import re
 
@@ -1312,6 +1335,7 @@ def parse_har(har_json: dict) -> list[dict]:
 - [ ] Step 3: Create `cli/api_discovery/openapi_parser.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 import re
@@ -1509,6 +1533,7 @@ def parse_openapi(spec: dict) -> list[dict]:
 - [ ] Step 4: Create `cli/api_discovery/postman_parser.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 
@@ -1636,6 +1661,7 @@ def parse_postman(collection: dict) -> list[dict]:
 - [ ] Step 5: Create `cli/api_discovery/bruno_parser.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 import re
@@ -1774,6 +1800,42 @@ def parse_bruno(bru_text: str) -> list[dict]:
 
     logger.info("parse_bruno: extracted request '%s' %s %s", name, method, url)
     return [result]
+
+
+def request_to_bru(req: dict) -> str:
+    """Convert a QAClan api_request dict to Bruno .bru format string."""
+    import json as _json
+    lines = [
+        "meta {",
+        f"  name: {req.get('name', 'Request')}",
+        f"  method: {req.get('method', 'GET')}",
+        "  seq: 1",
+        "}",
+        "",
+        f"{req.get('method', 'GET').lower()} {{",
+        f"  url: {req.get('url', '')}",
+        "}",
+        "",
+    ]
+    headers = req.get("headers", [])
+    if isinstance(headers, str):
+        headers = _json.loads(headers)
+    if headers:
+        lines.append("headers {")
+        for h in headers:
+            prefix = "" if h.get("enabled", True) else "~"
+            lines.append(f"  {prefix}{h.get('key', '')}: {h.get('value', '')}")
+        lines.append("}")
+        lines.append("")
+    body = req.get("body")
+    body_type = req.get("body_type")
+    if body and body_type == "raw":
+        lines.append("body:json {")
+        for line in body.splitlines():
+            lines.append(f"  {line}")
+        lines.append("}")
+        lines.append("")
+    return "\n".join(lines)
 ```
 
 - [ ] Step 6: Commit — `git add cli/api_discovery/ && git commit -m "feat: add HAR, OpenAPI, Postman, Bruno discovery parsers"`
@@ -1792,6 +1854,7 @@ def parse_bruno(bru_text: str) -> list[dict]:
 - [ ] Step 1: Create `web/api/services/discovery_service.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 from web.api.repositories.collection_repo import CollectionRepo
@@ -1931,6 +1994,7 @@ class DiscoveryService:
 - [ ] Step 1: Create `web/api/routes/collections.py`:
 
 ```python
+from __future__ import annotations
 import io
 import json
 import logging
@@ -2042,44 +2106,13 @@ def export_collection(col_id):
         col = _svc.get(col_id, _project_id())
         requests = col.get("requests", [])
 
+        from cli.api_discovery.bruno_parser import request_to_bru
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for req in requests:
-                bru_lines = []
-                bru_lines.append("meta {")
-                bru_lines.append(f"  name: {req.get('name', 'Request')}")
-                bru_lines.append(f"  method: {req.get('method', 'GET')}")
-                bru_lines.append("  seq: 1")
-                bru_lines.append("}")
-                bru_lines.append("")
-                verb = req.get("method", "GET").lower()
-                bru_lines.append(f"{verb} {{")
-                bru_lines.append(f"  url: {req.get('url', '')}")
-                bru_lines.append("}")
-                bru_lines.append("")
-
-                headers = req.get("headers", [])
-                if isinstance(headers, str):
-                    headers = json.loads(headers)
-                if headers:
-                    bru_lines.append("headers {")
-                    for h in headers:
-                        prefix = "" if h.get("enabled", True) else "~"
-                        bru_lines.append(f"  {prefix}{h['key']}: {h['value']}")
-                    bru_lines.append("}")
-                    bru_lines.append("")
-
-                body = req.get("body")
-                body_type = req.get("body_type")
-                if body and body_type == "raw":
-                    bru_lines.append("body:json {")
-                    for line in body.splitlines():
-                        bru_lines.append(f"  {line}")
-                    bru_lines.append("}")
-                    bru_lines.append("")
-
+                content = request_to_bru(req)
                 safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req.get("name", "request"))
-                zf.writestr(f"{col['name']}/{safe_name}.bru", "\n".join(bru_lines))
+                zf.writestr(f"{col['name']}/{safe_name}.bru", content)
 
         buf.seek(0)
         return send_file(
@@ -2098,6 +2131,7 @@ def export_collection(col_id):
 - [ ] Step 2: Create `web/api/routes/requests.py`:
 
 ```python
+from __future__ import annotations
 import logging
 from flask import Blueprint, request, jsonify
 from cli.config import get_active_project_id
@@ -2218,6 +2252,7 @@ def send_request(req_id):
 - [ ] Step 1: Create `web/api/routes/discovery.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 import threading
@@ -2339,42 +2374,53 @@ def record_start():
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
 
-        # Write a capture harness that saves requests to a temp file
         import tempfile, os
         capture_dir = tempfile.mkdtemp(prefix="qaclan_record_")
-        capture_file = os.path.join(capture_dir, "captured.json")
-        with open(capture_file, "w") as cf:
-            json.dump([], cf)
+        har_file = os.path.join(capture_dir, "capture.har")
 
-        harness = f"""
-const {{ chromium }} = require('playwright');
-const fs = require('fs');
-const path = require('path');
-const captureFile = {json.dumps(capture_file)};
-
-(async () => {{
-  const browser = await chromium.launch({{ headless: false }});
-  const context = await browser.newContext({{ recordHar: {{ path: captureFile.replace('.json', '.har') }} }});
-  const page = await context.newPage();
-  await page.goto({json.dumps(url)});
-  // Keep browser open until process is killed
-  await new Promise(() => {{}});
-}})();
-"""
-        harness_file = os.path.join(capture_dir, "record.js")
+        # Python harness — uses asyncio SIGTERM handler so context.close() is
+        # guaranteed to flush the HAR file when record_stop sends SIGTERM.
+        # Node harness was rejected: `new Promise(()=>{})` never resolves on
+        # SIGTERM so context.close() is never called and the HAR is never written.
+        harness = (
+            "import asyncio, os, signal\n"
+            "from playwright.async_api import async_playwright\n"
+            "\n"
+            "HAR_PATH = os.environ['QACLAN_HAR_PATH']\n"
+            "START_URL = os.environ['QACLAN_START_URL']\n"
+            "\n"
+            "async def main():\n"
+            "    stop = asyncio.Event()\n"
+            "    loop = asyncio.get_event_loop()\n"
+            "    loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
+            "    loop.add_signal_handler(signal.SIGINT, stop.set)\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=False)\n"
+            "        ctx = await browser.new_context(record_har_path=HAR_PATH)\n"
+            "        page = await ctx.new_page()\n"
+            "        await page.goto(START_URL)\n"
+            "        await stop.wait()\n"
+            "        await ctx.close()\n"
+            "\n"
+            "asyncio.run(main())\n"
+        )
+        harness_file = os.path.join(capture_dir, "record.py")
         with open(harness_file, "w") as hf:
             hf.write(harness)
 
-        node = runtime_setup.node_path()
-        node_cmd = str(node) if node else "node"
-        node_modules = runtime_setup.node_modules_path()
+        venv_py = runtime_setup.venv_python()
+        python_cmd = str(venv_py) if venv_py.exists() else "python3"
 
-        env = dict(__import__("os").environ)
-        if node_modules:
-            env["NODE_PATH"] = str(node_modules)
+        env = dict(os.environ)
+        env["QACLAN_HAR_PATH"] = har_file
+        env["QACLAN_START_URL"] = url
+        from cli.runtime_setup import browsers_path_if_present
+        bp = browsers_path_if_present()
+        if bp:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
 
         proc = subprocess.Popen(
-            [node_cmd, harness_file],
+            [python_cmd, harness_file],
             cwd=capture_dir,
             env=env,
             stdout=subprocess.DEVNULL,
@@ -2386,7 +2432,7 @@ const captureFile = {json.dumps(capture_file)};
                 "status": "recording",
                 "proc": proc,
                 "capture_dir": capture_dir,
-                "har_file": capture_file.replace(".json", ".har"),
+                "har_file": har_file,
             }
 
         logger.info("record_start: session %s launched (pid %d)", session_id, proc.pid)
@@ -2456,6 +2502,7 @@ def record_status():
 - [ ] Step 2: Create `web/api/routes/api_runs.py`:
 
 ```python
+from __future__ import annotations
 import logging
 from flask import Blueprint, request, jsonify
 from web.api.repositories.api_run_repo import ApiRunRepo
@@ -2722,8 +2769,8 @@ Replace that block with:
             (suite_id,),
         ).fetchall()
         if not items:
-            logger.warning("execute_run: suite %s has no scripts", suite_id)
-            return jsonify({"ok": False, "error": "Suite has no scripts"}), 400
+            logger.warning("execute_run: suite %s has no items", suite_id)
+            return jsonify({"ok": False, "error": "Suite has no items"}), 400
 ```
 
 Replace with:
@@ -2878,6 +2925,7 @@ git commit -m "feat: extend suite_items for api_request type; dispatch by item_t
 - [ ] Step 1: Create `cli/commands/api_cmd.py`:
 
 ```python
+from __future__ import annotations
 import json
 import logging
 import sys
@@ -2997,7 +3045,7 @@ def api_run(name_or_id, collection, env):
             val = v["value"]
             if v["is_secret"] and val:
                 try:
-                    from cli.commands.web.auth import decrypt
+                    from cli.crypto import decrypt
                     val = decrypt(val)
                 except Exception:
                     pass
@@ -3012,26 +3060,12 @@ def api_run(name_or_id, collection, env):
         if not col_row:
             console.print(f"[red]Collection '{collection}' not found[/red]")
             sys.exit(1)
-        reqs = conn.execute(
-            "SELECT * FROM api_requests WHERE collection_id = ? ORDER BY created_at",
-            (col_row["id"],),
-        ).fetchall()
+        from web.api.repositories.request_repo import RequestRepo
+        reqs = RequestRepo().list(pid, collection_id=col_row["id"])
         console.print(f"[cyan]Running collection '{collection}' ({len(reqs)} requests)...[/cyan]\n")
         state: dict = {}
         passed = failed = 0
-        for req in reqs:
-            req_dict = dict(req)
-            for key in ("headers", "params", "assertions"):
-                if isinstance(req_dict.get(key), str):
-                    try:
-                        req_dict[key] = json.loads(req_dict[key])
-                    except (ValueError, TypeError):
-                        req_dict[key] = []
-            if isinstance(req_dict.get("auth_config"), str):
-                try:
-                    req_dict["auth_config"] = json.loads(req_dict["auth_config"])
-                except (ValueError, TypeError):
-                    req_dict["auth_config"] = {}
+        for req_dict in reqs:
             result = run_api_request(req_dict, env_vars, state)
             status = result["status"]
             status_code = result.get("status_code", "—")
@@ -3045,7 +3079,7 @@ def api_run(name_or_id, collection, env):
                 console.print(f"    [red]Error: {result['error_message']}[/red]")
             for ar in result.get("assertion_results", []):
                 ar_color = "green" if ar["passed"] else "red"
-                console.print(f"    [{ar_color}]{'✓' if ar['passed'] else '✗'}[/{ar_color}] {ar['type']} {ar.get('op','')} {ar.get('value','')}")
+                console.print(f"    [{ar_color}]{'✓' if ar['passed'] else '✗'}[/{ar_color}] {ar['type']} {ar.get('op', '')} {ar.get('value', '')}")
             if status == "PASSED":
                 passed += 1
             else:
@@ -3054,25 +3088,20 @@ def api_run(name_or_id, collection, env):
         console.print(f"\n[{summary_color}]{'PASSED' if failed == 0 else 'FAILED'}[/{summary_color}] — {passed} passed, {failed} failed")
     else:
         # Single request by name or ID
-        req_row = conn.execute(
-            "SELECT * FROM api_requests WHERE project_id = ? AND (id = ? OR name = ?) LIMIT 1",
-            (pid, name_or_id, name_or_id),
-        ).fetchone()
-        if not req_row:
+        from web.api.repositories.request_repo import RequestRepo
+        _req_repo = RequestRepo()
+        req_dict = _req_repo.get(name_or_id, pid)
+        if req_dict is None:
+            # Try by name
+            rows = conn.execute(
+                "SELECT id FROM api_requests WHERE project_id = ? AND name = ? LIMIT 1",
+                (pid, name_or_id),
+            ).fetchone()
+            if rows:
+                req_dict = _req_repo.get(rows["id"], pid)
+        if req_dict is None:
             console.print(f"[red]Request '{name_or_id}' not found[/red]")
             sys.exit(1)
-        req_dict = dict(req_row)
-        for key in ("headers", "params", "assertions"):
-            if isinstance(req_dict.get(key), str):
-                try:
-                    req_dict[key] = json.loads(req_dict[key])
-                except (ValueError, TypeError):
-                    req_dict[key] = []
-        if isinstance(req_dict.get("auth_config"), str):
-            try:
-                req_dict["auth_config"] = json.loads(req_dict["auth_config"])
-            except (ValueError, TypeError):
-                req_dict["auth_config"] = {}
 
         console.print(f"[cyan]Running '{req_dict['name']}' ({req_dict['method']} {req_dict['url']})...[/cyan]")
         result = run_api_request(req_dict, env_vars, {})
@@ -3109,45 +3138,18 @@ def api_export(collection, output):
         console.print(f"[red]Collection '{collection}' not found[/red]")
         sys.exit(1)
 
-    reqs = conn.execute(
-        "SELECT * FROM api_requests WHERE collection_id = ? ORDER BY created_at",
-        (col_row["id"],),
-    ).fetchall()
+    from web.api.repositories.request_repo import RequestRepo
+    from cli.api_discovery.bruno_parser import request_to_bru
+    reqs = RequestRepo().list(pid, collection_id=col_row["id"])
 
     out_dir = Path(output) / collection
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for req in reqs:
         r = dict(req)
-        headers = json.loads(r.get("headers") or "[]")
-        bru_lines = [
-            "meta {",
-            f"  name: {r['name']}",
-            f"  method: {r['method']}",
-            "  seq: 1",
-            "}",
-            "",
-            f"{r['method'].lower()} {{",
-            f"  url: {r['url']}",
-            "}",
-            "",
-        ]
-        if headers:
-            bru_lines.append("headers {")
-            for h in headers:
-                prefix = "" if h.get("enabled", True) else "~"
-                bru_lines.append(f"  {prefix}{h['key']}: {h['value']}")
-            bru_lines.append("}")
-            bru_lines.append("")
-        if r.get("body") and r.get("body_type") == "raw":
-            bru_lines.append("body:json {")
-            for line in r["body"].splitlines():
-                bru_lines.append(f"  {line}")
-            bru_lines.append("}")
-            bru_lines.append("")
-
+        content = request_to_bru(r)
         safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in r["name"])
-        (out_dir / f"{safe_name}.bru").write_text("\n".join(bru_lines), encoding="utf-8")
+        (out_dir / f"{safe_name}.bru").write_text(content, encoding="utf-8")
 
     console.print(f"[green]Exported {len(reqs)} requests to {out_dir}[/green]")
 
@@ -3238,29 +3240,41 @@ def api_record(url):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         har_file = os.path.join(tmpdir, "captured.har")
-        harness = f"""
-const {{ chromium }} = require('playwright');
-(async () => {{
-  const browser = await chromium.launch({{ headless: false }});
-  const context = await browser.newContext({{ recordHar: {{ path: {json.dumps(har_file)} }} }});
-  const page = await context.newPage();
-  await page.goto({json.dumps(url)});
-  // Wait until browser is closed
-  await browser.waitForEvent('disconnected');
-  await context.close();
-}})();
-"""
-        harness_file = os.path.join(tmpdir, "record.js")
+
+        # Python harness — waits for user to close the browser window, which
+        # triggers the 'disconnected' event and flushes the HAR via ctx.close().
+        harness = (
+            "import asyncio, os\n"
+            "from playwright.async_api import async_playwright\n"
+            "\n"
+            "HAR_PATH = os.environ['QACLAN_HAR_PATH']\n"
+            "START_URL = os.environ['QACLAN_START_URL']\n"
+            "\n"
+            "async def main():\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=False)\n"
+            "        ctx = await browser.new_context(record_har_path=HAR_PATH)\n"
+            "        page = await ctx.new_page()\n"
+            "        await page.goto(START_URL)\n"
+            "        await browser.wait_for_event('disconnected')\n"
+            "        await ctx.close()\n"
+            "\n"
+            "asyncio.run(main())\n"
+        )
+        harness_file = os.path.join(tmpdir, "record.py")
         Path(harness_file).write_text(harness, encoding="utf-8")
 
-        node = runtime_setup.node_path()
-        node_cmd = str(node) if node else "node"
+        venv_py = runtime_setup.venv_python()
+        python_cmd = str(venv_py) if venv_py.exists() else "python3"
         env = os.environ.copy()
-        node_modules = runtime_setup.node_modules_path()
-        if node_modules:
-            env["NODE_PATH"] = str(node_modules)
+        env["QACLAN_HAR_PATH"] = har_file
+        env["QACLAN_START_URL"] = url
+        from cli.runtime_setup import browsers_path_if_present
+        bp = browsers_path_if_present()
+        if bp:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
 
-        proc = subprocess.run([node_cmd, harness_file], cwd=tmpdir, env=env)
+        proc = subprocess.run([python_cmd, harness_file], cwd=tmpdir, env=env)
 
         if not os.path.exists(har_file):
             console.print("[red]No HAR file captured.[/red]")
@@ -5152,7 +5166,7 @@ def run_script_solo(script_id):
             if not env_row:
                 return jsonify({"ok": False, "error": f"Environment '{env_name}' not found"}), 404
             environment_id = env_row["id"]
-            from cli.commands.web.auth import decrypt
+            from cli.crypto import decrypt
             for v in conn.execute("SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
                                   (env_row["id"],)).fetchall():
                 val = v["value"]
@@ -5443,3 +5457,19 @@ Confirm all spec sections are covered before marking this plan complete:
 - [ ] **showRunResults API items** — api_request items shown with [API] badge, status_code, assertions (Task 16)
 - [ ] **POST /api/scripts/<id>/run** — solo run endpoint in scripts.py (Task 17)
 - [ ] **Run Script button** — in viewScriptModal footer; shows inline result panel (Task 17)
+
+---
+
+## Revision Notes (applied after initial draft)
+
+1. **Sandbox f-string bug fixed** — `_build_python_sandbox` and `_build_js_sandbox` now use string concatenation to avoid f-string misinterpreting `{` and `}` in user scripts.
+2. **`runtime_setup` API corrected** — `venv_python()`, `node_bin("node")`, `NODE_MODULES` are the correct names.
+3. **`decrypt` import corrected** — `from cli.crypto import decrypt` (not `cli.commands.web.auth`).
+4. **Collection run made in-memory** — `run_collection()` no longer creates bogus `suite_runs` rows.
+5. **Env loading extracted** — `cli/env_loader.py` eliminates 3× duplication of decrypt+load logic.
+6. **Bruno export extracted** — `request_to_bru()` in `bruno_parser.py` eliminates duplicate .bru building in route and CLI.
+7. **`RequestRepo.count_by_collection()` removed** — dead code; `CollectionRepo.list()` already counts via SQL.
+8. **CLI uses `RequestRepo`** — no more manual JSON deserialization in CLI commands.
+9. **`from __future__ import annotations` added** — all new Python files, for Python < 3.10 compatibility.
+10. **`PRAGMA foreign_keys = OFF/ON`** — wrapped around suite_items table recreation in migration.
+11. **"Suite has no items"** — corrected guard error message after LEFT JOIN change.
