@@ -140,6 +140,7 @@ def init_db():
     _migrate_script_language(conn)
     _migrate_script_wait_timeout(conn)
     _migrate_error_detail(conn)
+    _migrate_api_tables(conn)
 
 
 def _migrate_error_detail(conn):
@@ -152,6 +153,102 @@ def _migrate_error_detail(conn):
         conn.execute("ALTER TABLE script_runs ADD COLUMN error_detail TEXT")
     except Exception:
         pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_tables(conn):
+    """Create api_collections, api_requests, api_runs tables and extend suite_items."""
+    # 1. api_collections
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_collections (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 2. api_requests
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_requests (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            feature_id TEXT REFERENCES features(id) ON DELETE SET NULL,
+            collection_id TEXT REFERENCES api_collections(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            method TEXT NOT NULL DEFAULT 'GET',
+            url TEXT NOT NULL,
+            headers TEXT NOT NULL DEFAULT '[]',
+            params TEXT NOT NULL DEFAULT '[]',
+            body_type TEXT DEFAULT NULL,
+            body TEXT DEFAULT NULL,
+            auth_type TEXT NOT NULL DEFAULT 'none',
+            auth_config TEXT NOT NULL DEFAULT '{}',
+            pre_script TEXT DEFAULT NULL,
+            pre_lang TEXT DEFAULT 'js',
+            post_script TEXT DEFAULT NULL,
+            post_lang TEXT DEFAULT 'js',
+            assertions TEXT NOT NULL DEFAULT '[]',
+            follow_redirects INTEGER DEFAULT 1,
+            timeout_ms INTEGER DEFAULT 30000,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 3. api_runs
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_runs (
+            id TEXT PRIMARY KEY,
+            suite_run_id TEXT NOT NULL REFERENCES suite_runs(id) ON DELETE CASCADE,
+            api_request_id TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            order_index INTEGER NOT NULL DEFAULT 0,
+            status TEXT,
+            status_code INTEGER,
+            response_body TEXT,
+            response_headers TEXT,
+            duration_ms INTEGER,
+            assertion_results TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            finished_at TEXT
+        )
+    """)
+
+    # 4. Recreate suite_items with nullable script_id + item_type + api_request_id
+    #    Guard: skip if item_type column already exists
+    has_item_type = conn.execute(
+        "SELECT COUNT(*) FROM pragma_table_info('suite_items') WHERE name='item_type'"
+    ).fetchone()[0]
+    if not has_item_type:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("ALTER TABLE suite_items RENAME TO _suite_items_old")
+        conn.execute("""
+            CREATE TABLE suite_items (
+                id TEXT PRIMARY KEY,
+                suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
+                script_id TEXT REFERENCES scripts(id) ON DELETE CASCADE,
+                api_request_id TEXT REFERENCES api_requests(id) ON DELETE CASCADE,
+                item_type TEXT NOT NULL DEFAULT 'script',
+                order_index INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO suite_items (id, suite_id, script_id, item_type, order_index, created_at)
+            SELECT id, suite_id, script_id, 'script', order_index, created_at
+            FROM _suite_items_old
+        """)
+        conn.execute("DROP TABLE _suite_items_old")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    # 5. Add description column to suites (safe — nullable, no default needed)
+    has_desc = conn.execute(
+        "SELECT COUNT(*) FROM pragma_table_info('suites') WHERE name='description'"
+    ).fetchone()[0]
+    if not has_desc:
+        conn.execute("ALTER TABLE suites ADD COLUMN description TEXT")
+
     conn.commit()
 
 
