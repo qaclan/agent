@@ -4,6 +4,21 @@
  * Loaded as <script type="module"> so it does not block the classic app.js.
  */
 
+// Expose a global api() helper for ES module views (app.js's api() is a local closure)
+if (!window.api) {
+  window.api = async function api(method, path, body = null) {
+    try {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api' + path, opts);
+      const data = await res.json();
+      return data;
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  };
+}
+
 // Lazy import views to keep initial load fast
 async function _loadViews() {
   const [
@@ -54,8 +69,8 @@ function renderApiPage(container) {
   _getViews().then(({ renderCollectionsView, renderRequestEditor, showDiscoverModal }) => {
     renderCollectionsView(
       document.getElementById('api-collections-panel'),
-      (requestId) => {
-        renderRequestEditor(document.getElementById('api-main-content'), requestId);
+      (requestId, defaultCollectionId) => {
+        renderRequestEditor(document.getElementById('api-main-content'), requestId, defaultCollectionId);
       }
     );
 
