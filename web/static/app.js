@@ -2119,7 +2119,8 @@ async function viewScriptModal(id) {
       </div>
       <div id="view-script-editor-host"></div>
     </div>`, [
-    { label: 'Close', cls: 'btn-ghost', action: closeModal }
+    { label: 'Close', cls: 'btn-ghost', action: closeModal },
+    { label: '▶ Run Script', cls: 'btn-primary', action: () => runScriptSolo(s.id, s.name) }
   ], 'Script ID: ' + s.id, 'lg')
 
   // Render the editor after the modal is in the DOM
@@ -2131,6 +2132,54 @@ async function viewScriptModal(id) {
       editor.destroy()
       if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
     }
+  }
+}
+
+async function runScriptSolo(scriptId, scriptName) {
+  // Replace modal footer to show running state
+  const footer = document.querySelector('.modal-footer')
+  if (footer) {
+    footer.innerHTML = '<span class="text-muted text-sm">Running...</span>'
+  }
+
+  const res = await api('POST', `/scripts/${scriptId}/run`, { headless: false })
+
+  if (res.ok === false) {
+    toast('Run failed: ' + res.error, 'error')
+    if (footer) footer.innerHTML = `<button class="btn btn-ghost" onclick="closeModal()">Close</button>`
+    return
+  }
+
+  const r = res.result
+  const statusColor = r.status === 'PASSED' ? 'var(--success, #16a34a)' : 'var(--danger, #dc2626)'
+  const statusBadge = r.status === 'PASSED'
+    ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
+    : '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
+
+  // Inject result panel into modal body
+  const body = document.querySelector('.modal-body')
+  if (body) {
+    const resultDiv = document.createElement('div')
+    resultDiv.style.cssText = 'margin-top:16px;padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary)'
+    resultDiv.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+        ${statusBadge}
+        <span class="text-muted text-sm">${r.duration_ms || 0}ms</span>
+      </div>
+      ${r.error_message ? `<pre style="font-size:11px;color:var(--danger);white-space:pre-wrap;margin:0">${escHtml(r.error_message)}</pre>` : ''}
+      ${r.screenshot_path ? (() => {
+        const filename = r.screenshot_path.split(/[\\/]/).pop()
+        return `<div style="margin-top:8px"><img src="/api/screenshots/${encodeURIComponent(filename)}" style="max-width:100%;border-radius:4px;cursor:pointer" onclick="window.open(this.src,'_blank')" alt="Screenshot"></div>`
+      })() : ''}
+    `
+    body.appendChild(resultDiv)
+  }
+
+  if (footer) {
+    footer.innerHTML = `
+      <button class="btn btn-ghost" onclick="closeModal()">Close</button>
+      <button class="btn btn-primary" onclick="runScriptSolo('${scriptId}','${escHtml(scriptName)}')">▶ Run Again</button>
+    `
   }
 }
 
