@@ -1975,6 +1975,64 @@ class DiscoveryService:
 
         logger.info("import_bruno: saved %d requests from %d files", total, len(bru_files))
         return {"imported": total}
+
+    # ------------------------------------------------------------------ recording
+    def launch_recorder(self, url: str, har_path: str) -> "subprocess.Popen":
+        """Non-blocking. Launch Playwright browser to record HAR. Stop via proc.terminate()."""
+        harness = (
+            "import asyncio, os, signal\n"
+            "from playwright.async_api import async_playwright\n"
+            "async def main():\n"
+            "    stop = asyncio.Event()\n"
+            "    loop = asyncio.get_event_loop()\n"
+            "    loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
+            "    loop.add_signal_handler(signal.SIGINT, stop.set)\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=False)\n"
+            "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
+            "        await (await ctx.new_page()).goto(os.environ['QACLAN_START_URL'])\n"
+            "        await stop.wait()\n"
+            "        await ctx.close()\n"
+            "asyncio.run(main())\n"
+        )
+        return self._spawn_harness(url, har_path, harness, blocking=False)
+
+    def record_sync(self, url: str, har_path: str) -> None:
+        """Blocking. Returns when user closes browser. HAR flushed via ctx.close()."""
+        harness = (
+            "import asyncio, os\n"
+            "from playwright.async_api import async_playwright\n"
+            "async def main():\n"
+            "    async with async_playwright() as pw:\n"
+            "        browser = await pw.chromium.launch(headless=False)\n"
+            "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
+            "        await (await ctx.new_page()).goto(os.environ['QACLAN_START_URL'])\n"
+            "        await browser.wait_for_event('disconnected')\n"
+            "        await ctx.close()\n"
+            "asyncio.run(main())\n"
+        )
+        self._spawn_harness(url, har_path, harness, blocking=True)
+
+    def _spawn_harness(self, url: str, har_path: str, harness_src: str, blocking: bool):
+        import os, subprocess, tempfile
+        from cli import runtime_setup
+        d = tempfile.mkdtemp(prefix="qaclan_record_")
+        f = os.path.join(d, "record.py")
+        with open(f, "w") as fh:
+            fh.write(harness_src)
+        venv_py = runtime_setup.venv_python()
+        env = dict(os.environ)
+        env["QACLAN_HAR_PATH"] = har_path
+        env["QACLAN_START_URL"] = url
+        bp = runtime_setup.browsers_path_if_present()
+        if bp:
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
+        cmd = [str(venv_py) if venv_py.exists() else "python3", f]
+        if blocking:
+            subprocess.run(cmd, cwd=d, env=env)
+        else:
+            return subprocess.Popen(cmd, cwd=d, env=env,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 ```
 
 - [ ] Step 2: Commit — `git add web/api/services/discovery_service.py && git commit -m "feat: add discovery service for HAR, OpenAPI, Postman, Bruno import"`
@@ -2366,10 +2424,6 @@ def discover_bruno():
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
     try:
-        import subprocess
-        import sys
-        from cli import runtime_setup
-
         session_id = str(uuid.uuid4())
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
@@ -2378,54 +2432,8 @@ def record_start():
         capture_dir = tempfile.mkdtemp(prefix="qaclan_record_")
         har_file = os.path.join(capture_dir, "capture.har")
 
-        # Python harness — uses asyncio SIGTERM handler so context.close() is
-        # guaranteed to flush the HAR file when record_stop sends SIGTERM.
-        # Node harness was rejected: `new Promise(()=>{})` never resolves on
-        # SIGTERM so context.close() is never called and the HAR is never written.
-        harness = (
-            "import asyncio, os, signal\n"
-            "from playwright.async_api import async_playwright\n"
-            "\n"
-            "HAR_PATH = os.environ['QACLAN_HAR_PATH']\n"
-            "START_URL = os.environ['QACLAN_START_URL']\n"
-            "\n"
-            "async def main():\n"
-            "    stop = asyncio.Event()\n"
-            "    loop = asyncio.get_event_loop()\n"
-            "    loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
-            "    loop.add_signal_handler(signal.SIGINT, stop.set)\n"
-            "    async with async_playwright() as pw:\n"
-            "        browser = await pw.chromium.launch(headless=False)\n"
-            "        ctx = await browser.new_context(record_har_path=HAR_PATH)\n"
-            "        page = await ctx.new_page()\n"
-            "        await page.goto(START_URL)\n"
-            "        await stop.wait()\n"
-            "        await ctx.close()\n"
-            "\n"
-            "asyncio.run(main())\n"
-        )
-        harness_file = os.path.join(capture_dir, "record.py")
-        with open(harness_file, "w") as hf:
-            hf.write(harness)
-
-        venv_py = runtime_setup.venv_python()
-        python_cmd = str(venv_py) if venv_py.exists() else "python3"
-
-        env = dict(os.environ)
-        env["QACLAN_HAR_PATH"] = har_file
-        env["QACLAN_START_URL"] = url
-        from cli.runtime_setup import browsers_path_if_present
-        bp = browsers_path_if_present()
-        if bp:
-            env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
-
-        proc = subprocess.Popen(
-            [python_cmd, harness_file],
-            cwd=capture_dir,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        from web.api.services.discovery_service import DiscoveryService
+        proc = DiscoveryService().launch_recorder(url, har_file)
 
         with _sessions_lock:
             _recording_sessions[session_id] = {
@@ -2919,7 +2927,7 @@ git commit -m "feat: extend suite_items for api_request type; dispatch by item_t
 - Modify: `qaclan.py` (add `api_group` registration — 2 lines)
 
 **Interfaces:**
-- Consumes: Task 3 (api_runner), Task 5 (parsers), Task 2 (repos via DB)
+- Consumes: Task 6 (CollectionService), Task 7 (RequestService), Task 8 (RunnerService), Task 9 (DiscoveryService), Task 5 (bruno_parser for export)
 - Produces: `qaclan api` command group
 
 - [ ] Step 1: Create `cli/commands/api_cmd.py`:
@@ -2935,7 +2943,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from cli.db import get_conn, generate_id, init_db
+from cli.db import init_db
 from cli.config import get_active_project_id
 
 logger = logging.getLogger("qaclan.api_cmd")
@@ -2951,6 +2959,21 @@ def _require_project():
     return pid
 
 
+def _print_request_result(r: dict):
+    color = "green" if r["status"] == "PASSED" else "red"
+    console.print(f"[{color}]{r['status']}[/{color}] {r.get('method','')} {r.get('url','')} → {r.get('status_code','')} ({r.get('duration_ms',0)}ms)")
+    for a in r.get("assertions", []):
+        mark = "✓" if a["passed"] else "✗"
+        console.print(f"  {mark} {a['name']}: {a.get('message','')}")
+
+
+def _print_collection_result(r: dict):
+    color = "green" if r["status"] == "PASSED" else "red"
+    console.print(f"[{color}]{r['status']}[/{color}] {r['passed']}/{r['total']} passed")
+    for item in r.get("results", []):
+        _print_request_result(item)
+
+
 @click.group("api")
 def api_group():
     """API testing commands."""
@@ -2958,158 +2981,86 @@ def api_group():
 
 
 @api_group.command("list")
-@click.option("--collection", default=None, help="Filter by collection name")
+@click.option("--collection", "-c", help="Show requests inside this collection")
 def api_list(collection):
-    """List API requests in the active project."""
+    """List API collections or requests in the active project."""
     pid = _require_project()
-    conn = get_conn()
+    from web.api.services.collection_service import CollectionService
+    from web.api.services.request_service import RequestService
 
-    col_id = None
     if collection:
-        col_row = conn.execute(
-            "SELECT id FROM api_collections WHERE project_id = ? AND name = ?",
-            (pid, collection),
-        ).fetchone()
-        if not col_row:
+        cols = CollectionService().list(pid)
+        col = next((c for c in cols if c["name"] == collection), None)
+        if col is None:
             console.print(f"[red]Collection '{collection}' not found[/red]")
             sys.exit(1)
-        col_id = col_row["id"]
-
-    if col_id:
-        rows = conn.execute(
-            "SELECT ar.id, ar.name, ar.method, ar.url, ac.name AS collection_name "
-            "FROM api_requests ar LEFT JOIN api_collections ac ON ar.collection_id = ac.id "
-            "WHERE ar.project_id = ? AND ar.collection_id = ? ORDER BY ar.created_at",
-            (pid, col_id),
-        ).fetchall()
+        reqs = RequestService().list(pid, collection_id=col["id"])
+        if not reqs:
+            console.print("[yellow]No requests found in this collection.[/yellow]")
+            return
+        table = Table(title=f"Requests in '{collection}'", show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Method", width=8)
+        table.add_column("URL", max_width=60)
+        table.add_column("ID", style="dim")
+        for r in reqs:
+            method_style = {
+                "GET": "green", "POST": "blue", "PUT": "yellow",
+                "PATCH": "yellow", "DELETE": "red",
+            }.get(r["method"], "white")
+            table.add_row(
+                r["name"],
+                f"[{method_style}]{r['method']}[/{method_style}]",
+                r["url"],
+                r["id"],
+            )
+        console.print(table)
     else:
-        rows = conn.execute(
-            "SELECT ar.id, ar.name, ar.method, ar.url, ac.name AS collection_name "
-            "FROM api_requests ar LEFT JOIN api_collections ac ON ar.collection_id = ac.id "
-            "WHERE ar.project_id = ? ORDER BY ar.created_at",
-            (pid,),
-        ).fetchall()
-
-    if not rows:
-        console.print("[yellow]No API requests found.[/yellow]")
-        return
-
-    table = Table(show_header=True, header_style="bold cyan")
-    table.add_column("Name", style="bold")
-    table.add_column("Method", width=8)
-    table.add_column("URL", max_width=60)
-    table.add_column("Collection")
-    table.add_column("ID", style="dim")
-
-    for r in rows:
-        method_style = {
-            "GET": "green", "POST": "blue", "PUT": "yellow",
-            "PATCH": "yellow", "DELETE": "red",
-        }.get(r["method"], "white")
-        table.add_row(
-            r["name"],
-            f"[{method_style}]{r['method']}[/{method_style}]",
-            r["url"],
-            r["collection_name"] or "—",
-            r["id"],
-        )
-
-    console.print(table)
+        cols = CollectionService().list(pid)
+        if not cols:
+            console.print("[yellow]No collections found.[/yellow]")
+            return
+        table = Table(title="Collections", show_header=True, header_style="bold cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Requests", justify="right")
+        table.add_column("ID", style="dim")
+        for c in cols:
+            table.add_row(c["name"], str(c.get("request_count", 0)), c["id"])
+        console.print(table)
 
 
 @api_group.command("run")
 @click.argument("name_or_id")
-@click.option("--collection", default=None, help="Run all requests in named collection")
-@click.option("--env", default=None, help="Environment name for variable resolution")
+@click.option("--collection", "-c", help="Collection name (required when running full collection)")
+@click.option("--env", "-e", help="Environment name")
 def api_run(name_or_id, collection, env):
     """Run a single API request or all requests in a collection."""
     pid = _require_project()
-    conn = get_conn()
-
-    from cli.api_runner import run_api_request
-
-    # Load env vars
-    env_vars = {}
-    if env:
-        env_row = conn.execute(
-            "SELECT id FROM environments WHERE project_id = ? AND name = ?", (pid, env)
-        ).fetchone()
-        if not env_row:
-            console.print(f"[red]Environment '{env}' not found[/red]")
-            sys.exit(1)
-        vars_rows = conn.execute(
-            "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
-            (env_row["id"],),
-        ).fetchall()
-        for v in vars_rows:
-            val = v["value"]
-            if v["is_secret"] and val:
-                try:
-                    from cli.crypto import decrypt
-                    val = decrypt(val)
-                except Exception:
-                    pass
-            env_vars[v["key"]] = val
+    from web.api.services.runner_service import RunnerService
+    from web.api.services.collection_service import CollectionService
+    from web.api.services.request_service import RequestService
+    svc = RunnerService()
 
     if collection:
-        # Run all requests in collection
-        col_row = conn.execute(
-            "SELECT id, name FROM api_collections WHERE project_id = ? AND name = ?",
-            (pid, collection),
-        ).fetchone()
-        if not col_row:
+        # run whole collection
+        cols = CollectionService().list(pid)
+        col = next((c for c in cols if c["name"] == collection or c["id"] == collection), None)
+        if col is None:
             console.print(f"[red]Collection '{collection}' not found[/red]")
             sys.exit(1)
-        from web.api.repositories.request_repo import RequestRepo
-        reqs = RequestRepo().list(pid, collection_id=col_row["id"])
-        console.print(f"[cyan]Running collection '{collection}' ({len(reqs)} requests)...[/cyan]\n")
-        state: dict = {}
-        passed = failed = 0
-        for req_dict in reqs:
-            result = run_api_request(req_dict, env_vars, state)
-            status = result["status"]
-            status_code = result.get("status_code", "—")
-            duration = result.get("duration_ms", 0)
-            color = "green" if status == "PASSED" else "red"
-            console.print(
-                f"  [{color}]{status}[/{color}] {req_dict['method']} {req_dict['url'][:60]} "
-                f"→ {status_code} ({duration}ms)"
-            )
-            if result.get("error_message"):
-                console.print(f"    [red]Error: {result['error_message']}[/red]")
-            for ar in result.get("assertion_results", []):
-                ar_color = "green" if ar["passed"] else "red"
-                console.print(f"    [{ar_color}]{'✓' if ar['passed'] else '✗'}[/{ar_color}] {ar['type']} {ar.get('op', '')} {ar.get('value', '')}")
-            if status == "PASSED":
-                passed += 1
-            else:
-                failed += 1
-        summary_color = "green" if failed == 0 else "red"
-        console.print(f"\n[{summary_color}]{'PASSED' if failed == 0 else 'FAILED'}[/{summary_color}] — {passed} passed, {failed} failed")
+        console.print(f"[cyan]Running collection '{collection}'...[/cyan]\n")
+        result = svc.run_collection(col["id"], pid, env_name=env)
+        _print_collection_result(result)
     else:
-        # Single request by name or ID
-        from web.api.repositories.request_repo import RequestRepo
-        _req_repo = RequestRepo()
-        req_dict = _req_repo.get(name_or_id, pid)
-        if req_dict is None:
-            # Try by name
-            rows = conn.execute(
-                "SELECT id FROM api_requests WHERE project_id = ? AND name = ? LIMIT 1",
-                (pid, name_or_id),
-            ).fetchone()
-            if rows:
-                req_dict = _req_repo.get(rows["id"], pid)
-        if req_dict is None:
+        # run single request by id or name
+        reqs = RequestService().list(pid)
+        req = next((r for r in reqs if r["id"] == name_or_id or r["name"] == name_or_id), None)
+        if req is None:
             console.print(f"[red]Request '{name_or_id}' not found[/red]")
             sys.exit(1)
-
-        console.print(f"[cyan]Running '{req_dict['name']}' ({req_dict['method']} {req_dict['url']})...[/cyan]")
-        result = run_api_request(req_dict, env_vars, {})
-        status = result["status"]
-        color = "green" if status == "PASSED" else "red"
-        console.print(f"\n[{color}]{status}[/{color}] — {result.get('status_code', '—')} in {result.get('duration_ms', 0)}ms")
-        if result.get("error_message"):
-            console.print(f"[red]Error: {result['error_message']}[/red]")
+        console.print(f"[cyan]Running '{req['name']}' ({req['method']} {req['url']})...[/cyan]")
+        result = svc.run_request(req["id"], pid, env_name=env)
+        _print_request_result(result)
         if result.get("response_body"):
             console.print("\n[bold]Response Body:[/bold]")
             try:
@@ -3117,40 +3068,30 @@ def api_run(name_or_id, collection, env):
                 console.print_json(json.dumps(parsed, indent=2))
             except (ValueError, TypeError):
                 console.print(result["response_body"][:1000])
-        for ar in result.get("assertion_results", []):
-            ar_color = "green" if ar["passed"] else "red"
-            console.print(f"  [{ar_color}]{'✓' if ar['passed'] else '✗'}[/{ar_color}] {ar['type']} {ar.get('op','')} {ar.get('value','')} (actual: {ar.get('actual','')})")
 
 
 @api_group.command("export")
-@click.option("--collection", required=True, help="Collection name to export")
-@click.option("--output", required=True, help="Output directory path")
+@click.argument("collection")
+@click.option("--output", "-o", default=".", help="Output directory for .bru files")
 def api_export(collection, output):
     """Export a collection as Bruno .bru files."""
     pid = _require_project()
-    conn = get_conn()
+    from web.api.services.collection_service import CollectionService
+    from web.api.services.request_service import RequestService
+    from cli.api_discovery.bruno_parser import request_to_bru
 
-    col_row = conn.execute(
-        "SELECT id, name FROM api_collections WHERE project_id = ? AND name = ?",
-        (pid, collection),
-    ).fetchone()
-    if not col_row:
+    cols = CollectionService().list(pid)
+    col = next((c for c in cols if c["name"] == collection or c["id"] == collection), None)
+    if col is None:
         console.print(f"[red]Collection '{collection}' not found[/red]")
         sys.exit(1)
 
-    from web.api.repositories.request_repo import RequestRepo
-    from cli.api_discovery.bruno_parser import request_to_bru
-    reqs = RequestRepo().list(pid, collection_id=col_row["id"])
-
-    out_dir = Path(output) / collection
+    reqs = RequestService().list(pid, collection_id=col["id"])
+    out_dir = Path(output)
     out_dir.mkdir(parents=True, exist_ok=True)
-
     for req in reqs:
-        r = dict(req)
-        content = request_to_bru(r)
-        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in r["name"])
-        (out_dir / f"{safe_name}.bru").write_text(content, encoding="utf-8")
-
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req["name"])
+        (out_dir / f"{safe_name}.bru").write_text(request_to_bru(req), encoding="utf-8")
     console.print(f"[green]Exported {len(reqs)} requests to {out_dir}[/green]")
 
 
@@ -3234,47 +3175,15 @@ def api_record(url):
     console.print(f"[cyan]Opening browser at {url}...[/cyan]")
     console.print("[yellow]Interact with the app, then close the browser window to stop recording.[/yellow]")
 
-    import subprocess, tempfile, os, time
-    from cli import runtime_setup
+    import os, time
     from cli.api_discovery.har_parser import parse_har
 
+    import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
         har_file = os.path.join(tmpdir, "captured.har")
 
-        # Python harness — waits for user to close the browser window, which
-        # triggers the 'disconnected' event and flushes the HAR via ctx.close().
-        harness = (
-            "import asyncio, os\n"
-            "from playwright.async_api import async_playwright\n"
-            "\n"
-            "HAR_PATH = os.environ['QACLAN_HAR_PATH']\n"
-            "START_URL = os.environ['QACLAN_START_URL']\n"
-            "\n"
-            "async def main():\n"
-            "    async with async_playwright() as pw:\n"
-            "        browser = await pw.chromium.launch(headless=False)\n"
-            "        ctx = await browser.new_context(record_har_path=HAR_PATH)\n"
-            "        page = await ctx.new_page()\n"
-            "        await page.goto(START_URL)\n"
-            "        await browser.wait_for_event('disconnected')\n"
-            "        await ctx.close()\n"
-            "\n"
-            "asyncio.run(main())\n"
-        )
-        harness_file = os.path.join(tmpdir, "record.py")
-        Path(harness_file).write_text(harness, encoding="utf-8")
-
-        venv_py = runtime_setup.venv_python()
-        python_cmd = str(venv_py) if venv_py.exists() else "python3"
-        env = os.environ.copy()
-        env["QACLAN_HAR_PATH"] = har_file
-        env["QACLAN_START_URL"] = url
-        from cli.runtime_setup import browsers_path_if_present
-        bp = browsers_path_if_present()
-        if bp:
-            env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
-
-        proc = subprocess.run([python_cmd, harness_file], cwd=tmpdir, env=env)
+        from web.api.services.discovery_service import DiscoveryService
+        DiscoveryService().record_sync(url, har_file)
 
         if not os.path.exists(har_file):
             console.print("[red]No HAR file captured.[/red]")
