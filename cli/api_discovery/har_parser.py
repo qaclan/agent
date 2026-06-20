@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 import logging
 import re
 
@@ -90,7 +91,7 @@ def parse_har(har_json: dict) -> list[dict]:
                     k = p.get("name", "")
                     v = _redact_sensitive(k, p.get("value", ""))
                     params_list.append({"key": k, "value": v, "enabled": True})
-                body = str(params_list)
+                body = json.dumps(params_list)
             else:
                 body_type = "raw"
                 body = text

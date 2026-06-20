@@ -1,3 +1,7 @@
+function _esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 export function showHarImport() {
   const body = `
     <div id="har-drop-zone" style="border:2px dashed var(--border);border-radius:8px;padding:32px;text-align:center;cursor:pointer;margin-bottom:12px;">
@@ -65,7 +69,7 @@ export function showHarImport() {
       const label = document.createElement('label');
       label.htmlFor = `har-req-${i}`;
       label.style.cssText = 'flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      label.innerHTML = `<span class="method-badge method-${method}" style="font-size:10px;padding:1px 5px;">${method}</span> ${url.replace(/\?.*/, '')}`;
+      label.innerHTML = `<span class="method-badge method-${_esc(method)}" style="font-size:10px;padding:1px 5px;">${_esc(method)}</span> ${_esc(url.replace(/\?.*/, ''))}`;
 
       row.appendChild(cb);
       row.appendChild(label);

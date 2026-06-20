@@ -1,3 +1,7 @@
+function _esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 export function showRecordApis() {
   const body = `
     <div id="record-status-area">
@@ -19,7 +23,7 @@ export function showRecordApis() {
     if (!statusArea) return;
 
     if (!res.ok) {
-      statusArea.innerHTML = `<p style="color:var(--danger)">Failed to start recording: ${res.error}</p>`;
+      statusArea.innerHTML = `<p style="color:var(--danger)">Failed to start recording: ${_esc(res.error)}</p>`;
       return;
     }
 
@@ -70,8 +74,8 @@ export function showRecordApis() {
           <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
             <input type="checkbox" id="cap-${i}" checked>
             <label for="cap-${i}" style="flex:1;cursor:pointer">
-              <span class="method-badge method-${r.method}" style="font-size:10px;padding:1px 5px;">${r.method}</span>
-              ${r.url.replace(/\?.*/, '')}
+              <span class="method-badge method-${_esc(r.method)}" style="font-size:10px;padding:1px 5px;">${_esc(r.method)}</span>
+              ${_esc(r.url.replace(/\?.*/, ''))}
             </label>
           </div>`).join('')}
       </div>

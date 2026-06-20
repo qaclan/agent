@@ -1,3 +1,7 @@
+function _esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 export function showOpenApiImport() {
   const body = `
     <div style="margin-bottom:12px;">
@@ -37,10 +41,10 @@ export function showOpenApiImport() {
     resultDiv.style.display = '';
     if (res.ok) {
       const cols = res.collections || [];
-      resultDiv.innerHTML = `<strong>Imported ${res.imported} requests</strong> across ${cols.length} collections.<br>
-        ${cols.map(c => `• ${c.name} (${c.count})`).join('<br>')}`;
+      resultDiv.innerHTML = `<strong>Imported ${_esc(String(res.imported))} requests</strong> across ${_esc(String(cols.length))} collections.<br>
+        ${cols.map(c => `• ${_esc(c.name)} (${_esc(String(c.count))})`).join('<br>')}`;
     } else {
-      resultDiv.innerHTML = `<span style="color:var(--danger)">${res.error}</span>`;
+      resultDiv.innerHTML = `<span style="color:var(--danger)">${_esc(res.error)}</span>`;
     }
   }
 }

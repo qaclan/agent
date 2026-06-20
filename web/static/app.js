@@ -2178,7 +2178,7 @@ async function runScriptSolo(scriptId, scriptName) {
   if (footer) {
     footer.innerHTML = `
       <button class="btn btn-ghost" onclick="closeModal()">Close</button>
-      <button class="btn btn-primary" onclick="runScriptSolo('${scriptId}','${escHtml(scriptName)}')">▶ Run Again</button>
+      <button class="btn btn-primary" onclick="runScriptSolo('${scriptId}','${scriptName.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}')">▶ Run Again</button>
     `
   }
 }
