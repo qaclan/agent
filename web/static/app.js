@@ -3711,6 +3711,28 @@ async function editSuiteModal(id) {
       .filter(s => !suiteScripts.find(ss => ss.script_id === s.id))
       .map(s => `<option value="${s.id}">${escHtml(s.name)}</option>`).join('')
 
+    const allItems = (suite.items || suite.scripts?.map(s => ({...s, item_type:'script', script_id:s.script_id, script_name:s.name})) || [])
+      .sort((a,b) => a.order_index - b.order_index)
+
+    const itemsHtml = allItems.length === 0
+      ? '<p class="text-muted text-sm">No items yet.</p>'
+      : allItems.map(item => {
+          if (item.item_type === 'api_request') {
+            return `<div class="suite-item-row" data-item-id="${item.item_id}" data-item-type="api_request">
+              <span class="badge badge-neutral" style="font-size:10px">API</span>
+              <span>${escHtml(item.api_request_name || item.api_request_id)}</span>
+              <span class="text-muted text-sm">${escHtml(item.method||'')} ${escHtml(item.url||'').slice(0,40)}</span>
+              <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteItem('${id}','${item.item_id}')">×</button>
+            </div>`
+          }
+          return `<div class="suite-item-row" data-item-id="${item.item_id}" data-item-type="script">
+            <span class="badge badge-neutral" style="font-size:10px">E2E</span>
+            <span>${escHtml(item.script_name || item.name || '')}</span>
+            <button class="btn btn-xs btn-ghost" onclick="viewScriptModal('${item.script_id}')">View</button>
+            <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${item.script_id}')">×</button>
+          </div>`
+        }).join('')
+
     return `
       <div class="form-group">
         <label class="form-label">Suite Name</label>
@@ -3734,11 +3756,20 @@ async function editSuiteModal(id) {
             <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${s.script_id}')">Remove</button>
           </div>`).join('')}
       </div>
+      <div class="form-group">
+        <label class="form-label">Items</label>
+      </div>
+      <div class="suite-item-list" id="suite-item-list">
+        ${itemsHtml}
+      </div>
       ${scriptOpts ? `
       <div class="input-row">
         <select id="add-suite-script">${scriptOpts}</select>
         <button class="btn btn-sm btn-ghost" onclick="addSuiteScript('${id}')">Add</button>
-      </div>` : ''}`
+      </div>` : ''}
+      <div class="input-row" style="margin-top:8px">
+        <button class="btn btn-sm btn-ghost" onclick="addApiRequestToSuite('${id}')">+ Add API Request</button>
+      </div>`
   }
 
   showModal('Edit Suite', renderBody(), [
@@ -3822,6 +3853,39 @@ async function addSuiteScript(suiteId) {
 async function removeSuiteScript(suiteId, scriptId) {
   const res = await api('DELETE', '/suites/' + suiteId + '/scripts/' + scriptId)
   if (res.ok === false) { toast(res.error, 'error'); return }
+  editSuiteModal(suiteId)
+}
+
+async function addApiRequestToSuite(suiteId) {
+  const res = await api('GET', '/api-requests')
+  const requests = res.requests || []
+  if (!requests.length) {
+    toast('No API requests found. Create one in the API section first.', 'error')
+    return
+  }
+  const options = requests.map(r => `<option value="${r.id}">[${r.method}] ${escHtml(r.name)}</option>`).join('')
+  showModal('Add API Request to Suite', `
+    <div class="form-group">
+      <label class="form-label">Select API Request</label>
+      <select id="api-req-select" class="input-sm" style="width:100%">${options}</select>
+    </div>`, [
+    { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
+    { label: 'Add', cls: 'btn-primary', action: async () => {
+      const reqId = document.getElementById('api-req-select').value
+      const res = await api('POST', `/suites/${suiteId}/items`, { item_type: 'api_request', api_request_id: reqId })
+      if (res.ok === false) { toast(res.error, 'error'); return }
+      closeModal()
+      toast('API request added to suite')
+      editSuiteModal(suiteId)
+    }}
+  ])
+}
+
+async function removeSuiteItem(suiteId, itemId) {
+  if (!confirm('Remove this item from the suite?')) return
+  const res = await api('DELETE', `/suites/${suiteId}/items/${itemId}`)
+  if (res.ok === false) { toast(res.error, 'error'); return }
+  toast('Item removed')
   editSuiteModal(suiteId)
 }
 
@@ -3942,6 +4006,32 @@ function showRunResults(run, suiteName) {
     ${failureSummary}
     <div class="run-history-scroll">
     ${scripts.map(s => {
+      if (s.item_type === 'api_request') {
+        const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
+        const badge = s.status === 'PASSED'
+          ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
+          : s.status === 'FAILED'
+          ? '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
+          : '<span class="badge badge-neutral">ERROR</span>'
+        const assertCount = (s.assertion_results || []).length
+        const assertPass = (s.assertion_results || []).filter(a => a.passed).length
+        return `<div class="script-result-row ${cls}">
+          <div class="script-result-header">
+            <div class="script-result-name">
+              <span class="badge badge-neutral" style="font-size:10px">API</span>
+              <strong>${escHtml(s.name)}</strong>
+            </div>
+            <div class="script-result-meta">
+              ${badge}
+              ${s.status_code ? `<span class="text-muted text-sm">${s.status_code}</span>` : ''}
+              <span class="text-muted text-sm">${s.duration_ms || 0}ms</span>
+              ${assertCount ? `<span class="text-muted text-sm">${assertPass}/${assertCount} assertions</span>` : ''}
+            </div>
+          </div>
+          ${s.error_message ? `<div class="script-result-error">${escHtml(s.error_message)}</div>` : ''}
+        </div>`
+      }
+      // existing script item rendering continues below
       const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
       const badge = s.status === 'PASSED'
         ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
