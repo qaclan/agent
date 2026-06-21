@@ -8,3 +8,4 @@ python-dotenv>=1.0.0
 cryptography>=42.0.0
 httpx>=0.27.0
 jsonpath-ng>=1.6.0
+pyyaml>=6.0
