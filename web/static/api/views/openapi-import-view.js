@@ -34,7 +34,7 @@ export function showOpenApiImport() {
     } else if (urlInput?.value.trim()) {
       res = await window.api('POST', '/discover/openapi', { url: urlInput.value.trim() });
     } else {
-      alert('Provide a URL or upload a file.');
+      await window._alertDialog('Provide a URL or upload a file.');
       return;
     }
 

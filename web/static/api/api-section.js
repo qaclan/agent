@@ -17,6 +17,91 @@ if (!window.api) {
   };
 }
 
+if (!window._qcDialog) {
+  window._qcDialog = function(opts) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;';
+
+      const box = document.createElement('div');
+      box.style.cssText = 'background:var(--bg-elevated);border:1px solid var(--border-strong);border-radius:10px;padding:20px 24px;max-width:400px;width:90%;box-shadow:var(--shadow-lg);';
+
+      const msgEl = document.createElement('p');
+      msgEl.style.cssText = 'margin:0 0 4px;font-size:14px;font-weight:600;color:var(--text-primary);';
+      msgEl.textContent = opts.message;
+      box.appendChild(msgEl);
+
+      if (opts.detail) {
+        const d = document.createElement('p');
+        d.style.cssText = 'margin:0 0 12px;font-size:12px;color:var(--text-muted);line-height:1.5;';
+        d.textContent = opts.detail;
+        box.appendChild(d);
+      }
+
+      let inputEl;
+      if (opts.type === 'prompt') {
+        inputEl = document.createElement('input');
+        inputEl.type = 'text';
+        inputEl.value = opts.defaultValue || '';
+        inputEl.style.cssText = 'width:100%;box-sizing:border-box;margin-top:8px;margin-bottom:4px;padding:7px 10px;font-size:13px;border:1px solid var(--border-strong);border-radius:6px;background:var(--bg-panel);color:var(--text-primary);outline:none;';
+        box.appendChild(inputEl);
+      }
+
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px;';
+
+      function _close(val) { document.body.removeChild(overlay); resolve(val); }
+
+      if (opts.type !== 'alert') {
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button'; cancelBtn.className = 'btn btn-sm btn-ghost';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.onclick = () => _close(opts.type === 'prompt' ? null : false);
+        btns.appendChild(cancelBtn);
+      }
+
+      const okBtn = document.createElement('button');
+      okBtn.type = 'button';
+      okBtn.className = opts.confirmCls || 'btn btn-sm btn-primary';
+      okBtn.textContent = opts.confirmLabel || (opts.type === 'alert' ? 'OK' : opts.type === 'prompt' ? 'OK' : 'Confirm');
+      okBtn.onclick = () => {
+        if (opts.type === 'confirm') _close(true);
+        else if (opts.type === 'prompt') _close(inputEl?.value.trim() || null);
+        else _close(undefined);
+      };
+      btns.appendChild(okBtn);
+
+      box.appendChild(btns);
+      overlay.appendChild(box);
+      document.body.appendChild(overlay);
+
+      if (opts.type === 'alert') {
+        overlay.onclick = e => { if (e.target === overlay) _close(undefined); };
+      }
+      if (opts.type === 'prompt' && inputEl) {
+        setTimeout(() => { inputEl.focus(); inputEl.select(); }, 10);
+        inputEl.onkeydown = e => { if (e.key === 'Enter') okBtn.click(); if (e.key === 'Escape') btns.querySelector('.btn-ghost')?.click(); };
+      } else {
+        setTimeout(() => okBtn.focus(), 10);
+      }
+    });
+  };
+
+  window._alertDialog  = msg => window._qcDialog({ type: 'alert', message: msg });
+  window._confirmDialog = (msg, detail, confirmLabel, confirmCls) =>
+    window._qcDialog({ type: 'confirm', message: msg, detail, confirmLabel, confirmCls });
+  window._promptDialog = (msg, defaultValue) =>
+    window._qcDialog({ type: 'prompt', message: msg, defaultValue });
+
+  window._toast = function(msg, duration = 2000) {
+    const t = document.createElement('div');
+    t.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:10000;background:var(--success-bg);border:1px solid var(--success-border);color:var(--success);border-radius:6px;padding:8px 14px;font-size:12px;font-weight:500;box-shadow:var(--shadow-md);pointer-events:none;transition:opacity .3s;';
+    t.textContent = msg;
+    document.body.appendChild(t);
+    setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 320); }, duration);
+  };
+}
+
 async function _loadViews() {
   const [
     { renderCollectionsView },

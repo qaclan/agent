@@ -98,7 +98,7 @@ export function showRecordApis() {
     window.closeModal();
 
     if (!res.ok || !res.requests?.length) {
-      alert('No API requests captured. Make sure you interacted with the app and XHR/Fetch calls were made.');
+      await window._alertDialog('No API requests captured. Make sure you interacted with the app and XHR/Fetch calls were made.');
       return;
     }
     _showCapturedResults(res.requests, _startUrl);
@@ -173,7 +173,7 @@ export function showRecordApis() {
       { label: 'Save Selected', cls: 'btn-primary', action: async () => {
         const colName = document.getElementById('capture-col-name')?.value.trim() || 'Recorded APIs';
         const selected = requests.filter((_, i) => document.getElementById(`cap-${i}`)?.checked);
-        if (!selected.length) { alert('No requests selected.'); return; }
+        if (!selected.length) { await window._alertDialog('No requests selected.'); return; }
 
         const includeInDocs = document.getElementById('capture-include-docs')?.checked ? 1 : 0;
         const data = await window.api('POST', '/discover/save-requests', {
@@ -184,9 +184,9 @@ export function showRecordApis() {
         window.closeModal();
         if (data.ok) {
           if (window.__qaclanApi?.refresh) window.__qaclanApi.refresh();
-          alert(`Saved ${data.imported} request${data.imported !== 1 ? 's' : ''} to '${colName}'.`);
+          window._toast(`Saved ${data.imported} request${data.imported !== 1 ? 's' : ''} to '${colName}'.`);
         } else {
-          alert('Save failed: ' + data.error);
+          await window._alertDialog('Save failed: ' + data.error);
         }
       }},
     ]);

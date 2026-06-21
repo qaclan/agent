@@ -11,7 +11,7 @@ export function showDiscoverModal() {
     { icon: '📋', title: 'Import OpenAPI', desc: 'OpenAPI 3.x / Swagger 2.x', action: showOpenApiImport },
     { icon: '📮', title: 'Import Postman', desc: 'Postman Collection v2.1', action: showPostmanImport },
     { icon: '🟤', title: 'Import Bruno', desc: '.bru collection files', action: () => showBrunoImport() },
-    { icon: '🎭', title: 'From Playwright Run', desc: 'Extract APIs from recorded runs', action: () => alert('Coming soon') },
+    { icon: '🎭', title: 'From Playwright Run', desc: 'Extract APIs from recorded runs', action: () => window._toast('Coming soon — extract APIs from Playwright recordings') },
   ];
 
   const grid = document.createElement('div');

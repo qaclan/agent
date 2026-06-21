@@ -121,28 +121,29 @@ export function renderCollectionsView(container, onSelectRequest) {
   }
 
   async function _runCollection(colId, colName) {
-    const confirmed = confirm(`Run all requests in '${colName}'?`);
+    const confirmed = await window._confirmDialog(`Run '${colName}'?`, 'All requests in this collection will be executed in order.', 'Run');
     if (!confirmed) return;
     const res = await window.api('POST', `/collections/${colId}/run`, {});
     if (res.ok === false) {
-      alert('Run failed: ' + res.error);
+      await window._alertDialog('Run failed: ' + res.error);
     } else {
-      alert(`Collection run complete: ${res.passed}/${res.total} passed`);
+      window._toast(`Run complete: ${res.passed}/${res.total} passed`);
     }
   }
 
   async function _deleteCollection(colId, colName) {
-    if (!confirm(`Delete collection '${colName}' and all its requests?`)) return;
+    const confirmed = await window._confirmDialog(`Delete '${colName}'?`, 'All requests in this collection will be permanently deleted.', 'Delete', 'btn btn-sm btn-danger');
+    if (!confirmed) return;
     const res = await window.api('DELETE', `/collections/${colId}`);
-    if (res.ok === false) { alert('Error: ' + res.error); return; }
+    if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
     reload();
   }
 
   async function _createCollection() {
-    const name = prompt('Collection name:');
+    const name = await window._promptDialog('Collection name:');
     if (!name) return;
     const res = await window.api('POST', '/collections', { name: name.trim() });
-    if (res.ok === false) { alert('Error: ' + res.error); return; }
+    if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
     reload();
   }
 

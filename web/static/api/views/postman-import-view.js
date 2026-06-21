@@ -13,7 +13,7 @@ export function showPostmanImport() {
 
   async function _doImport() {
     const fileInput = document.getElementById('postman-file');
-    if (!fileInput?.files[0]) { alert('Please select a Postman collection file.'); return; }
+    if (!fileInput?.files[0]) { await window._alertDialog('Please select a Postman collection file.'); return; }
 
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
@@ -46,7 +46,7 @@ export function showBrunoImportView() {
 
   async function _doImport() {
     const fileInput = document.getElementById('bruno-files');
-    if (!fileInput?.files.length) { alert('Please select .bru files.'); return; }
+    if (!fileInput?.files.length) { await window._alertDialog('Please select .bru files.'); return; }
 
     const formData = new FormData();
     for (const f of fileInput.files) formData.append('files', f);

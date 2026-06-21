@@ -537,7 +537,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     sendBtn.textContent = 'Sending…';
     try {
       const res = await window.api('POST', `/api-requests/${rid}/send`, {});
-      if (res.ok === false) alert('Send error: ' + res.error);
+      if (res.ok === false) await window._alertDialog('Send error: ' + res.error);
       else responsePanel.show(res.result);
     } finally {
       sendBtn.disabled = false;
@@ -573,7 +573,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       ? await window.api('PUT', `/api-requests/${requestId}`, payload)
       : await window.api('POST', '/api-requests', payload);
 
-    if (res.ok === false) { alert('Save failed: ' + res.error); return null; }
+    if (res.ok === false) { await window._alertDialog('Save failed: ' + res.error); return null; }
     return res.request?.id || requestId;
   }
 

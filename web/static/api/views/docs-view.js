@@ -1,63 +1,3 @@
-// ── Themed dialog helpers ─────────────────────────────────────────────────
-
-function _modal(type, message, detail) {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);display:flex;align-items:center;justify-content:center;';
-
-    const box = document.createElement('div');
-    box.style.cssText = 'background:var(--bg-elevated);border:1px solid var(--border-strong);border-radius:10px;padding:20px 24px;max-width:380px;width:90%;box-shadow:var(--shadow-lg);';
-
-    const msgEl = document.createElement('p');
-    msgEl.style.cssText = 'margin:0 0 4px;font-size:14px;font-weight:600;color:var(--text-primary);';
-    msgEl.textContent = message;
-    box.appendChild(msgEl);
-
-    if (detail) {
-      const d = document.createElement('p');
-      d.style.cssText = 'margin:0 0 6px;font-size:12px;color:var(--text-muted);line-height:1.5;';
-      d.textContent = detail;
-      box.appendChild(d);
-    }
-
-    const btns = document.createElement('div');
-    btns.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;margin-top:16px;';
-
-    function _close(val) { document.body.removeChild(overlay); resolve(val); }
-
-    if (type === 'confirm') {
-      const cancel = _mkBtn('Cancel', 'btn btn-sm btn-ghost');
-      cancel.onclick = () => _close(false);
-      btns.appendChild(cancel);
-      const ok = _mkBtn('Remove', 'btn btn-sm btn-danger');
-      ok.onclick = () => _close(true);
-      btns.appendChild(ok);
-    } else {
-      const ok = _mkBtn('OK', 'btn btn-sm btn-primary');
-      ok.onclick = () => _close(undefined);
-      btns.appendChild(ok);
-      overlay.onclick = e => { if (e.target === overlay) _close(undefined); };
-    }
-
-    box.appendChild(btns);
-    overlay.appendChild(box);
-    document.body.appendChild(overlay);
-    // Focus first button for keyboard nav
-    setTimeout(() => btns.querySelector('button')?.focus(), 10);
-  });
-}
-
-function _confirmDialog(msg, detail) { return _modal('confirm', msg, detail); }
-function _alertDialog(msg) { return _modal('alert', msg); }
-
-function _toast(msg) {
-  const t = document.createElement('div');
-  t.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:10000;background:var(--success-bg);border:1px solid var(--success-border);color:var(--success);border-radius:6px;padding:8px 14px;font-size:12px;font-weight:500;box-shadow:var(--shadow-md);pointer-events:none;transition:opacity .3s;';
-  t.textContent = msg;
-  document.body.appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.remove(), 320); }, 1800);
-}
-
 // ── Misc helpers ──────────────────────────────────────────────────────────
 
 function _esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
@@ -297,16 +237,16 @@ function _buildSchemaSection(title, schemaKey, entry) {
     let schemaToSave = localSchema;
     if (currentView === 'json') {
       try { schemaToSave = JSON.parse(jsonTA.value); }
-      catch { await _alertDialog('Invalid JSON — fix syntax errors before saving.'); return; }
+      catch { await window._alertDialog('Invalid JSON — fix syntax errors before saving.'); return; }
     }
     saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
     const r = await window.api('PUT', `/docs/${entry.id}`, { [schemaKey]: schemaToSave });
     saveBtn.disabled = false; saveBtn.textContent = 'Save';
-    if (r.ok === false) { await _alertDialog('Save failed: ' + r.error); return; }
+    if (r.ok === false) { await window._alertDialog('Save failed: ' + r.error); return; }
     entry[schemaKey] = r.entry[schemaKey];
     localSchema = JSON.parse(JSON.stringify(entry[schemaKey] || {}));
     if (currentView === 'tree') _rebuildTree();
-    _toast('Saved ✓');
+    window._toast('Saved ✓');
   };
 
   return sec;
@@ -375,10 +315,10 @@ function _buildKvSection(title, schemaKey, entry) {
     saveBtn.disabled = true; saveBtn.textContent = 'Saving…';
     const r = await window.api('PUT', `/docs/${entry.id}`, { [schemaKey]: localSchema });
     saveBtn.disabled = false; saveBtn.textContent = 'Save';
-    if (r.ok === false) { await _alertDialog('Save failed: ' + r.error); return; }
+    if (r.ok === false) { await window._alertDialog('Save failed: ' + r.error); return; }
     entry[schemaKey] = r.entry[schemaKey];
     localSchema = { ...entry[schemaKey] };
-    _toast('Saved ✓');
+    window._toast('Saved ✓');
   };
 
   sec.appendChild(hdr);
@@ -481,8 +421,8 @@ export function renderDocsView(container) {
     saveDescBtn.onclick = async () => {
       const v = descTA.value.trim();
       const r = await window.api('PUT', `/docs/${entry.id}`, { description: v });
-      if (r.ok === false) { await _alertDialog('Save failed: ' + r.error); return; }
-      entry.description = v; _refreshDescText(); _cancelDescEdit(); _toast('Saved ✓');
+      if (r.ok === false) { await window._alertDialog('Save failed: ' + r.error); return; }
+      entry.description = v; _refreshDescText(); _cancelDescEdit(); window._toast('Saved ✓');
     };
     cancelDescBtn.onclick = _cancelDescEdit;
     editDescBtn.onclick = _startDescEdit;
@@ -516,13 +456,13 @@ export function renderDocsView(container) {
     const delBtn = _mkBtn('Remove from docs', 'btn btn-sm btn-ghost');
     delBtn.style.color = 'var(--danger)';
     delBtn.onclick = async () => {
-      const confirmed = await _confirmDialog(
+      const confirmed = await window._confirmDialog(
         'Remove this endpoint?',
         `${entry.method} ${entry.path_pattern} will be removed from API documentation. Recordings are kept.`
       );
       if (!confirmed) return;
       const r = await window.api('DELETE', `/docs/${entry.id}`);
-      if (r.ok === false) { await _alertDialog('Error: ' + r.error); return; }
+      if (r.ok === false) { await window._alertDialog('Error: ' + r.error); return; }
       _showEmptyState(detailPanel);
       _load();
     };

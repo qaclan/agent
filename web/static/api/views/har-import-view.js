@@ -40,7 +40,7 @@ export function showHarImport() {
   async function _loadHarFile(file) {
     const text = await file.text();
     let har;
-    try { har = JSON.parse(text); } catch(e) { alert('Invalid HAR file'); return; }
+    try { har = JSON.parse(text); } catch(e) { await window._alertDialog('Invalid HAR file — could not parse JSON.'); return; }
 
     const entries = har.log?.entries || [];
     const preview = document.getElementById('har-preview');
@@ -83,7 +83,7 @@ export function showHarImport() {
   }
 
   async function _doImport() {
-    if (!window._harFile) { alert('Please select a HAR file first.'); return; }
+    if (!window._harFile) { await window._alertDialog('Please select a HAR file first.'); return; }
 
     // Build filtered HAR with only checked entries
     const har = window._harData;
@@ -99,9 +99,9 @@ export function showHarImport() {
     const data = await res.json();
     window.closeModal();
     if (data.ok) {
-      alert(`Imported ${data.imported} requests.`);
+      window._toast(`Imported ${data.imported} requests.`);
     } else {
-      alert('Import failed: ' + data.error);
+      await window._alertDialog('Import failed: ' + data.error);
     }
   }
 }
