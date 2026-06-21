@@ -155,6 +155,44 @@ def _build_js_sandbox(script: str, context: dict) -> str:
     return header + script + "\n" + footer
 
 
+def _apply_extractor(rules: list, response_body: str, state: dict) -> dict:
+    """Apply post_extractor rules to response JSON. Returns {name: value} of extracted vars."""
+    if not rules:
+        return {}
+    try:
+        data = json.loads(response_body)
+    except (ValueError, TypeError):
+        logger.warning("_apply_extractor: response is not JSON, skipping")
+        return {}
+    extracted = {}
+    for rule in rules:
+        path = rule.get("path", "").strip()
+        name = rule.get("name", "").strip()
+        if not path or not name:
+            continue
+        value = data
+        for key in path.split("."):
+            if isinstance(value, dict):
+                value = value.get(key)
+            elif isinstance(value, list):
+                try:
+                    value = value[int(key)]
+                except (ValueError, IndexError):
+                    value = None
+            else:
+                value = None
+            if value is None:
+                break
+        if value is None:
+            logger.warning("_apply_extractor: path '%s' not found in response", path)
+            continue
+        prefix = rule.get("prefix", "")
+        final = prefix + str(value)
+        extracted[name] = final
+        logger.info("_apply_extractor: %s = %.40s", name, final)
+    return extracted
+
+
 def _run_script_sandbox(script: str, lang: str, context: dict, state_path: str | None) -> dict:
     """Run pre/post script in subprocess sandbox. Returns {headers, params, state} or empty dict on error."""
     if not script or not script.strip():
@@ -401,8 +439,18 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         response_body = response.text
         response_headers = dict(response.headers)
 
-        # 6. Post-script
+        # 6. Post-extractor (no-code variable extraction)
         state_updates = {}
+        post_extractor = req.get("post_extractor", [])
+        if isinstance(post_extractor, str):
+            post_extractor = json.loads(post_extractor) if post_extractor else []
+        if post_extractor:
+            extracted = _apply_extractor(post_extractor, response_body, state)
+            if extracted:
+                state_updates.update(extracted)
+                state.setdefault("qaclan_vars", {}).update(extracted)
+
+        # 7. Post-script (runs after extractor so script can override)
         post_script = req.get("post_script")
         post_lang = req.get("post_lang", "js")
         if post_script:
@@ -416,8 +464,9 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             }
             post_out = _run_script_sandbox(post_script, post_lang, post_context, state_path)
             if post_out:
-                state_updates = post_out.get("state", {})
-                state.setdefault("qaclan_vars", {}).update(state_updates)
+                script_state = post_out.get("state", {})
+                state_updates.update(script_state)
+                state.setdefault("qaclan_vars", {}).update(script_state)
 
         # 7. Evaluate assertions
         assertions = req.get("assertions", [])

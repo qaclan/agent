@@ -5369,6 +5369,258 @@ Confirm all spec sections are covered before marking this plan complete:
 
 ---
 
+### Task 18: HAR Parser — Filter to XHR/Fetch Only
+
+**Problem:** Playwright/Chrome HAR includes every network entry: page navigations (`document`), images, fonts, scripts, CSS. Current heuristic filter (file extension + content-type) misses same-origin navigations and over-filters some JSON APIs served from `/static/` paths.
+
+**Standard:** Postman Interceptor, Bruno, Insomnia all filter to `_resourceType: xhr | fetch` — the Chrome/Playwright HAR extension field. Fall back to heuristics only when field is absent (third-party HAR exporters).
+
+**Files:**
+- Modify: `cli/api_discovery/har_parser.py`
+
+**Decision:** When `_resourceType` is present on a HAR entry, use it as the sole filter: keep `xhr` and `fetch`, skip everything else. When absent, fall through to the existing `_is_static()` heuristic. This makes Playwright-captured HARs precise and keeps import compatibility for other HAR files.
+
+- [ ] **Step 1: Replace `_is_static` with `_should_skip` that checks `_resourceType` first**
+
+In `cli/api_discovery/har_parser.py`, replace the `_is_static` function and its call in `parse_har`:
+
+```python
+# Replace _is_static with this:
+_API_RESOURCE_TYPES = {"xhr", "fetch"}
+_ALL_RESOURCE_TYPES = {"xhr", "fetch", "document", "stylesheet", "image", "font",
+                       "script", "manifest", "media", "websocket", "other"}
+
+
+def _should_skip(entry: dict) -> bool:
+    """Return True if this HAR entry should be excluded from API results."""
+    resource_type = entry.get("_resourceType", "").lower()
+    if resource_type in _ALL_RESOURCE_TYPES:
+        # Chrome/Playwright extension field present — authoritative
+        return resource_type not in _API_RESOURCE_TYPES
+    # Fallback: heuristic filter for HAR files without _resourceType
+    return _is_static(entry)
+```
+
+In `parse_har`, replace the `if _is_static(entry):` guard with `if _should_skip(entry):`.
+
+- [ ] **Step 2: Verify manually**
+
+Start server and use "Record APIs" or "Import HAR" with a Chrome-exported HAR from any app. Confirm only XHR/Fetch requests appear in the captured list — no HTML pages, no JS/CSS files.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add cli/api_discovery/har_parser.py
+git commit -m "fix: filter HAR to xhr/fetch only using _resourceType; fall back to heuristics"
+```
+
+---
+
+### Task 19: Record APIs — URL Input Before Launch
+
+**Problem:** Current flow auto-starts recording at `about:blank` immediately on modal open. User must manually type the app URL in the browser. Every comparable tool (Postman Interceptor, Bruno, Insomnia, Charles) asks for the start URL first.
+
+**Standard UX:**
+1. Modal opens → shows URL input + "Start Recording" button
+2. User enters app URL → clicks Start
+3. Browser opens to that URL, recording begins
+4. Status changes to "Recording" with live count
+5. User clicks "Stop" → sees captured list → saves
+
+**Files:**
+- Modify: `web/static/api/views/record-apis-view.js`
+
+- [ ] **Step 1: Rewrite `showRecordApis` to show URL form first**
+
+Replace the entire content of `web/static/api/views/record-apis-view.js`:
+
+```javascript
+function _esc(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+export function showRecordApis() {
+  // Phase 1: URL input form
+  const body = document.createElement('div');
+  body.innerHTML = `
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:12px">
+      Enter your app URL. The browser will open to this page so you can start interacting immediately.
+    </p>
+    <label class="form-label">Start URL</label>
+    <input id="record-start-url" type="url" class="input-sm" style="width:100%"
+      placeholder="https://your-app.com" autocomplete="url">
+    <p id="record-url-error" style="color:var(--danger);font-size:12px;margin-top:4px;display:none">
+      Enter a valid URL (include https://)
+    </p>`;
+
+  let _sessionId = null;
+  let _pollTimer = null;
+
+  window.showModal('Record APIs', body, [
+    { label: 'Cancel', cls: 'btn-ghost', action: () => { _cleanup(); window.closeModal(); } },
+    { label: 'Start Recording', cls: 'btn-primary', action: _onStart },
+  ], null, 'md');
+
+  requestAnimationFrame(() => {
+    const input = document.getElementById('record-start-url');
+    if (input) {
+      input.focus();
+      input.addEventListener('keydown', e => { if (e.key === 'Enter') _onStart(); });
+    }
+  });
+
+  function _onStart() {
+    const input = document.getElementById('record-start-url');
+    const errEl = document.getElementById('record-url-error');
+    const url = input ? input.value.trim() : '';
+    if (!url || !url.startsWith('http')) {
+      if (errEl) errEl.style.display = '';
+      return;
+    }
+    if (errEl) errEl.style.display = 'none';
+    _startRecording(url);
+  }
+
+  async function _startRecording(url) {
+    // Switch modal body to recording status
+    const modalBody = document.querySelector('.modal-body');
+    if (modalBody) {
+      modalBody.innerHTML = `
+        <div class="record-status-badge recording">⏺ Recording</div>
+        <p style="margin-top:10px;font-size:13px;color:var(--text-muted)">
+          Interact with the browser window. Network requests are being captured.
+        </p>
+        <p style="font-size:12px;color:var(--text-muted);margin-top:4px">
+          URL: <code>${_esc(url)}</code>
+        </p>
+        <p id="record-count" style="font-size:13px;margin-top:8px">Captured: <strong>0</strong> XHR/Fetch requests</p>`;
+    }
+    // Swap footer to show Stop button only
+    const stopBtn = document.querySelector('.modal-footer .btn-primary');
+    if (stopBtn) { stopBtn.textContent = 'Stop Recording'; stopBtn.onclick = _stopRecording; }
+
+    const res = await window.api('POST', '/discover/record/start', { url });
+    if (!res.ok) {
+      const mb = document.querySelector('.modal-body');
+      if (mb) mb.innerHTML = `<p style="color:var(--danger)">Failed to start: ${_esc(res.error)}</p>`;
+      return;
+    }
+    _sessionId = res.session_id;
+    _pollTimer = setInterval(_pollStatus, 3000);
+  }
+
+  async function _pollStatus() {
+    if (!_sessionId) return;
+    const res = await window.api('GET', `/discover/record/status?session_id=${_sessionId}`);
+    if (!res.ok) return;
+    if (res.status === 'stopped') {
+      clearInterval(_pollTimer);
+      _pollTimer = null;
+      const mb = document.querySelector('.modal-body');
+      if (mb) mb.querySelector('.record-status-badge').className = 'record-status-badge stopped';
+      if (mb) mb.querySelector('.record-status-badge').textContent = '● Stopped (browser closed)';
+    }
+  }
+
+  async function _stopRecording() {
+    _cleanup();
+    if (!_sessionId) { window.closeModal(); return; }
+
+    const sid = _sessionId;
+    _sessionId = null;
+    const res = await window.api('POST', '/discover/record/stop', { session_id: sid });
+    window.closeModal();
+
+    if (!res.ok || !res.requests?.length) {
+      alert('No API requests captured. Make sure you interacted with the app and XHR/Fetch calls were made.');
+      return;
+    }
+    _showCapturedResults(res.requests);
+  }
+
+  function _cleanup() {
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+  }
+
+  function _showCapturedResults(requests) {
+    const body = `
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
+        ${requests.length} XHR/Fetch requests captured. Select which to save:
+      </p>
+      <div id="captured-list" style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;">
+        ${requests.map((r, i) => `
+          <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;">
+            <input type="checkbox" id="cap-${i}" checked>
+            <label for="cap-${i}" style="flex:1;cursor:pointer;word-break:break-all;">
+              <span class="method-badge method-${_esc(r.method)}" style="font-size:10px;padding:1px 5px;">${_esc(r.method)}</span>
+              ${_esc(r.url.replace(/\?.*/, ''))}
+            </label>
+          </div>`).join('')}
+      </div>
+      <div style="margin-top:10px;">
+        <label class="form-label">Save to collection</label>
+        <input id="capture-col-name" type="text" class="input-sm" style="width:100%" value="Recorded APIs">
+      </div>`;
+
+    window.showModal('Save Captured Requests', body, [
+      { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
+      { label: 'Save Selected', cls: 'btn-primary', action: async () => {
+        const colName = document.getElementById('capture-col-name').value.trim() || 'Recorded APIs';
+        const selected = requests.filter((_, i) => document.getElementById(`cap-${i}`)?.checked);
+        if (!selected.length) { alert('No requests selected.'); return; }
+
+        const har = {
+          log: {
+            version: '1.2',
+            entries: selected.map(r => ({
+              _resourceType: 'fetch',  // preserve type so parser keeps them
+              request: {
+                method: r.method,
+                url: r.url,
+                headers: (r.headers || []).map(h => ({ name: h.key, value: h.value })),
+                queryString: (r.params || []).map(p => ({ name: p.key, value: p.value })),
+                postData: r.body ? { mimeType: 'application/json', text: r.body } : undefined,
+              },
+              response: { headers: [], content: { mimeType: 'application/json' } },
+            })),
+          },
+        };
+        const formData = new FormData();
+        formData.append('file', new Blob([JSON.stringify(har)], { type: 'application/json' }), 'captured.har');
+        formData.append('collection_name', colName);
+        const res = await fetch('/api/discover/har', { method: 'POST', body: formData });
+        const data = await res.json();
+        window.closeModal();
+        if (data.ok) {
+          if (window.__qaclanApi?.refresh) window.__qaclanApi.refresh();
+          alert(`Saved ${data.imported} requests to '${colName}'.`);
+        } else {
+          alert('Save failed: ' + data.error);
+        }
+      }},
+    ]);
+  }
+}
+```
+
+- [ ] **Step 2: Verify flow**
+
+1. Open API section → click Discover → Record APIs
+2. Confirm URL input field appears with "Start Recording" button (not auto-started)
+3. Enter `https://example.com` → click Start
+4. Confirm browser opens to that URL
+5. Interact → click Stop → confirm captured list shows only XHR/Fetch (no HTML pages)
+6. Save → confirm collection created with correct requests
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add web/static/api/views/record-apis-view.js
+git commit -m "fix: show URL input before starting Playwright recording; opens browser at specified URL"
+```
+
+---
+
 ## Revision Notes (applied after initial draft)
 
 1. **Sandbox f-string bug fixed** — `_build_python_sandbox` and `_build_js_sandbox` now use string concatenation to avoid f-string misinterpreting `{` and `}` in user scripts.

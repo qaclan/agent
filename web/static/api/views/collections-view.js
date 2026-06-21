@@ -12,7 +12,16 @@ export function renderCollectionsView(container, onSelectRequest) {
     container.innerHTML = '';
 
     if (!collections.length) {
-      container.innerHTML = '<div class="text-muted text-sm" style="padding:10px 14px">No collections yet.</div>';
+      const empty = document.createElement('div');
+      empty.className = 'text-muted text-sm';
+      empty.style.cssText = 'padding:10px 14px;';
+      empty.textContent = 'No collections yet.';
+      container.appendChild(empty);
+      const newColBtn = document.createElement('div');
+      newColBtn.style.cssText = 'padding:8px 14px;cursor:pointer;font-size:12px;color:var(--text-muted)';
+      newColBtn.textContent = '+ New Collection';
+      newColBtn.onclick = _createCollection;
+      container.appendChild(newColBtn);
       return;
     }
 
@@ -37,6 +46,14 @@ export function renderCollectionsView(container, onSelectRequest) {
       runBtn.textContent = '▶ Run';
       runBtn.onclick = (e) => { e.stopPropagation(); _runCollection(col.id, col.name); };
       rightSide.appendChild(runBtn);
+
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn btn-xs btn-ghost';
+      delBtn.style.color = 'var(--danger, #e53e3e)';
+      delBtn.textContent = '✕';
+      delBtn.title = 'Delete collection';
+      delBtn.onclick = (e) => { e.stopPropagation(); _deleteCollection(col.id, col.name); };
+      rightSide.appendChild(delBtn);
 
       const expandBtn = document.createElement('button');
       expandBtn.className = 'btn btn-xs btn-ghost';
@@ -112,6 +129,13 @@ export function renderCollectionsView(container, onSelectRequest) {
     } else {
       alert(`Collection run complete: ${res.passed}/${res.total} passed`);
     }
+  }
+
+  async function _deleteCollection(colId, colName) {
+    if (!confirm(`Delete collection '${colName}' and all its requests?`)) return;
+    const res = await window.api('DELETE', `/collections/${colId}`);
+    if (res.ok === false) { alert('Error: ' + res.error); return; }
+    reload();
   }
 
   async function _createCollection() {
