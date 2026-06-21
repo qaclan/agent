@@ -1,10 +1,8 @@
 /**
  * API Section entry point.
- * Exposes window.__qaclanApi = { render(container) }
- * Loaded as <script type="module"> so it does not block the classic app.js.
+ * Exposes window.__qaclanApi = { render(container), refresh() }
  */
 
-// Expose a global api() helper for ES module views (app.js's api() is a local closure)
 if (!window.api) {
   window.api = async function api(method, path, body = null) {
     try {
@@ -19,18 +17,19 @@ if (!window.api) {
   };
 }
 
-// Lazy import views to keep initial load fast
 async function _loadViews() {
   const [
     { renderCollectionsView },
     { renderRequestEditor },
     { showDiscoverModal },
+    { renderDocsView },
   ] = await Promise.all([
     import('./views/collections-view.js'),
     import('./views/request-editor-view.js'),
     import('./views/discover-modal.js'),
+    import('./views/docs-view.js'),
   ]);
-  return { renderCollectionsView, renderRequestEditor, showDiscoverModal };
+  return { renderCollectionsView, renderRequestEditor, showDiscoverModal, renderDocsView };
 }
 
 let _views = null;
@@ -42,30 +41,72 @@ async function _getViews() {
 function renderApiPage(container) {
   container.innerHTML = '';
 
-  const layout = document.createElement('div');
-  layout.className = 'api-layout';
+  // Top tab bar: Collections | API Docs
+  const topBar = document.createElement('div');
+  topBar.style.cssText = 'display:flex;align-items:center;gap:0;border-bottom:1px solid var(--border);padding:0 14px;background:var(--surface-1,var(--bg));flex-shrink:0;';
 
-  // Sidebar
-  const sidebar = document.createElement('div');
-  sidebar.className = 'api-sidebar';
-  sidebar.innerHTML = `
-    <div class="api-sidebar-header">
-      <span class="api-sidebar-title">API Testing</span>
-      <button class="btn btn-xs btn-primary" id="api-discover-btn">+ Discover</button>
-    </div>
-    <div id="api-collections-panel"></div>`;
-  layout.appendChild(sidebar);
+  const tabCollections = document.createElement('button');
+  tabCollections.type = 'button';
+  tabCollections.className = 'req-tab active';
+  tabCollections.textContent = 'Collections';
 
-  // Main content
-  const main = document.createElement('div');
-  main.className = 'api-main';
-  main.id = 'api-main-content';
-  main.innerHTML = '<div class="empty-state"><p>Select a request or collection to get started.</p></div>';
-  layout.appendChild(main);
+  const tabDocs = document.createElement('button');
+  tabDocs.type = 'button';
+  tabDocs.className = 'req-tab';
+  tabDocs.textContent = 'API Docs';
 
-  container.appendChild(layout);
+  topBar.appendChild(tabCollections);
+  topBar.appendChild(tabDocs);
 
-  // Load collections view into sidebar
+  const pageWrap = document.createElement('div');
+  pageWrap.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden;';
+  pageWrap.appendChild(topBar);
+
+  // Collections panel (api-layout with sidebar + main)
+  const collectionsPanel = document.createElement('div');
+  collectionsPanel.style.cssText = 'flex:1;overflow:hidden;display:flex;';
+  collectionsPanel.innerHTML = `
+    <div class="api-layout" style="flex:1;overflow:hidden;">
+      <div class="api-sidebar">
+        <div class="api-sidebar-header">
+          <span class="api-sidebar-title">Collections</span>
+          <button class="btn btn-xs btn-primary" id="api-discover-btn">+ Discover</button>
+        </div>
+        <div id="api-collections-panel"></div>
+      </div>
+      <div class="api-main" id="api-main-content">
+        <div class="empty-state"><p>Select a request or collection to get started.</p></div>
+      </div>
+    </div>`;
+
+  // Docs panel
+  const docsPanel = document.createElement('div');
+  docsPanel.style.cssText = 'flex:1;overflow:hidden;display:none;';
+
+  pageWrap.appendChild(collectionsPanel);
+  pageWrap.appendChild(docsPanel);
+  container.appendChild(pageWrap);
+
+  function _switchTab(tab) {
+    if (tab === 'collections') {
+      tabCollections.classList.add('active');
+      tabDocs.classList.remove('active');
+      collectionsPanel.style.display = 'flex';
+      docsPanel.style.display = 'none';
+    } else {
+      tabDocs.classList.add('active');
+      tabCollections.classList.remove('active');
+      collectionsPanel.style.display = 'none';
+      docsPanel.style.display = 'flex';
+      // Re-render docs each time tab is opened so it picks up new recordings
+      _getViews().then(({ renderDocsView }) => renderDocsView(docsPanel));
+    }
+  }
+
+  tabCollections.onclick = () => _switchTab('collections');
+  tabDocs.onclick = () => _switchTab('docs');
+
+  // Wire collections view
   _getViews().then(({ renderCollectionsView, renderRequestEditor, showDiscoverModal }) => {
     renderCollectionsView(
       document.getElementById('api-collections-panel'),
@@ -73,13 +114,12 @@ function renderApiPage(container) {
         renderRequestEditor(document.getElementById('api-main-content'), requestId, defaultCollectionId);
       }
     );
-
     document.getElementById('api-discover-btn').onclick = () => showDiscoverModal();
   }).catch(err => {
     console.error('API section load error:', err);
-    main.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">Failed to load API module: ${err.message}</p></div>`;
+    document.getElementById('api-main-content').innerHTML =
+      `<div class="empty-state"><p style="color:var(--danger)">Failed to load API module: ${err.message}</p></div>`;
   });
 }
 
-// Register global API
 window.__qaclanApi = { render: renderApiPage };
