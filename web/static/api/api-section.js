@@ -1,6 +1,6 @@
 /**
  * API Section entry point.
- * Exposes window.__qaclanApi = { render(container), refresh() }
+ * Exposes window.__qaclanApi = { render(container) }
  */
 
 if (!window.api) {
@@ -99,7 +99,11 @@ function renderApiPage(container) {
       collectionsPanel.style.display = 'none';
       docsPanel.style.display = 'flex';
       // Re-render docs each time tab is opened so it picks up new recordings
-      _getViews().then(({ renderDocsView }) => renderDocsView(docsPanel));
+      _getViews().then(({ renderDocsView }) => renderDocsView(docsPanel))
+        .catch(err => {
+          console.error('Docs view load error:', err);
+          docsPanel.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">Failed to load docs: ${err.message}</p></div>`;
+        });
     }
   }
 
