@@ -58,11 +58,12 @@ def export_openapi(doc_entries: list[dict], project_name: str = 'API') -> dict:
         if isinstance(params_schema, dict) and params_schema:
             query_params = operation.setdefault('parameters', [])
             for k in params_schema:
-                query_params.append({'name': k, 'in': 'query', 'schema': {'type': 'string'}})
+                query_params.append({'name': k, 'in': 'query', 'required': False, 'schema': {'type': 'string'}})
 
         # Request body (POST/PUT/PATCH only)
         if method in ('post', 'put', 'patch') and entry.get('request_schema'):
             operation['requestBody'] = {
+                'required': True,
                 'content': {
                     'application/json': {
                         'schema': _schema_to_openapi(entry['request_schema'])
