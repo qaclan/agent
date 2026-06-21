@@ -94,25 +94,120 @@ export function createResponsePanel(opts = {}) {
     return ul;
   }
 
+  let _bodyView = 'body';   // 'body' | 'schema'
+  let _schemaView = 'tree'; // 'tree' | 'json'
+
+  function _mkPillGroup(items, activeKey, onClick) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:inline-flex;gap:0;';
+    items.forEach(([label, key], i) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      const active = activeKey === key;
+      const first = i === 0, last = i === items.length - 1;
+      b.style.cssText = `font-size:10px;padding:2px 10px;border:1px solid var(--border);cursor:pointer;`
+        + `background:${active ? 'var(--accent)' : 'transparent'};`
+        + `color:${active ? '#fff' : 'var(--text-muted)'};`
+        + `border-radius:${first ? '4px 0 0 4px' : last ? '0 4px 4px 0' : '0'};`
+        + (first ? '' : 'border-left:none;');
+      b.onclick = () => onClick(key);
+      wrap.appendChild(b);
+    });
+    return wrap;
+  }
+
+  function _renderSchemaSection(schema) {
+    contentArea.innerHTML = '';
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border-subtle,var(--border));';
+    const title = document.createElement('span');
+    title.style.cssText = 'font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;';
+    title.textContent = 'Response Schema';
+    const toggle = _mkPillGroup([['Tree','tree'],['JSON','json']], _schemaView, v => { _schemaView = v; _renderSchemaSection(schema); });
+    header.appendChild(title);
+    header.appendChild(toggle);
+    contentArea.appendChild(header);
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:8px 10px;font-size:12px;overflow:auto;';
+    if (_schemaView === 'json') {
+      const pre = document.createElement('pre');
+      pre.className = 'response-body-pre';
+      pre.style.margin = '0';
+      pre.textContent = JSON.stringify(schema, null, 2);
+      body.appendChild(pre);
+    } else {
+      body.appendChild(_renderSchemaTree(schema, ''));
+    }
+    contentArea.appendChild(body);
+  }
+
+  function _renderBodyOrSchema() {
+    if (!_currentResult) return;
+    const r = _currentResult;
+    contentArea.innerHTML = '';
+
+    const schema = r._responseSchema || _storedSchema;
+    const hasSchema = schema && typeof schema === 'object' && Object.keys(schema).length;
+
+    // Body/Schema pill toggle row (only when schema exists)
+    if (hasSchema) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:flex-end;padding:4px 8px 0;';
+      row.appendChild(_mkPillGroup([['Body','body'],['Schema','schema']], _bodyView, v => { _bodyView = v; _renderBodyOrSchema(); }));
+      contentArea.appendChild(row);
+    }
+
+    if (_bodyView === 'schema' && hasSchema) {
+      const schemaHeader = document.createElement('div');
+      schemaHeader.style.cssText = 'display:flex;align-items:center;justify-content:flex-end;padding:4px 8px 2px;';
+      schemaHeader.appendChild(_mkPillGroup([['Tree','tree'],['JSON','json']], _schemaView, v => { _schemaView = v; _renderBodyOrSchema(); }));
+      contentArea.appendChild(schemaHeader);
+      const schemaBody = document.createElement('div');
+      schemaBody.style.cssText = 'padding:8px 10px;font-size:12px;overflow:auto;';
+      if (_schemaView === 'json') {
+        const pre = document.createElement('pre');
+        pre.className = 'response-body-pre';
+        pre.style.margin = '0';
+        pre.textContent = JSON.stringify(schema, null, 2);
+        schemaBody.appendChild(pre);
+      } else {
+        schemaBody.appendChild(_renderSchemaTree(schema, ''));
+      }
+      contentArea.appendChild(schemaBody);
+      return;
+    }
+
+    // Body view
+    if (!r.status_code && r.error_message) {
+      const errDiv = document.createElement('div');
+      errDiv.className = 'response-error-message';
+      errDiv.textContent = r.error_message;
+      contentArea.appendChild(errDiv);
+      return;
+    }
+    const pre = document.createElement('pre');
+    pre.className = 'response-body-pre';
+    let text = r.response_body || '';
+    try { text = JSON.stringify(JSON.parse(text), null, 2); } catch(e) {}
+    pre.textContent = text;
+    contentArea.appendChild(pre);
+  }
+
   function _renderContent(tab) {
     if (!_currentResult) return;
     const r = _currentResult;
     contentArea.innerHTML = '';
 
     if (tab === 'body') {
-      if (!r.status_code && r.error_message) {
-        const errDiv = document.createElement('div');
-        errDiv.className = 'response-error-message';
-        errDiv.textContent = r.error_message;
-        contentArea.appendChild(errDiv);
-        return;
-      }
-      const pre = document.createElement('pre');
-      pre.className = 'response-body-pre';
-      let text = r.response_body || '';
-      try { text = JSON.stringify(JSON.parse(text), null, 2); } catch(e) {}
-      pre.textContent = text;
-      contentArea.appendChild(pre);
+      _bodyView = 'body';
+      _renderBodyOrSchema();
+      return;
+
+    } else if (tab === 'response-schema') {
+      const schema = r._responseSchema || _storedSchema;
+      if (schema) _renderSchemaSection(schema);
+      return;
 
     } else if (tab === 'headers') {
       const headers = r.response_headers || {};
@@ -147,16 +242,6 @@ export function createResponsePanel(opts = {}) {
         contentArea.appendChild(row);
       });
 
-    } else if (tab === 'schema') {
-      const schema = r._responseSchema || _storedSchema;
-      if (!schema || (typeof schema === 'object' && !Array.isArray(schema) && !Object.keys(schema).length)) {
-        contentArea.innerHTML = '<p class="text-muted text-sm" style="padding:8px">No schema available. Record or run this request to capture response shape.</p>';
-        return;
-      }
-      const wrap = document.createElement('div');
-      wrap.style.cssText = 'padding:8px 10px;font-size:12px;';
-      wrap.appendChild(_renderSchemaTree(schema, ''));
-      contentArea.appendChild(wrap);
     }
   }
 
@@ -181,12 +266,11 @@ export function createResponsePanel(opts = {}) {
     tabBar.appendChild(_renderTab('Body', 'body', true));
     tabBar.appendChild(_renderTab('Headers', 'headers', false));
     tabBar.appendChild(_renderTab(`Assertions (${assertPass}/${assertCount})`, 'assertions', false));
-    tabBar.appendChild(_renderTab('Schema', 'schema', false));
 
     _renderContent('body');
   }
 
-  // Show schema tab even before a run if stored schema exists
+  // Show Response Schema tab before a run if stored schema exists
   if (_storedSchema) {
     panel.style.display = '';
     tabBar.innerHTML = '';
@@ -195,9 +279,9 @@ export function createResponsePanel(opts = {}) {
     statusSpan.textContent = 'Not yet run';
     statusSpan.style.cssText = 'color:var(--text-muted);font-size:11px;padding:4px 8px;';
     tabBar.appendChild(statusSpan);
-    tabBar.appendChild(_renderTab('Schema', 'schema', true));
+    tabBar.appendChild(_renderTab('Response Schema', 'response-schema', true));
     _currentResult = {};
-    _renderContent('schema');
+    _renderSchemaSection(_storedSchema);
   }
 
   return { el: panel, show };
