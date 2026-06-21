@@ -93,9 +93,9 @@ export function renderDocsView(container) {
   function _renderDetail(entry) {
     detailPanel.innerHTML = '';
 
-    // Header
+    // ── Header row ──
     const hdr = document.createElement('div');
-    hdr.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:16px;';
+    hdr.style.cssText = 'display:flex;align-items:center;gap:10px;margin-bottom:12px;';
     const methodBadge = document.createElement('span');
     methodBadge.className = `method-badge ${_methodClass(entry.method)}`;
     methodBadge.style.cssText = 'font-size:13px;padding:3px 10px;';
@@ -107,6 +107,70 @@ export function renderDocsView(container) {
     hdr.appendChild(pathEl);
     detailPanel.appendChild(hdr);
 
+    // ── Editable description ──
+    const descWrap = document.createElement('div');
+    descWrap.style.cssText = 'margin-bottom:14px;';
+    let _editing = false;
+    const descText = document.createElement('p');
+    descText.style.cssText = 'font-size:13px;color:var(--text);margin:0;cursor:text;min-height:20px;';
+    descText.textContent = entry.description || '';
+    descText.title = 'Click to edit description';
+    if (!entry.description) {
+      descText.style.color = 'var(--text-muted)';
+      descText.textContent = 'Click to add description…';
+    }
+
+    const descInput = document.createElement('textarea');
+    descInput.style.cssText = 'width:100%;font-size:13px;border:1px solid var(--border);border-radius:4px;padding:4px 6px;resize:vertical;min-height:48px;display:none;box-sizing:border-box;background:var(--surface-1,var(--bg));color:var(--text);';
+    descInput.value = entry.description || '';
+
+    const descActions = document.createElement('div');
+    descActions.style.cssText = 'display:none;gap:6px;margin-top:4px;';
+    const saveDescBtn = document.createElement('button');
+    saveDescBtn.type = 'button';
+    saveDescBtn.className = 'btn btn-xs btn-primary';
+    saveDescBtn.textContent = 'Save';
+    const cancelDescBtn = document.createElement('button');
+    cancelDescBtn.type = 'button';
+    cancelDescBtn.className = 'btn btn-xs btn-ghost';
+    cancelDescBtn.textContent = 'Cancel';
+    descActions.appendChild(saveDescBtn);
+    descActions.appendChild(cancelDescBtn);
+
+    function _startEdit() {
+      if (_editing) return;
+      _editing = true;
+      descInput.value = entry.description || '';
+      descText.style.display = 'none';
+      descInput.style.display = '';
+      descActions.style.display = 'flex';
+      descInput.focus();
+    }
+    function _cancelEdit() {
+      _editing = false;
+      descInput.style.display = 'none';
+      descActions.style.display = 'none';
+      descText.style.display = '';
+    }
+    saveDescBtn.onclick = async () => {
+      const newDesc = descInput.value.trim();
+      const res = await window.api('PUT', `/docs/${entry.id}`, { description: newDesc });
+      if (res.ok === false) { alert('Save failed: ' + res.error); return; }
+      entry.description = newDesc;
+      descText.textContent = newDesc || '';
+      if (!newDesc) { descText.style.color = 'var(--text-muted)'; descText.textContent = 'Click to add description…'; }
+      else descText.style.color = 'var(--text)';
+      _cancelEdit();
+    };
+    cancelDescBtn.onclick = _cancelEdit;
+    descText.onclick = _startEdit;
+
+    descWrap.appendChild(descText);
+    descWrap.appendChild(descInput);
+    descWrap.appendChild(descActions);
+    detailPanel.appendChild(descWrap);
+
+    // ── Meta line ──
     const meta = document.createElement('p');
     meta.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:16px;';
     const seenAt = entry.last_seen_at ? new Date(entry.last_seen_at).toLocaleDateString() : '—';
@@ -131,19 +195,103 @@ export function renderDocsView(container) {
       detailPanel.appendChild(sec);
     }
 
-    // Request schema
-    if (entry.request_schema) {
-      _section('Request Body Schema', _renderSchemaTree(entry.request_schema, ''));
+    // ── Schema sections with inline type editing ──
+    function _renderEditableSchemaTree(schema, path, schemaKey) {
+      const ul = document.createElement('ul');
+      ul.style.cssText = `list-style:none;margin:0;padding-left:${path ? '14px' : '0'};`;
+      if (!schema || typeof schema !== 'object') return ul;
+      const isArray = Array.isArray(schema);
+      const entries2 = isArray
+        ? (schema.length ? [['0', schema[0]]] : [['0', '?']])
+        : Object.entries(schema);
+      for (const [key, val] of entries2) {
+        const li = document.createElement('li');
+        li.style.cssText = 'padding:1px 0;';
+        const displayKey = isArray ? '[item]' : key;
+        const currentPath = path ? `${path}.${key}` : key;
+        if (val && typeof val === 'object') {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:4px;cursor:pointer;user-select:none;padding:1px 2px;border-radius:3px;';
+          row.onmouseenter = () => row.style.background = 'var(--surface-2)';
+          row.onmouseleave = () => row.style.background = '';
+          const arrow = document.createElement('span');
+          arrow.style.cssText = 'font-size:9px;color:var(--text-muted);width:10px;';
+          arrow.textContent = '▶';
+          const keySpan = document.createElement('span');
+          keySpan.style.cssText = 'font-family:var(--font-mono);font-size:12px;';
+          keySpan.textContent = displayKey;
+          const typeTag = document.createElement('span');
+          typeTag.style.cssText = 'font-size:10px;color:var(--text-muted);background:var(--surface-2);padding:1px 5px;border-radius:3px;';
+          typeTag.textContent = Array.isArray(val) ? 'array' : 'object';
+          row.appendChild(arrow); row.appendChild(keySpan); row.appendChild(typeTag);
+          const children = _renderEditableSchemaTree(val, currentPath, schemaKey);
+          children.style.display = 'none';
+          row.onclick = () => {
+            const open = children.style.display === 'none';
+            children.style.display = open ? '' : 'none';
+            arrow.textContent = open ? '▼' : '▶';
+          };
+          li.appendChild(row); li.appendChild(children);
+        } else {
+          // Leaf: show type with inline dropdown to override
+          const isNullType = val === 'null' || val === '?';
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;align-items:center;gap:6px;padding:1px 2px;';
+          const dot = document.createElement('span');
+          dot.style.cssText = `font-size:9px;width:10px;color:${isNullType ? 'var(--text-muted)' : 'var(--primary)'};`;
+          dot.textContent = '●';
+          const keySpan = document.createElement('span');
+          keySpan.style.cssText = `font-family:var(--font-mono);font-size:12px;color:${isNullType ? 'var(--text-muted)' : 'var(--primary)'};`;
+          keySpan.textContent = displayKey;
+
+          // Editable type select (shown on hover)
+          const typeSelect = document.createElement('select');
+          typeSelect.style.cssText = 'font-size:10px;border:1px solid var(--border);border-radius:3px;background:var(--surface-2);color:var(--text-muted);padding:0 2px;cursor:pointer;';
+          ['string','number','boolean','null','array','object'].forEach(t => {
+            const opt = document.createElement('option');
+            opt.value = t;
+            opt.textContent = t;
+            if (t === val) opt.selected = true;
+            typeSelect.appendChild(opt);
+          });
+          typeSelect.onchange = async () => {
+            const newType = typeSelect.value;
+            // Deep-set the type in a copy of the schema
+            const updatedSchema = JSON.parse(JSON.stringify(entry[schemaKey] || {}));
+            const pathParts = currentPath.split('.');
+            let node = updatedSchema;
+            for (let i = 0; i < pathParts.length - 1; i++) {
+              const p = pathParts[i];
+              node = Array.isArray(node) ? node[parseInt(p)] : node[p];
+              if (!node) break;
+            }
+            const lastKey = pathParts[pathParts.length - 1];
+            if (Array.isArray(node)) node[parseInt(lastKey)] = newType;
+            else if (node) node[lastKey] = newType;
+            const res = await window.api('PUT', `/docs/${entry.id}`, { [schemaKey]: updatedSchema });
+            if (res.ok === false) { alert('Save failed: ' + res.error); typeSelect.value = val; return; }
+            entry[schemaKey] = res.entry[schemaKey];
+            dot.style.color = newType === 'null' ? 'var(--text-muted)' : 'var(--primary)';
+            keySpan.style.color = newType === 'null' ? 'var(--text-muted)' : 'var(--primary)';
+          };
+
+          row.appendChild(dot); row.appendChild(keySpan); row.appendChild(typeSelect);
+          li.appendChild(row);
+        }
+        ul.appendChild(li);
+      }
+      return ul;
     }
 
-    // Response schema
+    if (entry.request_schema) {
+      _section('Request Body Schema', _renderEditableSchemaTree(entry.request_schema, '', 'request_schema'));
+    }
     if (entry.response_schema) {
-      _section('Response Schema', _renderSchemaTree(entry.response_schema, ''));
+      _section('Response Schema', _renderEditableSchemaTree(entry.response_schema, '', 'response_schema'));
     } else {
       _section('Response Schema', 'Not yet captured.');
     }
 
-    // Headers
     if (entry.headers_schema && Object.keys(entry.headers_schema).length) {
       const t = document.createElement('table');
       t.className = 'kv-table';
@@ -158,7 +306,6 @@ export function renderDocsView(container) {
       _section('Common Request Headers', t);
     }
 
-    // Query params
     if (entry.params_schema && Object.keys(entry.params_schema).length) {
       const t = document.createElement('table');
       t.className = 'kv-table';
@@ -173,7 +320,6 @@ export function renderDocsView(container) {
       _section('Query Parameters', t);
     }
 
-    // Delete
     const delBtn = document.createElement('button');
     delBtn.className = 'btn btn-sm btn-ghost';
     delBtn.style.color = 'var(--danger, #e53e3e)';

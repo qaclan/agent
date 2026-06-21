@@ -53,6 +53,21 @@ def get_doc(entry_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/docs/<entry_id>", methods=["PUT"])
+def update_doc(entry_id):
+    try:
+        data = request.get_json(force=True) or {}
+        updated = _repo.update(_project_id(), entry_id, data)
+        if not updated:
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        return jsonify({"ok": True, "entry": updated})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("update_doc")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/docs/<entry_id>", methods=["DELETE"])
 def delete_doc(entry_id):
     try:

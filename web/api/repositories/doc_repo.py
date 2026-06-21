@@ -102,3 +102,21 @@ class DocRepo:
         )
         conn.commit()
         return cur.rowcount > 0
+
+    def update(self, project_id: str, entry_id: str, data: dict) -> dict | None:
+        """Partial update of editable fields: description, request_schema, response_schema,
+        headers_schema, params_schema."""
+        conn = get_conn()
+        s = _serialize(data)
+        editable = ('description', 'request_schema', 'response_schema',
+                    'headers_schema', 'params_schema')
+        updates = {k: s[k] for k in editable if k in s}
+        if not updates:
+            return self.get(project_id, entry_id)
+        set_clause = ', '.join(f"{k} = ?" for k in updates)
+        conn.execute(
+            f"UPDATE api_doc_entries SET {set_clause} WHERE id = ? AND project_id = ?",
+            list(updates.values()) + [entry_id, project_id],
+        )
+        conn.commit()
+        return self.get(project_id, entry_id)
