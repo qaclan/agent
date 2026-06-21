@@ -12,6 +12,8 @@ _req_repo = RequestRepo()
 
 def _save_requests(project_id: str, requests: list[dict], collection_id: str | None = None) -> int:
     """Save a list of parsed request dicts to the DB. Returns count saved."""
+    from web.api.services.doc_service import sync_doc_entry
+
     saved = 0
     for req in requests:
         data = dict(req)
@@ -35,7 +37,15 @@ def _save_requests(project_id: str, requests: list[dict], collection_id: str | N
                 data["auth_config"] = json.loads(data["auth_config"])
             except (ValueError, TypeError):
                 data["auth_config"] = {}
-        _req_repo.create(project_id, data)
+
+        saved_req = _req_repo.create(project_id, data)
+
+        # Sync to API docs if flagged (default: include)
+        try:
+            sync_doc_entry(project_id, {**data, 'id': saved_req['id']})
+        except Exception as e:
+            logger.warning("sync_doc_entry failed for %s: %s", data.get('url'), e)
+
         saved += 1
     return saved
 

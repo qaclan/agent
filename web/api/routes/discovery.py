@@ -108,6 +108,33 @@ def discover_bruno():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/discover/save-requests", methods=["POST"])
+def save_requests():
+    """Save pre-parsed request objects directly (no re-parsing). Body: {requests, collection_name, include_in_docs}."""
+    try:
+        pid = _project_id()
+        data = request.get_json(force=True) or {}
+        requests_list = data.get("requests", [])
+        collection_name = data.get("collection_name", "Recorded APIs")
+        include_in_docs = int(data.get("include_in_docs", 1))
+        if not requests_list:
+            return jsonify({"ok": False, "error": "No requests provided"}), 400
+        # Stamp include_in_docs on each request
+        for r in requests_list:
+            r['include_in_docs'] = include_in_docs
+        from web.api.services.discovery_service import _save_requests
+        from web.api.repositories.collection_repo import CollectionRepo
+        col = CollectionRepo().create(pid, collection_name)
+        saved = _save_requests(pid, requests_list, collection_id=col["id"])
+        logger.info("save_requests: saved %d to collection %s", saved, col["id"])
+        return jsonify({"ok": True, "imported": saved, "collection_id": col["id"]})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("save_requests")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/discover/record/start", methods=["POST"])
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
