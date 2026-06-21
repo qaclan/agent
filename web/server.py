@@ -16,6 +16,7 @@ from .api.routes.collections import bp as api_collections_bp
 from .api.routes.requests import bp as api_requests_bp
 from .api.routes.discovery import bp as api_discovery_bp
 from .api.routes.api_runs import bp as api_runs_bp
+from .api.routes.docs import bp as api_docs_bp
 
 
 def _get_base_dir():
@@ -38,7 +39,7 @@ def create_app():
     app = Flask(__name__, static_folder=static_dir, static_url_path='')
 
     for bp in [projects_bp, features_bp, scripts_bp, suites_bp, runs_bp, envs_bp, auth_bp, sync_bp,
-               api_collections_bp, api_requests_bp, api_discovery_bp, api_runs_bp]:
+               api_collections_bp, api_requests_bp, api_discovery_bp, api_runs_bp, api_docs_bp]:
         app.register_blueprint(bp)
 
     @app.route('/')
