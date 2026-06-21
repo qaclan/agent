@@ -141,6 +141,9 @@ def init_db():
     _migrate_script_wait_timeout(conn)
     _migrate_error_detail(conn)
     _migrate_api_tables(conn)
+    _migrate_api_extractor(conn)
+    _migrate_api_schemas(conn)
+    _migrate_api_docs(conn)
 
 
 def _migrate_error_detail(conn):
@@ -249,6 +252,58 @@ def _migrate_api_tables(conn):
     if not has_desc:
         conn.execute("ALTER TABLE suites ADD COLUMN description TEXT")
 
+    conn.commit()
+
+
+def _migrate_api_extractor(conn):
+    """Add post_extractor column to api_requests — JSON array of {path, name, prefix} rules."""
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN post_extractor TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_schemas(conn):
+    """Add request_schema and response_schema columns — inferred JSON type trees from HAR."""
+    for col in ("request_schema", "response_schema"):
+        try:
+            conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+        except Exception:
+            pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_docs(conn):
+    """Create api_doc_entries table and add include_in_docs to api_requests."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_doc_entries (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            method TEXT NOT NULL,
+            path_pattern TEXT NOT NULL,
+            description TEXT,
+            request_schema TEXT DEFAULT NULL,
+            response_schema TEXT DEFAULT NULL,
+            headers_schema TEXT DEFAULT NULL,
+            params_schema TEXT DEFAULT NULL,
+            source_request_ids TEXT DEFAULT '[]',
+            include_in_docs INTEGER DEFAULT 1,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+    """)
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_doc_entries_unique "
+            "ON api_doc_entries(project_id, method, path_pattern)"
+        )
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN include_in_docs INTEGER DEFAULT 1")
+    except Exception:
+        pass  # Column already exists
     conn.commit()
 
 
