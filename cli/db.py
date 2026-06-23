@@ -145,6 +145,8 @@ def init_db():
     _migrate_api_schemas(conn)
     _migrate_api_docs(conn)
     _migrate_var_picker(conn)
+    _migrate_collection_auth(conn)
+    _migrate_api_collection_runs(conn)
 
 
 def _migrate_var_picker(conn):
@@ -166,6 +168,60 @@ def _migrate_var_picker(conn):
             created_at TEXT NOT NULL,
             UNIQUE(collection_id, key),
             FOREIGN KEY(collection_id) REFERENCES api_collections(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
+
+def _migrate_collection_auth(conn):
+    """Add auth_type and auth_config to api_collections for collection-level auth."""
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN auth_config TEXT NOT NULL DEFAULT '{}'")
+    except Exception:
+        pass
+    conn.commit()
+
+
+def _migrate_api_collection_runs(conn):
+    """Create api_collection_runs and api_request_results tables."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_collection_runs (
+            id              TEXT PRIMARY KEY,
+            project_id      TEXT NOT NULL,
+            collection_id   TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            collection_name TEXT NOT NULL,
+            env_name        TEXT,
+            status          TEXT NOT NULL,
+            total           INTEGER NOT NULL DEFAULT 0,
+            passed          INTEGER NOT NULL DEFAULT 0,
+            failed          INTEGER NOT NULL DEFAULT 0,
+            error_count     INTEGER NOT NULL DEFAULT 0,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_request_results (
+            id                TEXT PRIMARY KEY,
+            collection_run_id TEXT NOT NULL REFERENCES api_collection_runs(id) ON DELETE CASCADE,
+            api_request_id    TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            request_name      TEXT NOT NULL,
+            method            TEXT,
+            url               TEXT,
+            order_index       INTEGER NOT NULL DEFAULT 0,
+            status            TEXT,
+            status_code       INTEGER,
+            response_body     TEXT,
+            response_headers  TEXT,
+            duration_ms       INTEGER,
+            assertion_results TEXT,
+            error_message     TEXT,
+            started_at        TEXT,
+            finished_at       TEXT
         )
     """)
     conn.commit()
