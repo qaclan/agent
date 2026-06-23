@@ -16,6 +16,21 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(password|secret|token|authorization|api.?key|auth)", re.IGNORECASE
 )
 _VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
+_PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
+
+
+def _substitute_path_params(url: str, path_params: list, env_vars: dict, state: dict) -> str:
+    """Replace {param} URL segments with values from path_params list.
+    Values may contain {{VAR}} references — resolve those first.
+    """
+    if not path_params or not url:
+        return url
+    lookup = {
+        item["key"]: resolve_vars(str(item.get("value", "")), env_vars, state)
+        for item in path_params
+        if item.get("enabled", True) and item.get("key", "").strip()
+    }
+    return _PATH_PARAM_RE.sub(lambda m: lookup.get(m.group(1), m.group(0)), url)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +366,12 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
     try:
         # 1. Resolve variables in URL, headers, params
         url = resolve_vars(req.get("url", ""), env_vars, state)
+
+        raw_path_params = req.get("path_params", [])
+        if isinstance(raw_path_params, str):
+            raw_path_params = json.loads(raw_path_params)
+        if raw_path_params:
+            url = _substitute_path_params(url, raw_path_params, env_vars, state)
 
         raw_headers = req.get("headers", [])
         if isinstance(raw_headers, str):

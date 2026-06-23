@@ -1680,6 +1680,11 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 }
 .kv-table td { padding: 3px 6px; }
 .kv-table .kv-key, .kv-table .kv-value { width: 100%; }
+.kv-value--var-ref {
+  background: color-mix(in srgb, var(--primary, #5C6BC0) 8%, transparent) !important;
+  border-color: var(--primary, #5C6BC0) !important;
+  font-family: var(--font-mono);
+}
 
 /* Response panel */
 .response-panel {

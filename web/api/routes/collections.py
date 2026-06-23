@@ -4,6 +4,8 @@ import logging
 import zipfile
 from flask import Blueprint, request, jsonify, send_file
 from cli.config import get_active_project_id
+from web.api.repositories.collection_repo import CollectionRepo
+from web.api.repositories.collection_vars_repo import CollectionVarsRepo
 from web.api.services.collection_service import CollectionService
 from web.api.services.runner_service import RunnerService
 
@@ -86,12 +88,39 @@ def delete_collection(col_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/collections/<col_id>", methods=["PATCH"])
+def patch_collection(col_id):
+    try:
+        pid = _project_id()
+        col = CollectionRepo().get(col_id, pid)
+        if not col:
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        body = request.get_json(force=True) or {}
+        CollectionRepo().update(
+            col_id,
+            body.get("name", col["name"]),
+            body.get("description", col.get("description")),
+            body.get("env_name", col.get("env_name")),
+        )
+        return jsonify({"ok": True, "collection": CollectionRepo().get(col_id, pid)})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("patch_collection")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/collections/<col_id>/run", methods=["POST"])
 def run_collection(col_id):
     try:
+        pid = _project_id()
+        col = CollectionRepo().get(col_id, pid)
+        if not col:
+            raise LookupError(f"Collection {col_id} not found")
         data = request.get_json(force=True) or {}
-        env_name = data.get("env_name")
-        result = _runner_svc.run_collection(col_id, _project_id(), env_name=env_name)
+        env_name = data.get("env_name") or col.get("env_name")
+        seed_vars = CollectionVarsRepo().as_seed_dict(col_id)
+        result = _runner_svc.run_collection(col_id, pid, env_name=env_name, seed_vars=seed_vars)
         return jsonify({"ok": True, **result})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -99,6 +128,51 @@ def run_collection(col_id):
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("run_collection")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/<col_id>/vars", methods=["GET"])
+def list_collection_vars(col_id):
+    try:
+        pid = _project_id()
+        if not CollectionRepo().get(col_id, pid):
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        return jsonify({"ok": True, "vars": CollectionVarsRepo().list(col_id)})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("list_collection_vars")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/<col_id>/vars/<path:key>", methods=["PUT"])
+def upsert_collection_var(col_id, key):
+    try:
+        pid = _project_id()
+        if not CollectionRepo().get(col_id, pid):
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        body = request.get_json(force=True) or {}
+        result = CollectionVarsRepo().upsert(col_id, key, body.get("initial_value", ""))
+        return jsonify({"ok": True, "var": result})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("upsert_collection_var")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/<col_id>/vars/<path:key>", methods=["DELETE"])
+def delete_collection_var(col_id, key):
+    try:
+        pid = _project_id()
+        if not CollectionRepo().get(col_id, pid):
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        CollectionVarsRepo().delete(col_id, key)
+        return jsonify({"ok": True})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("delete_collection_var")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 

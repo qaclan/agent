@@ -199,8 +199,14 @@ function renderApiPage(container) {
   _getViews().then(({ renderCollectionsView, renderRequestEditor, showDiscoverModal }) => {
     renderCollectionsView(
       document.getElementById('api-collections-panel'),
-      (requestId, defaultCollectionId) => {
-        renderRequestEditor(document.getElementById('api-main-content'), requestId, defaultCollectionId);
+      (requestId, defaultCollectionId, collectionId, collectionEnvName) => {
+        renderRequestEditor(
+          document.getElementById('api-main-content'),
+          requestId,
+          defaultCollectionId,
+          collectionId,
+          collectionEnvName,
+        );
       }
     );
     document.getElementById('api-discover-btn').onclick = () => showDiscoverModal();

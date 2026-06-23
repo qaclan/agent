@@ -1,13 +1,16 @@
 import { createKeyValueTable } from '../components/key-value-table.js';
 import { createAssertionBuilder } from '../components/assertion-builder.js';
 import { createResponsePanel } from '../components/response-panel.js';
+import { createVarPicker } from '../components/var-picker.js';
 
 /**
- * renderRequestEditor(container, requestId, defaultCollectionId)
+ * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
  * requestId: string|null  (null = new request)
  * defaultCollectionId: string|null  (pre-select collection when creating new)
+ * collectionId: string|null  (resolved collection for var loading)
+ * collectionEnvName: string|null  (env bound to the collection)
  */
-export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null) {
+export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null) {
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
@@ -21,6 +24,26 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   const r = existing || {};
+  const _effectiveCollectionId = r.collection_id || collectionId || defaultCollectionId;
+
+  async function getAllVars() {
+    const results = [];
+    if (collectionEnvName) {
+      try {
+        const res = await window.api('GET', `/envs/${encodeURIComponent(collectionEnvName)}`);
+        const envVars = res.variables || [];
+        envVars.forEach(v => results.push({ key: v.key, value: v.value, is_secret: !!v.is_secret, group: 'Environment' }));
+      } catch(e) { /* no env */ }
+    }
+    if (_effectiveCollectionId) {
+      try {
+        const res = await window.api('GET', `/collections/${_effectiveCollectionId}/vars`);
+        (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: false, group: 'Collection' }));
+      } catch(e) { /* no collection vars */ }
+    }
+    return results;
+  }
+
   container.innerHTML = '';
 
   const editor = document.createElement('div');
@@ -74,6 +97,9 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlBar.appendChild(sendBtn);
   editor.appendChild(urlBar);
 
+  urlInput.addEventListener('input', _syncPathVars);
+  _syncPathVars();
+
   // ── Tab bar ──
   const SECTIONS = ['Params', 'Headers', 'Body', 'Auth', 'Pre-Script', 'Post-Script', 'Assertions'];
   const tabBar = document.createElement('div');
@@ -84,11 +110,50 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(sectionContent);
 
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' } });
+  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
   paramsTable.setRows(r.params || []);
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' } });
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
   headersTable.setRows(r.headers || []);
+
+  // ── Path Variables ──
+  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars });
+  const pathVarsSection = document.createElement('div');
+  {
+    const hdr = document.createElement('div');
+    hdr.style.cssText = 'font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:8px 0 4px;';
+    hdr.textContent = 'Path Variables';
+    const hint = document.createElement('p');
+    hint.className = 'req-section-hint';
+    hint.textContent = 'Values for {param} segments in the URL. Supports {{VAR}} syntax.';
+    pathVarsSection.appendChild(hdr);
+    pathVarsSection.appendChild(hint);
+    pathVarsSection.appendChild(pathVarsTable.el);
+  }
+  pathVarsSection.style.display = 'none';
+
+  const queryParamsHdr = document.createElement('div');
+  queryParamsHdr.style.cssText = 'font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:12px 0 4px;';
+  queryParamsHdr.textContent = 'Query Parameters';
+
+  const paramsWrapper = document.createElement('div');
+  paramsWrapper.appendChild(pathVarsSection);
+  paramsWrapper.appendChild(queryParamsHdr);
+  paramsWrapper.appendChild(paramsTable.el);
+
+  const _storedPathParams = r.path_params || [];
+
+  function _syncPathVars() {
+    const matches = [...urlInput.value.matchAll(/\{([^}]+)\}/g)].map(m => m[1]);
+    const keys = [...new Set(matches)];
+    if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
+    pathVarsSection.style.display = '';
+    const current = {};
+    pathVarsTable.getRows().forEach(row => { current[row.key] = row.value; });
+    const stored = {};
+    _storedPathParams.forEach(p => { stored[p.key] = p.value; });
+    pathVarsTable.setRows(keys.map(key => ({ key, value: current[key] ?? stored[key] ?? '', enabled: true })));
+  }
 
   const assertionBuilder = createAssertionBuilder();
   assertionBuilder.setAssertions(r.assertions || []);
@@ -100,22 +165,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const bodyTypeGroup = document.createElement('div');
   bodyTypeGroup.className = 'req-body-type-group';
-
-  const bodyTextarea = document.createElement('textarea');
-  bodyTextarea.className = 'input-sm';
-  bodyTextarea.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;margin-top:4px;';
-  bodyTextarea.value = r.body || '';
-
-  function _setBodyType(type) {
-    activeBodyType = type;
-    bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
-      b.classList.toggle('active', b.dataset.type === type);
-    });
-    bodyTextarea.style.display = type === 'none' ? 'none' : '';
-    if (type === 'form') bodyTextarea.placeholder = 'key1=value1&key2=value2';
-    else if (type === 'graphql') bodyTextarea.placeholder = '{ "query": "{ users { id name } }" }';
-    else bodyTextarea.placeholder = '{\n  "key": "value"\n}';
-  }
+  bodyTypeGroup.style.display = 'flex';
+  bodyTypeGroup.style.alignItems = 'center';
 
   BODY_TYPES.forEach(t => {
     const btn = document.createElement('button');
@@ -126,10 +177,77 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     btn.onclick = () => _setBodyType(t);
     bodyTypeGroup.appendChild(btn);
   });
+
+  // {} insert variable button — visible only for raw/graphql body types
+  const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
+  const bodyVarBtn = document.createElement('button');
+  bodyVarBtn.type = 'button';
+  bodyVarBtn.title = 'Insert variable at cursor';
+  bodyVarBtn.style.cssText = 'margin-left:auto;font-size:11px;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;color:var(--text-muted);';
+  bodyVarBtn.textContent = '{ }';
+  bodyVarBtn.style.display = 'none';
+  bodyVarBtn.onclick = () => {
+    _bodyVarPicker.open(bodyVarBtn, (varToken) => {
+      const start = bodyTextarea.selectionStart;
+      const end = bodyTextarea.selectionEnd;
+      bodyTextarea.value = bodyTextarea.value.slice(0, start) + varToken + bodyTextarea.value.slice(end);
+      const newPos = start + varToken.length;
+      bodyTextarea.setSelectionRange(newPos, newPos);
+      bodyTextarea.focus();
+    });
+  };
+  bodyTypeGroup.appendChild(bodyVarBtn);
+
+  const bodyTextarea = document.createElement('textarea');
+  bodyTextarea.className = 'input-sm';
+  bodyTextarea.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;margin-top:4px;';
+  bodyTextarea.value = r.body || '';
+  bodyTextarea.addEventListener('input', () => {
+    const val = bodyTextarea.value;
+    const caret = bodyTextarea.selectionStart ?? val.length;
+    const before = val.slice(0, caret);
+    const openAt = before.lastIndexOf('{{');
+    if (openAt !== -1 && !before.slice(openAt).includes('}}')) {
+      const partial = before.slice(openAt + 2);
+      _bodyVarPicker.open(bodyTextarea, (varToken) => {
+        const after = val.slice(caret);
+        bodyTextarea.value = val.slice(0, openAt) + varToken + after;
+        const newPos = openAt + varToken.length;
+        bodyTextarea.setSelectionRange(newPos, newPos);
+        bodyTextarea.focus();
+      }, partial);
+    } else {
+      _bodyVarPicker.close();
+    }
+  });
+
+  // Form body — KV table with var picker
+  let _formBodyRows = [];
+  try {
+    const parsed = JSON.parse(r.body || '[]');
+    _formBodyRows = Array.isArray(parsed) ? parsed : [];
+  } catch(e) { _formBodyRows = []; }
+  const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
+  formBodyTable.setRows(_formBodyRows);
+  formBodyTable.el.style.display = 'none';
+
+  function _setBodyType(type) {
+    activeBodyType = type;
+    bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.type === type);
+    });
+    bodyTextarea.style.display = (type === 'raw' || type === 'graphql') ? '' : 'none';
+    formBodyTable.el.style.display = type === 'form' ? '' : 'none';
+    bodyVarBtn.style.display = (type === 'raw' || type === 'graphql') ? '' : 'none';
+    if (type === 'graphql') bodyTextarea.placeholder = '{ "query": "{ users { id name } }" }';
+    else bodyTextarea.placeholder = '{\n  "key": "value"\n}';
+  }
+
   _setBodyType(activeBodyType);
 
   bodySection.appendChild(bodyTypeGroup);
   bodySection.appendChild(bodyTextarea);
+  bodySection.appendChild(formBodyTable.el);
 
   // ── Auth section ──
   const authSection = document.createElement('div');
@@ -493,7 +611,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   );
 
   const sectionMap = {
-    'Params':      paramsTable.el,
+    'Params':      paramsWrapper,
     'Headers':     headersTable.el,
     'Body':        bodySection,
     'Auth':        authSection,
@@ -556,8 +674,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       url: urlInput.value.trim(),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
+      path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: activeBodyType !== 'none' ? (bodyTextarea.value || null) : null,
+      body: activeBodyType === 'form'
+        ? JSON.stringify(formBodyTable.getRows())
+        : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
       auth_type: authTypeSelect.value,
       auth_config: parsedAuth,
       pre_lang: preScriptSection._getLang(),

@@ -144,6 +144,31 @@ def init_db():
     _migrate_api_extractor(conn)
     _migrate_api_schemas(conn)
     _migrate_api_docs(conn)
+    _migrate_var_picker(conn)
+
+
+def _migrate_var_picker(conn):
+    """Add env_name to api_collections, path_params to api_requests, create collection_vars."""
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN env_name TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN path_params TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS collection_vars (
+            id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            initial_value TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(collection_id, key),
+            FOREIGN KEY(collection_id) REFERENCES api_collections(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
 
 
 def _migrate_error_detail(conn):
