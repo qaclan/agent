@@ -101,7 +101,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   _syncPathVars();
 
   // ── Tab bar ──
-  const SECTIONS = ['Params', 'Headers', 'Body', 'Auth', 'Pre-Script', 'Post-Script', 'Assertions'];
+  const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions'];
   const tabBar = document.createElement('div');
   tabBar.className = 'req-tab-bar';
   const sectionContent = document.createElement('div');
