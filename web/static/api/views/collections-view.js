@@ -16,6 +16,105 @@ export function renderCollectionsView(container, onSelectRequest) {
     } catch(e) { _envNames = []; }
   }
 
+  function _openDropdown(anchorEl, items) {
+    document.querySelector('._col-dropdown-menu')?.remove();
+    document.querySelector('._col-dropdown-overlay')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = '_col-dropdown-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;';
+
+    const menu = document.createElement('div');
+    menu.className = '_col-dropdown-menu';
+    menu.style.cssText = 'position:fixed;z-index:9999;background:var(--bg-panel);border:1px solid var(--border-default);border-radius:6px;box-shadow:0 4px 16px rgba(0,0,0,.25);min-width:160px;padding:4px 0;';
+
+    items.forEach(item => {
+      if (item.divider) {
+        const hr = document.createElement('div');
+        hr.style.cssText = 'height:1px;background:var(--border-default);margin:4px 0;';
+        menu.appendChild(hr);
+        return;
+      }
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.style.cssText = `display:flex;align-items:center;gap:8px;width:100%;padding:7px 14px;background:none;border:none;font-size:13px;cursor:pointer;text-align:left;color:${item.danger ? 'var(--danger,#e53e3e)' : 'var(--text-default)'};`;
+      btn.onmouseenter = () => { btn.style.background = 'var(--surface-2)'; };
+      btn.onmouseleave = () => { btn.style.background = 'none'; };
+      if (item.icon) {
+        const icon = document.createElement('span');
+        icon.style.cssText = 'width:16px;text-align:center;';
+        icon.textContent = item.icon;
+        btn.appendChild(icon);
+      }
+      const lbl = document.createElement('span');
+      lbl.textContent = item.label;
+      btn.appendChild(lbl);
+      btn.onclick = (e) => { e.stopPropagation(); close(); item.action(); };
+      menu.appendChild(btn);
+    });
+
+    function close() {
+      menu.remove(); overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+    overlay.onclick = close;
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+
+    document.body.appendChild(overlay);
+    document.body.appendChild(menu);
+
+    const rect = anchorEl.getBoundingClientRect();
+    menu.style.top = (rect.bottom + 4) + 'px';
+    menu.style.right = (window.innerWidth - rect.right) + 'px';
+  }
+
+  function _openModal(title, contentEl) {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:var(--bg-panel);border:1px solid var(--border-default);border-radius:8px;width:480px;max-width:90vw;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.4);';
+
+    const mHead = document.createElement('div');
+    mHead.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border-default);flex-shrink:0;';
+    const titleEl = document.createElement('span');
+    titleEl.style.cssText = 'font-size:14px;font-weight:600;';
+    titleEl.textContent = title;
+    const closeX = document.createElement('button');
+    closeX.type = 'button';
+    closeX.style.cssText = 'background:none;border:none;font-size:20px;cursor:pointer;color:var(--text-muted);padding:0;line-height:1;';
+    closeX.textContent = '×';
+    mHead.appendChild(titleEl); mHead.appendChild(closeX);
+
+    const mBody = document.createElement('div');
+    mBody.style.cssText = 'padding:16px 18px;overflow-y:auto;flex:1;';
+    mBody.appendChild(contentEl);
+
+    const mFoot = document.createElement('div');
+    mFoot.style.cssText = 'padding:12px 18px;border-top:1px solid var(--border-default);display:flex;justify-content:flex-end;flex-shrink:0;';
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'btn btn-sm btn-ghost';
+    closeBtn.textContent = 'Close';
+    mFoot.appendChild(closeBtn);
+
+    modal.appendChild(mHead); modal.appendChild(mBody); modal.appendChild(mFoot);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+
+    function close() {
+      if (contentEl.parentNode) contentEl.parentNode.removeChild(contentEl);
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+    closeX.onclick = close;
+    closeBtn.onclick = close;
+    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+    function onKey(e) { if (e.key === 'Escape') close(); }
+    document.addEventListener('keydown', onKey);
+  }
+
   async function reload() {
     await _loadEnvNames();
     const res = await window.api('GET', '/collections');
