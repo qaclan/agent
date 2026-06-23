@@ -17,8 +17,7 @@ export function renderCollectionsView(container, onSelectRequest) {
   }
 
   function _openDropdown(anchorEl, items) {
-    document.querySelector('._col-dropdown-menu')?.remove();
-    document.querySelector('._col-dropdown-overlay')?.remove();
+    if (_closeActiveDropdown) { _closeActiveDropdown(); _closeActiveDropdown = null; }
 
     const overlay = document.createElement('div');
     overlay.className = '_col-dropdown-overlay';
@@ -54,12 +53,14 @@ export function renderCollectionsView(container, onSelectRequest) {
     });
 
     function close() {
+      _closeActiveDropdown = null;
       menu.remove(); overlay.remove();
       document.removeEventListener('keydown', onKey);
     }
     overlay.onclick = close;
     function onKey(e) { if (e.key === 'Escape') close(); }
     document.addEventListener('keydown', onKey);
+    _closeActiveDropdown = close;
 
     document.body.appendChild(overlay);
     document.body.appendChild(menu);
@@ -115,6 +116,8 @@ export function renderCollectionsView(container, onSelectRequest) {
     document.addEventListener('keydown', onKey);
   }
 
+  let _closeActiveDropdown = null;
+
   async function reload() {
     await _loadEnvNames();
     const res = await window.api('GET', '/collections');
@@ -155,7 +158,7 @@ export function renderCollectionsView(container, onSelectRequest) {
       // Env selector
       const envSel = document.createElement('select');
       envSel.title = 'Environment for this collection';
-      envSel.style.cssText = 'font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--surface-1);color:var(--text-muted);max-width:90px;';
+      envSel.style.cssText = 'font-size:11px;padding:2px 4px;border:1px solid var(--border-default);border-radius:4px;background:var(--bg-panel);color:var(--text-muted);max-width:90px;';
       envSel.innerHTML = '<option value="">No env</option>';
       _envNames.forEach(name => {
         const opt = document.createElement('option');
@@ -169,6 +172,14 @@ export function renderCollectionsView(container, onSelectRequest) {
         await window.api('PATCH', `/collections/${col.id}`, { env_name: col.env_name });
       });
       rightSide.appendChild(envSel);
+
+      // Auth toggle
+      let authExpanded = false;
+      const authBtn = document.createElement('button');
+      authBtn.className = 'btn btn-xs btn-ghost';
+      authBtn.textContent = 'Auth';
+      authBtn.title = 'Collection-level auth — inherited by requests set to "Inherit from Collection"';
+      rightSide.appendChild(authBtn);
 
       // Collection vars toggle
       let varsExpanded = false;
@@ -211,10 +222,121 @@ export function renderCollectionsView(container, onSelectRequest) {
         expandBtn.textContent = expanded ? '▾' : '▸';
       }
       header.onclick = (e) => {
-        if (e.target === runBtn || e.target === expandBtn || e.target === varsBtn || e.target === envSel) return;
+        if (e.target === runBtn || e.target === expandBtn || e.target === varsBtn || e.target === authBtn || e.target === envSel) return;
         _toggleExpand();
       };
       expandBtn.onclick = (e) => { e.stopPropagation(); _toggleExpand(); };
+
+      // ── Collection Auth Panel ──
+      const authPanel = document.createElement('div');
+      authPanel.style.cssText = 'display:none;padding:10px 14px 8px;border-bottom:1px solid var(--border-default);';
+
+      const authPanelHdr = document.createElement('div');
+      authPanelHdr.style.cssText = 'font-size:10px;color:var(--text-muted);margin-bottom:8px;line-height:1.4;';
+      authPanelHdr.textContent = 'Default auth for this collection. Requests using "Inherit from Collection" will use this.';
+      authPanel.appendChild(authPanelHdr);
+
+      const authTypeSel = document.createElement('select');
+      authTypeSel.className = 'input-sm';
+      authTypeSel.style.cssText = 'font-size:12px;margin-bottom:10px;width:auto;min-width:160px;';
+      const COL_AUTH_LABELS = { none: 'No Auth', bearer: 'Bearer Token', basic: 'Basic Auth', api_key: 'API Key', oauth2: 'OAuth 2 / Custom' };
+      Object.entries(COL_AUTH_LABELS).forEach(([val, label]) => {
+        const opt = document.createElement('option');
+        opt.value = val; opt.textContent = label;
+        if ((col.auth_type || 'none') === val) opt.selected = true;
+        authTypeSel.appendChild(opt);
+      });
+      authPanel.appendChild(authTypeSel);
+
+      const authFieldsWrap = document.createElement('div');
+      authFieldsWrap.style.cssText = 'display:flex;flex-direction:column;gap:8px;';
+      authPanel.appendChild(authFieldsWrap);
+
+      let _colAuthConfig = {};
+      try { _colAuthConfig = JSON.parse(col.auth_config || '{}'); } catch(e) { _colAuthConfig = {}; }
+
+      function _colAuthField(label, placeholder, key) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:3px;';
+        const lbl = document.createElement('label');
+        lbl.style.cssText = 'font-size:11px;color:var(--text-muted);';
+        lbl.textContent = label;
+        const inp = document.createElement('input');
+        inp.type = /password|secret/i.test(label) ? 'password' : 'text';
+        inp.className = 'input-sm';
+        inp.style.fontSize = '12px';
+        inp.placeholder = placeholder;
+        inp.value = _colAuthConfig[key] || '';
+        inp.addEventListener('blur', async () => {
+          _colAuthConfig[key] = inp.value;
+          col.auth_config = JSON.stringify(_colAuthConfig);
+          await window.api('PATCH', `/collections/${col.id}`, { auth_type: authTypeSel.value, auth_config: col.auth_config });
+        });
+        wrap.appendChild(lbl); wrap.appendChild(inp);
+        return wrap;
+      }
+
+      function _renderColAuthFields(type) {
+        authFieldsWrap.innerHTML = '';
+        if (type === 'none') {
+          const hint = document.createElement('p');
+          hint.style.cssText = 'font-size:11px;color:var(--text-muted);margin:0;';
+          hint.textContent = 'No authentication will be applied to inheriting requests.';
+          authFieldsWrap.appendChild(hint);
+        } else if (type === 'bearer') {
+          authFieldsWrap.appendChild(_colAuthField('Bearer Token', '{{ACCESS_TOKEN}}', 'token'));
+        } else if (type === 'basic') {
+          authFieldsWrap.appendChild(_colAuthField('Username', '{{USERNAME}}', 'username'));
+          authFieldsWrap.appendChild(_colAuthField('Password', '{{PASSWORD}}', 'password'));
+        } else if (type === 'api_key') {
+          authFieldsWrap.appendChild(_colAuthField('Header / Param Name', 'X-API-Key', 'key'));
+          authFieldsWrap.appendChild(_colAuthField('Key Value', '{{API_KEY}}', 'value'));
+        } else if (type === 'oauth2') {
+          authFieldsWrap.appendChild(_colAuthField('Token URL', 'https://...', 'token_url'));
+          authFieldsWrap.appendChild(_colAuthField('Client ID', '{{CLIENT_ID}}', 'client_id'));
+          authFieldsWrap.appendChild(_colAuthField('Client Secret', '{{CLIENT_SECRET}}', 'client_secret'));
+        }
+      }
+
+      authTypeSel.addEventListener('change', async () => {
+        col.auth_type = authTypeSel.value;
+        _colAuthConfig = {};
+        col.auth_config = '{}';
+        _renderColAuthFields(authTypeSel.value);
+        await window.api('PATCH', `/collections/${col.id}`, { auth_type: col.auth_type, auth_config: col.auth_config });
+      });
+
+      _renderColAuthFields(col.auth_type || 'none');
+
+      // Bulk: set all existing requests in this collection to inherit
+      const bulkInheritBtn = document.createElement('button');
+      bulkInheritBtn.type = 'button';
+      bulkInheritBtn.className = 'btn btn-xs btn-ghost';
+      bulkInheritBtn.style.marginTop = '10px';
+      bulkInheritBtn.textContent = 'Set all requests → Inherit';
+      bulkInheritBtn.title = 'Switch every request in this collection to "Inherit from Collection" auth';
+      bulkInheritBtn.onclick = async (e) => {
+        e.stopPropagation();
+        bulkInheritBtn.disabled = true;
+        bulkInheritBtn.textContent = 'Updating…';
+        const res = await window.api('GET', `/api-requests?collection_id=${col.id}`);
+        const reqs = res.requests || [];
+        await Promise.all(reqs.map(req =>
+          window.api('PATCH', `/api-requests/${req.id}`, { auth_type: 'inherit', auth_config: '{}' })
+        ));
+        bulkInheritBtn.textContent = `Done — ${reqs.length} updated`;
+        setTimeout(() => { bulkInheritBtn.disabled = false; bulkInheritBtn.textContent = 'Set all requests → Inherit'; }, 2000);
+      };
+      authPanel.appendChild(bulkInheritBtn);
+
+      async function _toggleAuthPanel() {
+        authExpanded = !authExpanded;
+        authPanel.style.display = authExpanded ? '' : 'none';
+        authBtn.classList.toggle('active', authExpanded);
+      }
+      authBtn.onclick = (e) => { e.stopPropagation(); _toggleAuthPanel(); };
+
+      section.appendChild(authPanel);
 
       // ── Collection Vars Panel ──
       const varsPanel = document.createElement('div');
