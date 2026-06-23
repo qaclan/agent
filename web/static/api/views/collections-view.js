@@ -173,35 +173,22 @@ export function renderCollectionsView(container, onSelectRequest) {
       });
       rightSide.appendChild(envSel);
 
-      // Auth toggle
-      let authExpanded = false;
-      const authBtn = document.createElement('button');
-      authBtn.className = 'btn btn-xs btn-ghost';
-      authBtn.textContent = 'Auth';
-      authBtn.title = 'Collection-level auth — inherited by requests set to "Inherit from Collection"';
-      rightSide.appendChild(authBtn);
-
-      // Collection vars toggle
-      let varsExpanded = false;
-      const varsBtn = document.createElement('button');
-      varsBtn.className = 'btn btn-xs btn-ghost';
-      varsBtn.textContent = 'Vars';
-      varsBtn.title = 'Collection variables — seed values for {{VAR}} set by post-scripts';
-      rightSide.appendChild(varsBtn);
-
-      const runBtn = document.createElement('button');
-      runBtn.className = 'btn btn-xs btn-ghost';
-      runBtn.textContent = '▶ Run';
-      runBtn.onclick = (e) => { e.stopPropagation(); _runCollection(col.id, col.name, col.env_name); };
-      rightSide.appendChild(runBtn);
-
-      const delBtn = document.createElement('button');
-      delBtn.className = 'btn btn-xs btn-ghost';
-      delBtn.style.color = 'var(--danger, #e53e3e)';
-      delBtn.textContent = '✕';
-      delBtn.title = 'Delete collection';
-      delBtn.onclick = (e) => { e.stopPropagation(); _deleteCollection(col.id, col.name); };
-      rightSide.appendChild(delBtn);
+      const menuBtn = document.createElement('button');
+      menuBtn.className = 'btn btn-xs btn-ghost';
+      menuBtn.textContent = '⋯';
+      menuBtn.title = 'Collection actions';
+      menuBtn.onclick = (e) => {
+        e.stopPropagation();
+        _openDropdown(menuBtn, [
+          { icon: '▶', label: 'Run Collection', action: () => _runCollection(col.id, col.name, col.env_name) },
+          { divider: true },
+          { icon: '🔒', label: 'Auth', action: () => _openAuthModal() },
+          { icon: '{}', label: 'Variables', action: () => _openVarsModal() },
+          { divider: true },
+          { icon: '🗑', label: 'Delete', danger: true, action: () => _deleteCollection(col.id, col.name) },
+        ]);
+      };
+      rightSide.appendChild(menuBtn);
 
       const expandBtn = document.createElement('button');
       expandBtn.className = 'btn btn-xs btn-ghost';
@@ -222,14 +209,14 @@ export function renderCollectionsView(container, onSelectRequest) {
         expandBtn.textContent = expanded ? '▾' : '▸';
       }
       header.onclick = (e) => {
-        if (e.target === runBtn || e.target === expandBtn || e.target === varsBtn || e.target === authBtn || e.target === envSel) return;
+        if (e.target === expandBtn || e.target === menuBtn || e.target === envSel) return;
         _toggleExpand();
       };
       expandBtn.onclick = (e) => { e.stopPropagation(); _toggleExpand(); };
 
       // ── Collection Auth Panel ──
       const authPanel = document.createElement('div');
-      authPanel.style.cssText = 'display:none;padding:10px 14px 8px;border-bottom:1px solid var(--border-default);';
+      authPanel.style.cssText = 'display:none;';
 
       const authPanelHdr = document.createElement('div');
       authPanelHdr.style.cssText = 'font-size:10px;color:var(--text-muted);margin-bottom:8px;line-height:1.4;';
@@ -329,18 +316,14 @@ export function renderCollectionsView(container, onSelectRequest) {
       };
       authPanel.appendChild(bulkInheritBtn);
 
-      async function _toggleAuthPanel() {
-        authExpanded = !authExpanded;
-        authPanel.style.display = authExpanded ? '' : 'none';
-        authBtn.classList.toggle('active', authExpanded);
+      function _openAuthModal() {
+        authPanel.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+        _openModal('Collection Auth', authPanel);
       }
-      authBtn.onclick = (e) => { e.stopPropagation(); _toggleAuthPanel(); };
-
-      section.appendChild(authPanel);
 
       // ── Collection Vars Panel ──
       const varsPanel = document.createElement('div');
-      varsPanel.style.cssText = 'display:none;padding:8px 14px 6px;border-bottom:1px solid var(--border);';
+      varsPanel.style.cssText = 'display:none;';
 
       const varsPanelHdr = document.createElement('div');
       varsPanelHdr.style.cssText = 'font-size:10px;color:var(--text-muted);margin-bottom:6px;line-height:1.4;';
@@ -410,19 +393,15 @@ export function renderCollectionsView(container, onSelectRequest) {
       addVarBtn.onclick = (e) => { e.stopPropagation(); _addVarRow(); };
 
       let _colVarsLoaded = false;
-      async function _toggleVarsPanel() {
-        varsExpanded = !varsExpanded;
-        varsPanel.style.display = varsExpanded ? '' : 'none';
-        varsBtn.classList.toggle('active', varsExpanded);
-        if (varsExpanded && !_colVarsLoaded) {
+      async function _openVarsModal() {
+        if (!_colVarsLoaded) {
           _colVarsLoaded = true;
           const res = await window.api('GET', `/collections/${col.id}/vars`);
           (res.vars || []).forEach(v => _addVarRow(v));
         }
+        varsPanel.style.cssText = 'display:flex;flex-direction:column;gap:6px;';
+        _openModal('Collection Variables', varsPanel);
       }
-      varsBtn.onclick = (e) => { e.stopPropagation(); _toggleVarsPanel(); };
-
-      section.appendChild(varsPanel);
 
       // Load requests for this collection
       window.api('GET', `/api-requests?collection_id=${col.id}`).then(r => {
