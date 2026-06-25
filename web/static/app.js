@@ -213,6 +213,7 @@ const state = {
   user: null,
   settings: { editor_mode: 'code' },  // backend overrides via /api/settings on init
 }
+let _runsTab = 'regression'  // 'regression' | 'api'
 
 const routes = {
   features: renderFeaturesPage,
@@ -4241,41 +4242,94 @@ async function renderRunsPage() {
   const page = document.getElementById('page-content')
   if (!state.activeProject) { renderNoProject(page); return }
 
-  const res = await api('GET', '/runs')
-  const runs = res.runs || []
-
   page.innerHTML = `
     <div class="page-header">
       <div class="page-header-text">
-        <h2>Regression Runs</h2>
+        <h2>Runs</h2>
         <p>View execution history</p>
       </div>
     </div>
+    <div class="req-tab-bar">
+      <button class="req-tab ${_runsTab === 'regression' ? 'active' : ''}" onclick="switchRunsTab('regression')">Regression Runs</button>
+      <button class="req-tab ${_runsTab === 'api' ? 'active' : ''}" onclick="switchRunsTab('api')">API Runs</button>
+    </div>
+    <div id="runs-tab-content" style="padding-top:16px"></div>`
+
+  await renderActiveRunsTab()
+}
+
+function switchRunsTab(tab) {
+  _runsTab = tab
+  document.querySelectorAll('.req-tab-bar .req-tab').forEach((b, i) => {
+    b.classList.toggle('active', (i === 0 && tab === 'regression') || (i === 1 && tab === 'api'))
+  })
+  renderActiveRunsTab()
+}
+
+async function renderActiveRunsTab() {
+  if (_runsTab === 'regression') {
+    await _renderRegressionRunsTab()
+  } else {
+    await _renderApiRunsTab()
+  }
+}
+
+async function _renderRegressionRunsTab() {
+  const container = document.getElementById('runs-tab-content')
+  const res = await api('GET', '/runs')
+  const runs = res.runs || []
+  container.innerHTML = `
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Run ID</th>
-          <th>Suite</th>
-          <th>Status</th>
-          <th>Results</th>
-          <th>Started</th>
-          <th></th>
+          <th>Run ID</th><th>Suite</th><th>Status</th><th>Results</th><th>Started</th><th></th>
         </tr></thead>
         <tbody>
           ${runs.length === 0
-            ? `<tr><td colspan="6"><div class="empty-state"><div class="empty-state-icon">\u25B6</div><p>No runs yet.<br>Run a suite to see results here.</p></div></td></tr>`
+            ? `<tr><td colspan="6"><div class="empty-state"><div class="empty-state-icon">&#9654;</div><p>No runs yet.<br>Run a suite to see results here.</p></div></td></tr>`
             : runs.map(r => `
-            <tr>
-              <td class="mono">${escHtml(r.id)}</td>
-              <td>${escHtml(r.suite_name)}</td>
-              <td><span class="badge ${r.status==='PASSED'?'badge-success':'badge-danger'}"><span class="badge-dot"></span>${r.status}</span></td>
-              <td class="text-sm">${r.passed}/${r.total} passed${r.failed ? ', ' + r.failed + ' failed' : ''}</td>
-              <td class="text-muted text-sm">${fmtDate(r.started_at)}</td>
-              <td><div class="table-actions">
-                <button class="btn btn-xs btn-ghost" onclick="viewRunModal('${r.id}','${escHtml(r.suite_name)}')">View</button>
-                <button class="btn btn-xs btn-ghost" onclick="downloadReport('${r.id}')">Report</button>
-              </div></td>
-            </tr>`).join('')}
+              <tr>
+                <td class="mono">${escHtml(r.id)}</td>
+                <td>${escHtml(r.suite_name)}</td>
+                <td><span class="badge ${r.status === 'PASSED' ? 'badge-success' : 'badge-danger'}"><span class="badge-dot"></span>${r.status}</span></td>
+                <td class="text-sm">${r.passed}/${r.total} passed${r.failed ? ', ' + r.failed + ' failed' : ''}</td>
+                <td class="text-muted text-sm">${fmtDate(r.started_at)}</td>
+                <td><div class="table-actions">
+                  <button class="btn btn-xs btn-ghost" onclick="viewRunModal('${r.id}','${escHtml(r.suite_name)}')">View</button>
+                  <button class="btn btn-xs btn-ghost" onclick="downloadReport('${r.id}')">Report</button>
+                </div></td>
+              </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`
+}
+
+async function _renderApiRunsTab() {
+  const container = document.getElementById('runs-tab-content')
+  container.innerHTML = `<div class="text-muted text-sm" style="padding:8px">Loading...</div>`
+  const res = await api('GET', '/api/api-collection-runs')
+  const runs = res.runs || []
+  container.innerHTML = `
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Run ID</th><th>Collection</th><th>Status</th><th>Results</th><th>Started</th><th></th>
+        </tr></thead>
+        <tbody>
+          ${runs.length === 0
+            ? `<tr><td colspan="6"><div class="empty-state"><div class="empty-state-icon">&#9654;</div><p>No API runs yet.<br>Run a collection to see results here.</p></div></td></tr>`
+            : runs.map(r => `
+              <tr>
+                <td class="mono">${escHtml(r.id)}</td>
+                <td>${escHtml(r.collection_name)}</td>
+                <td><span class="badge ${r.status === 'PASSED' ? 'badge-success' : 'badge-danger'}"><span class="badge-dot"></span>${r.status}</span></td>
+                <td class="text-sm">${r.passed}/${r.total} passed${r.failed ? ', ' + r.failed + ' failed' : ''}</td>
+                <td class="text-muted text-sm">${fmtDate(r.started_at)}</td>
+                <td><div class="table-actions">
+                  <button class="btn btn-xs btn-ghost" onclick="viewApiRunModal('${r.id}')">View</button>
+                  <button class="btn btn-xs btn-ghost" onclick="downloadApiReport('${r.id}')">Report</button>
+                </div></td>
+              </tr>`).join('')}
         </tbody>
       </table>
     </div>`
@@ -4294,10 +4348,68 @@ function downloadReport(runId) {
   a.remove()
 }
 
+function downloadApiReport(runId) {
+  const base = '/api/api-collection-runs/' + encodeURIComponent(runId) + '/report'
+  window.open(base + '?view=1', '_blank')
+  const a = document.createElement('a')
+  a.href = base
+  a.download = 'qaclan-api-report-' + runId + '.html'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
 async function viewRunModal(id, suiteName) {
   const res = await api('GET', '/runs/' + id)
   if (res.ok === false) { toast(res.error, 'error'); return }
   showRunResults(res.run || res, suiteName)
+}
+
+async function viewApiRunModal(runId) {
+  const res = await api('GET', '/api/api-collection-runs/' + runId)
+  if (!res.ok) { toast(res.error || 'Failed to load run', 'error'); return }
+  const run = res.run
+  const statusCls = run.status === 'PASSED' ? 'badge-success' : 'badge-danger'
+  const methodColors = {GET:'#0969da',POST:'#1a7f37',PUT:'#e16f24',PATCH:'#9a6700',DELETE:'#cf222e',HEAD:'#6e40c9'}
+
+  const rows = (run.request_results || []).map((rr, i) => {
+    const assertions = rr.assertion_results || []
+    const passedA = assertions.filter(a => a.passed).length
+    const sc = rr.status === 'PASSED' ? 'badge-success' : 'badge-danger'
+    const mc = methodColors[(rr.method || 'GET').toUpperCase()] || '#57606a'
+    return `<tr>
+      <td class="text-sm text-muted">${i + 1}</td>
+      <td><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
+      <td style="font-size:13px">${escHtml(rr.request_name || '')}</td>
+      <td><span class="badge ${sc}" style="font-size:11px">${rr.status || 'ERROR'}</span></td>
+      <td class="text-sm">${rr.status_code != null ? rr.status_code : '—'}</td>
+      <td class="text-sm">${rr.duration_ms != null ? rr.duration_ms + 'ms' : '—'}</td>
+      <td class="text-sm text-muted">${passedA}/${assertions.length}</td>
+    </tr>`
+  }).join('')
+
+  const bodyHTML = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      <span class="badge ${statusCls}">${run.status}</span>
+      <span class="text-muted text-sm">${run.passed}/${run.total} passed &middot; ${fmtDate(run.started_at)}</span>
+    </div>
+    <div class="table-wrap" style="max-height:380px;overflow-y:auto">
+      <table>
+        <thead><tr>
+          <th>#</th><th>Method</th><th>Name</th><th>Status</th><th>Code</th><th>Duration</th><th>Assertions</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" class="text-muted text-sm">No requests</td></tr>'}</tbody>
+      </table>
+    </div>`
+
+  showModal(
+    escHtml(run.collection_name) + ' · API Run',
+    bodyHTML,
+    [
+      { label: 'Download Report', cls: 'btn-ghost', action: () => downloadApiReport(run.id) },
+      { label: 'Close', cls: 'btn-ghost', action: closeModal },
+    ]
+  )
 }
 
 // ── Environments Page ───────────────────────────────────────────
