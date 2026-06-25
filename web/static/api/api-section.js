@@ -232,7 +232,7 @@ function renderApiPage(container) {
       );
     }
 
-    renderCollectionsView(
+    const { reload: _reloadCollections } = renderCollectionsView(
       document.getElementById('api-collections-panel'),
       (requestId, defaultCollectionId, collectionId, collectionEnvName) => {
         _teardown();
@@ -241,6 +241,7 @@ function renderApiPage(container) {
       (runId, colId, colName) => _showRunDetail(runId, colId, colName),
       (col, runId) => _showCollectionDetail(col, runId)
     );
+    window.__qaclanApi.refresh = _reloadCollections;
 
     document.getElementById('api-discover-btn').onclick = () => showDiscoverModal();
   }).catch(err => {
