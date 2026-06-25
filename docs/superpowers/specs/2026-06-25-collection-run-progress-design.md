@@ -1,223 +1,197 @@
 # Collection Run Progress — Design Spec
-Date: 2026-06-25
+Date: 2026-06-25 (revised)
 
 ## Problem
 
-Collection runs (`POST /api/collections/<col_id>/run`) are synchronous and blocking — the HTTP call holds open until all requests complete, then returns the full result. The UI has no visibility into what is happening during execution. Users with collections of 5–30 requests see a blank loading state for seconds to minutes with no feedback.
+Collection runs are synchronous and blocking — the HTTP call holds open until all requests complete. The UI has no visibility during execution, no way to stop a run, and no indication of run state when navigating away and back.
 
 ## Goal
 
-Show live request-by-request progress as a collection executes. Each request row appears as it completes. The currently-executing request shows a spinner. Results persist in the DB so a page refresh never loses progress.
+- Live request-by-request progress on a dedicated run page
+- Stop a run mid-execution
+- Prevent the same collection running twice simultaneously
+- Show running status per collection in the sidebar when navigating away and back
+- Persist all state in DB — refresh never loses progress
 
 ## Decisions
 
 | Question | Decision |
 |---|---|
-| Live updates mechanism | Background thread + DB polling (1s interval) |
-| Async vs threading | Threading — Flask dev server is already threaded; httpx calls are I/O-bound; async requires ASGI refactor (overkill for local-first, single-user tool) |
-| Navigation on run | Navigate immediately to dedicated run detail page |
+| Live updates mechanism | Background thread + DB polling (1s on detail page, 3s on sidebar) |
+| Async vs threading | Threading — Flask dev server already threaded; httpx I/O-bound; async = ASGI refactor, overkill |
+| Navigation on run trigger | Navigate immediately to dedicated run detail page in `api-main-content` |
+| Same collection concurrently | Prevented — `start_collection_run()` checks for existing RUNNING run, returns existing `run_id` |
+| Multiple different collections | Allowed — no cross-contamination (separate state dicts, separate DB rows) |
+| Stop mechanism | `stop_requested` column polled by thread at start of each iteration; status becomes `STOPPED` |
 | Failed request rows | Stay collapsed — user clicks to expand |
 | Elapsed timer | Client-side `setInterval`, not server-derived |
-| Report button visibility | Shown only after run completes |
+| Report button visibility | Shown only after run completes (PASSED/FAILED/STOPPED) |
+| Sidebar running indicator | Pulsing dot (●) next to collection name — no extra text, no space cost |
+| Collection name click | Clicking name (not ▾) shows collection detail in main panel; ▾ still toggles expand |
+| Collection detail panel | Shows running summary card (if active run) + request list; replaces current empty-state when no request selected |
+| Summary card stop button | In both: collection detail panel + run detail page header |
 
 ---
 
 ## Section 1: Data Layer
 
-### Migration
-
-Add `current_request_index` to `api_collection_runs`:
+### New columns on `api_collection_runs`
 
 ```sql
 ALTER TABLE api_collection_runs ADD COLUMN current_request_index INTEGER DEFAULT -1;
+ALTER TABLE api_collection_runs ADD COLUMN stop_requested INTEGER DEFAULT 0;
 ```
 
-- `-1` = run created, not yet started
-- `0, 1, 2...` = index of the request **currently executing** (set before the request fires)
-- After run finishes, value is left at last index — irrelevant once status is PASSED/FAILED
+- `current_request_index`: `-1` = not started; `0..n` = index of currently executing request (set BEFORE request fires)
+- `stop_requested`: `0` = normal; `1` = stop requested by user; thread checks at start of each iteration
 
-### CollectionRunRepo changes
+### `create_run()` fix
 
-**`create_run()`** — accept `total` param and write it immediately (currently `total` is only written by `finish_run()` at the end, which means the progress bar denominator would be `0` during execution). `start_collection_run()` passes `len(requests)` at creation time.
+`total` must be written at creation time (not only at `finish_run()`). `start_collection_run()` passes `len(requests)` so the progress bar denominator is correct from the first poll.
 
-**`update_current_index(run_id, idx)`** — new method:
+### New / updated `CollectionRunRepo` methods
 
-```python
-def update_current_index(self, run_id: str, idx: int) -> None:
-    conn = get_conn()
-    conn.execute(
-        "UPDATE api_collection_runs SET current_request_index = ? WHERE id = ?",
-        (idx, run_id),
-    )
-    conn.commit()
-```
-
-**`get_run()`** — add `current_request_index` to the SELECT. Already returns `request_results` rows from `api_request_results` — these accumulate incrementally as each request completes.
+- **`update_current_index(run_id, idx)`** — single UPDATE before each request
+- **`request_stop(run_id)`** — sets `stop_requested = 1`
+- **`is_stop_requested(run_id)`** — returns `bool`
+- **`get_running_for_collection(collection_id)`** — returns `run_id` if any RUNNING run exists for this collection, else `None`
+- **`list_runs(project_id, status_filter=None)`** — accepts optional status filter so frontend can fetch only RUNNING runs cheaply
+- **`get_run()`** — updated SELECT to include `current_request_index`, `stop_requested`
 
 ---
 
 ## Section 2: Runner
 
-### RunnerService changes
+### `start_collection_run()` — new method (non-blocking)
 
-#### New method: `start_collection_run()`
+1. Check `get_running_for_collection(collection_id)` — if found, return existing `run_id` immediately (no new thread)
+2. Load collection + requests to get `total` count
+3. Create DB row with `status='RUNNING'`, `total=len(requests)`, `current_request_index=-1`
+4. Spawn `daemon=True` thread targeting `_execute_collection()`
+5. Return `run_id` immediately
 
-Replaces the direct `run_collection()` call from the route. Creates the DB row immediately, spawns a background thread, returns `run_id` to the caller without blocking.
+### `_execute_collection()` — thread target
 
-```python
-def start_collection_run(self, collection_id, project_id, env_name=None, seed_vars=None) -> str:
-    import threading
-    from web.api.repositories.collection_run_repo import CollectionRunRepo
-    from web.api.repositories.collection_repo import CollectionRepo
-    from datetime import datetime, timezone
+```
+results = []   # initialized BEFORE try so finally always has it
+final_status = "ERROR"
 
-    col = CollectionRepo().get(collection_id, project_id)
-    if col is None:
-        raise LookupError(f"Collection {collection_id} not found")
-
-    started_at = datetime.now(timezone.utc).isoformat()
-    run_id = CollectionRunRepo().create_run(
-        collection_id=collection_id,
-        project_id=project_id,
-        collection_name=col["name"],
-        env_name=env_name,
-        started_at=started_at,
-    )
-
-    thread = threading.Thread(
-        target=self._execute_collection,
-        args=(run_id, collection_id, project_id, env_name, seed_vars),
-        daemon=True,
-    )
-    thread.start()
-    return run_id
+try:
+    for idx, req in enumerate(requests):
+        if run_repo.is_stop_requested(run_id):   ← check BEFORE updating index
+            final_status = "STOPPED"
+            break
+        run_repo.update_current_index(run_id, idx)
+        result = run_api_request(...)
+        results.append(result)
+        run_repo.create_request_result(...)
+    else:
+        # loop completed without break
+        final_status = "PASSED" if no failures else "FAILED"
+except Exception:
+    final_status = "ERROR"
+finally:
+    run_repo.finish_run(run_id, final_status, ...)
 ```
 
-#### New method: `_execute_collection()`
+Thread safety: `get_conn()` uses `threading.local()` — each thread gets own SQLite connection.
 
-Contains the existing `run_collection()` loop logic, with one addition — `update_current_index` before each request:
+### Existing `run_collection()` kept for CLI
 
-```python
-def _execute_collection(self, run_id, collection_id, project_id, env_name, seed_vars):
-    # ... load col, requests, env_vars, state (same as existing run_collection) ...
-    try:
-        for idx, req in enumerate(requests):
-            run_repo.update_current_index(run_id, idx)   # ← signals "this request is running"
-            result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
-            results.append({...})
-            run_repo.create_request_result(run_id, req, result, idx)
-    finally:
-        # ... compute passed/failed/error_count, call finish_run() (same as existing) ...
-```
-
-Thread safety: `get_conn()` uses `threading.local()` — each thread gets its own SQLite connection. No shared mutable state beyond the DB.
-
-#### Existing `run_collection()` method
-
-Kept as-is for CLI usage (`qaclan api run --collection`). It continues to block synchronously, which is correct for terminal output.
+`qaclan api run --collection` continues to block synchronously.
 
 ---
 
-## Section 3: Route
+## Section 3: Routes
 
-### `POST /api/collections/<col_id>/run` — change to non-blocking
+### `POST /api/collections/<col_id>/run`
+Returns `{"ok": true, "run_id": "...", "status": "RUNNING", "already_running": false}` immediately.
+If collection already running: same shape, `"already_running": true`, with existing `run_id`.
 
-```python
-@bp.route("/api/collections/<col_id>/run", methods=["POST"])
-def run_collection(col_id):
-    data = request.get_json(force=True) or {}
-    env_name = data.get("env_name") or None
-    seed_vars = data.get("seed_vars") or None
-    pid = _project_id()
-    run_id = _runner_svc.start_collection_run(col_id, pid, env_name=env_name, seed_vars=seed_vars)
-    return jsonify({"ok": True, "run_id": run_id, "status": "RUNNING"})
-```
+### `POST /api/api-collection-runs/<run_id>/stop`
+New route. Sets `stop_requested=1`. Returns `{"ok": true}`. 400 if run not RUNNING.
 
-Returns immediately with `run_id`. Frontend navigates to the run page using this ID.
+### `GET /api/api-collection-runs`
+Add `?status=RUNNING` filter support so sidebar can poll only active runs cheaply.
 
-### `GET /api/api-collection-runs/<run_id>` — no change needed
-
-Already returns full run dict including `request_results`. Adding `current_request_index` to `get_run()` SELECT is the only change. Frontend polls this endpoint.
+### `GET /api/api-collection-runs/<run_id>`
+No route change — just `get_run()` SELECT now includes `current_request_index` and `stop_requested`.
 
 ---
 
 ## Section 4: Frontend
 
-### Router
+### Sidebar — pulsing dot
 
-Add route: `#api-collection-runs/:runId` → renders `CollectionRunView`
-
-Registered in `app.js` router alongside existing API routes.
-
-### "Run" button flow (in collection view / collections sidebar)
+`renderCollectionsView` polls `GET /api/api-collection-runs?status=RUNNING` every 3s. For each collection with an active run, a small pulsing dot appears before the name:
 
 ```
-1. User clicks [▶ Run]
-2. POST /api/collections/<col_id>/run  →  { run_id }
-3. Navigate to #api-collection-runs/<run_id>
-4. CollectionRunView mounts, starts polling
+● Auth Flows  (4)  [staging ▾]  [⋯]  [▾]
+  POST /login
+  GET  /me
 ```
 
-### CollectionRunView (`web/static/api/views/collection-run-view.js`)
+Clicking the collection **name** (`leftSide` element) now calls `onSelectCollection(col, runId|null)` — navigates to collection detail in main panel. Clicking **▾** still just expands/collapses the sidebar list.
 
-New ES module view. Polling lifecycle:
+### Collection Detail Panel (`collection-detail-view.js`)
 
-- On mount: fetch `GET /api/api-collection-runs/<run_id>` immediately
-- While `status === 'RUNNING'`: poll every 1000ms via `setInterval`
-- On `status !== 'RUNNING'`: clear interval, render final state
+Rendered in `api-main-content` when collection name is clicked. Two states:
 
-**Page layout:**
-
+**State A — no active run:**
 ```
-Collection Run: Auth Flows              [↩ Back to Collection]  [⬇ Report]
-──────────────────────────────────────────────────────────────────────────
-● RUNNING   3 / 7   2 passed · 1 failed · 0 errors   00:14 elapsed
-[████████████░░░░░░░░░░░░░░░░] 43%
-
-METHOD   NAME                STATUS      CODE   DURATION
-POST     /auth/login         ✓ PASSED    201    142ms      [▼]
-GET      /auth/me            ✓ PASSED    200     89ms      [▼]
-POST     /auth/refresh       ✗ FAILED    401    203ms      [▼]
-POST     /auth/logout        ⟳ running...
-GET      /users              · pending
-DELETE   /users/{{id}}       · pending
+Auth Flows
+──────────────────────────────────
+No requests selected.
+[Select a request from the left to edit it]
 ```
 
-**Status determination per row** (derived client-side from `request_results` + `current_request_index`):
+**State B — active run:**
+```
+Auth Flows
+──────────────────────────────────────────────────
+⟳ Run in progress  ·  3 / 7  ·  2 passed · 1 failed
+[View Full Progress →]                    [■ Stop]
+──────────────────────────────────────────────────
+POST  /login    ✓   GET  /me    ✓   POST /refresh ✗ ...
+```
 
-| Condition | Display |
-|---|---|
-| `request_results[idx]` exists | Completed — show status badge + code + duration |
-| `idx === current_request_index` (no result yet) | ⟳ running... spinner |
-| `idx > current_request_index` | · pending (dimmed) |
+Summary card polls `GET /api/api-collection-runs/<run_id>` every 2s while RUNNING.
+"View Full Progress" → navigates to `CollectionRunView` (same `api-main-content`).
+"Stop" → `POST /api/api-collection-runs/<run_id>/stop`.
+When run finishes (poll detects non-RUNNING status): card shows final result, Stop button disappears.
 
-**Expand row `[▼]`** (collapsed by default, even on failure):
-- Response body (truncated to 500 chars, "show more" link if longer)
-- Response headers (key-value, collapsed by default)
-- Assertion results: ✓/✗ per assertion with actual vs expected
+### Run Detail Page (`collection-run-view.js`)
 
-**Header section:**
-- Status badge: `RUNNING` (pulsing) / `PASSED` (green) / `FAILED` (red)
-- `N / total` counter
-- `X passed · Y failed · Z errors` counters
-- Elapsed timer: client-side `setInterval(1s)`, starts from `run.started_at`, stops when status is final
-- Progress bar: `(request_results.length / total) * 100%`
+Full-page progress view rendered in `api-main-content`. Polls every 1s while RUNNING.
 
-**Report button:** rendered only when `status !== 'RUNNING'`. Links to `GET /api/api-collection-runs/<run_id>/report?view=1`.
+```
+Collection Run: Auth Flows           [← Back]  [■ Stop]  [⬇ Report]
+──────────────────────────────────────────────────────────────────────
+● RUNNING   3/7   2 passed · 1 failed · 0 errors   00:14
+[████████████░░░░░░░░░░░░░░░░░░] 43%
 
-**Back link:** links to `#api-collections` (or `#api-collections/<collection_id>` if available from run data).
+METHOD  NAME               STATUS    CODE  DURATION
+POST    /auth/login        ✓ PASSED  201   142ms    [▼]
+GET     /auth/me           ✓ PASSED  200    89ms    [▼]
+POST    /auth/refresh      ✗ FAILED  401   203ms    [▼]
+POST    /auth/logout       ⟳ running...
+GET     /users             · pending
+DELETE  /users/{{id}}      · pending
+```
 
-### On page refresh
+- Stop button: visible only while RUNNING; calls `POST /api/api-collection-runs/<run_id>/stop`
+- Report button: visible only when status is PASSED/FAILED/STOPPED
+- Rows collapsed by default — click to expand response body + assertion results
+- On refresh: poll returns current DB state, rendering resumes from where it was
 
-No data loss — `GET /api/api-collection-runs/<run_id>` returns the full current state from DB:
-- If still `RUNNING`: partial `request_results`, `current_request_index` — resumes polling
-- If `PASSED`/`FAILED`: full results, no polling needed
+### Teardown
+
+Before rendering any new view into `api-main-content`, check `container.__destroyRunView` and call it if present. This clears poll timers from any previously-rendered run/detail view.
 
 ---
 
 ## Out of Scope
 
-- Stop/cancel a running collection mid-execution
 - Parallel request execution within a collection
-- SSE streaming (polling at 1s is sufficient for this use case)
-- Run history page (already exists in API Runs tab on the Runs page)
+- SSE streaming
+- Cancel mid-request (stop waits for current request to finish, then halts before next)
