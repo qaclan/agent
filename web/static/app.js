@@ -4249,9 +4249,9 @@ async function renderRunsPage() {
         <p>View execution history</p>
       </div>
     </div>
-    <div class="req-tab-bar">
-      <button class="req-tab ${_runsTab === 'regression' ? 'active' : ''}" onclick="switchRunsTab('regression')">Regression Runs</button>
-      <button class="req-tab ${_runsTab === 'api' ? 'active' : ''}" onclick="switchRunsTab('api')">API Runs</button>
+    <div class="page-tab-switcher">
+      <button class="page-tab-btn ${_runsTab === 'regression' ? 'active' : ''}" onclick="switchRunsTab('regression')">Regression Runs</button>
+      <button class="page-tab-btn ${_runsTab === 'api' ? 'active' : ''}" onclick="switchRunsTab('api')">API Runs</button>
     </div>
     <div id="runs-tab-content" style="padding-top:16px"></div>`
 
@@ -4260,7 +4260,7 @@ async function renderRunsPage() {
 
 function switchRunsTab(tab) {
   _runsTab = tab
-  document.querySelectorAll('.req-tab-bar .req-tab').forEach((b, i) => {
+  document.querySelectorAll('.page-tab-switcher .page-tab-btn').forEach((b, i) => {
     b.classList.toggle('active', (i === 0 && tab === 'regression') || (i === 1 && tab === 'api'))
   })
   renderActiveRunsTab()
@@ -4378,21 +4378,68 @@ async function viewApiRunModal(runId) {
     const passedA = assertions.filter(a => a.passed).length
     const sc = rr.status === 'PASSED' ? 'badge-success' : 'badge-danger'
     const mc = methodColors[(rr.method || 'GET').toUpperCase()] || '#57606a'
+    const code = rr.status_code
+    const codeColor = code == null ? '' : code >= 200 && code < 300 ? 'var(--success,#22c55e)'
+      : code >= 300 && code < 400 ? 'var(--info,#60a5fa)'
+      : code >= 400               ? 'var(--danger,#ef4444)'
+      :                              ''
+    const dur = rr.duration_ms
+    const durColor = dur == null ? '' : dur < 300 ? 'var(--success,#22c55e)'
+      : dur < 1000 ? 'var(--warning,#f59e0b)'
+      :               'var(--danger,#ef4444)'
     return `<tr>
       <td class="text-sm text-muted">${i + 1}</td>
       <td><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
       <td style="font-size:13px">${escHtml(rr.request_name || '')}</td>
       <td><span class="badge ${sc}" style="font-size:11px">${rr.status || 'ERROR'}</span></td>
-      <td class="text-sm">${rr.status_code != null ? rr.status_code : '—'}</td>
-      <td class="text-sm">${rr.duration_ms != null ? rr.duration_ms + 'ms' : '—'}</td>
+      <td><span style="font-family:monospace;font-size:12px;font-weight:700;${codeColor ? 'color:' + codeColor : ''}">${code != null ? code : '—'}</span></td>
+      <td><span style="font-size:12px;font-weight:600;${durColor ? 'color:' + durColor : ''}">${dur != null ? dur + 'ms' : '—'}</span></td>
       <td class="text-sm text-muted">${passedA}/${assertions.length}</td>
     </tr>`
   }).join('')
 
+  const statusColor = run.status === 'PASSED' ? 'var(--success,#22c55e)'
+    : run.status === 'FAILED'  ? 'var(--danger,#ef4444)'
+    : run.status === 'STOPPED' ? 'var(--text-muted,#888)'
+    : run.status === 'RUNNING' ? 'var(--warning,#f59e0b)'
+    :                             'var(--danger,#ef4444)'
+
+  let elapsed = '—'
+  if (run.started_at && run.finished_at) {
+    const secs = Math.max(0, Math.floor((new Date(run.finished_at) - new Date(run.started_at)) / 1000))
+    elapsed = String(Math.floor(secs / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0')
+  }
+
+  const cellStyle = 'padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;border-right:1px solid rgba(128,128,128,.2);'
+  const valStyle  = 'font-size:16px;font-weight:700;line-height:1.2;'
+  const lblStyle  = 'font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;'
+
   const bodyHTML = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      <span class="badge ${statusCls}">${run.status}</span>
-      <span class="text-muted text-sm">${run.passed}/${run.total} passed &middot; ${fmtDate(run.started_at)}</span>
+    <div style="display:flex;align-items:stretch;margin-bottom:16px;">
+      <div style="${cellStyle}min-width:90px;border-right:1px solid rgba(128,128,128,.2);">
+        <span style="${valStyle}color:${statusColor};">${escHtml(run.status)}</span>
+        <span style="${lblStyle}">Status</span>
+      </div>
+      <div style="${cellStyle}">
+        <span style="${valStyle}">${run.passed != null ? run.passed + '/' + run.total : '—'}</span>
+        <span style="${lblStyle}">Progress</span>
+      </div>
+      <div style="${cellStyle}">
+        <span style="${valStyle}color:var(--success,#22c55e);">${run.passed ?? 0}</span>
+        <span style="${lblStyle}">Passed</span>
+      </div>
+      <div style="${cellStyle}">
+        <span style="${valStyle}color:var(--danger,#ef4444);">${run.failed ?? 0}</span>
+        <span style="${lblStyle}">Failed</span>
+      </div>
+      <div style="${cellStyle}">
+        <span style="${valStyle}color:var(--warning,#f59e0b);">${run.error_count ?? 0}</span>
+        <span style="${lblStyle}">Errors</span>
+      </div>
+      <div style="padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;">
+        <span style="${valStyle}">${elapsed}</span>
+        <span style="${lblStyle}">Elapsed</span>
+      </div>
     </div>
     <div class="table-wrap" style="max-height:380px;overflow-y:auto">
       <table>
