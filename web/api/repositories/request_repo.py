@@ -18,6 +18,7 @@ _DEFAULTS = {
     "auth_config": "{}",
     "pre_script": None,
     "pre_lang": "js",
+    "pre_extractor": "[]",
     "post_script": None,
     "post_lang": "js",
     "post_extractor": "[]",
@@ -32,7 +33,7 @@ _DEFAULTS = {
 def _serialize(data: dict) -> dict:
     """Ensure JSON list/dict fields are stored as TEXT."""
     out = dict(data)
-    for key in ("headers", "params", "path_params", "assertions", "post_extractor"):
+    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor"):
         if key in out and not isinstance(out[key], str):
             out[key] = json.dumps(out[key])
     for key in ("auth_config", "request_schema", "response_schema"):
@@ -43,7 +44,7 @@ def _serialize(data: dict) -> dict:
 
 def _deserialize(row: dict) -> dict:
     out = dict(row)
-    for key in ("headers", "params", "path_params", "assertions", "post_extractor"):
+    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor"):
         if isinstance(out.get(key), str):
             try:
                 out[key] = json.loads(out[key])
@@ -88,17 +89,17 @@ class RequestRepo:
         merged = {**_DEFAULTS, **_serialize(data)}
         conn.execute(
             "INSERT INTO api_requests (id, project_id, feature_id, collection_id, name, method, url, "
-            "headers, params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, "
+            "headers, params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
             "post_script, post_lang, post_extractor, request_schema, response_schema, "
             "assertions, follow_redirects, timeout_ms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, project_id,
              merged.get("feature_id"), merged.get("collection_id"),
              merged.get("name", "Unnamed"), merged["method"], merged["url"],
              merged["headers"], merged["params"], merged["path_params"],
              merged["body_type"], merged["body"],
              merged["auth_type"], merged["auth_config"],
-             merged["pre_script"], merged["pre_lang"],
+             merged["pre_script"], merged["pre_lang"], merged["pre_extractor"],
              merged["post_script"], merged["post_lang"], merged["post_extractor"],
              merged.get("request_schema"), merged.get("response_schema"),
              merged["assertions"], merged["follow_redirects"], merged["timeout_ms"],
@@ -112,7 +113,7 @@ class RequestRepo:
         conn = get_conn()
         s = _serialize(data)
         fields = ["name", "method", "url", "headers", "params", "path_params", "body_type", "body",
-                  "auth_type", "auth_config", "pre_script", "pre_lang", "post_script",
+                  "auth_type", "auth_config", "pre_script", "pre_lang", "pre_extractor", "post_script",
                   "post_lang", "post_extractor", "request_schema", "response_schema",
                   "assertions", "follow_redirects", "timeout_ms",
                   "feature_id", "collection_id"]

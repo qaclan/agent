@@ -1,4 +1,5 @@
 import { createVarPicker } from './var-picker.js';
+import { createInlineVarDrop } from './inline-var-drop.js';
 
 /**
  * createKeyValueTable(options) → { el, getRows, setRows }
@@ -17,6 +18,7 @@ export function createKeyValueTable(options = {}) {
   } = options;
 
   const _picker = varPickerEnabled ? createVarPicker({ getVars }) : null;
+  const _inlineDrop = varPickerEnabled ? createInlineVarDrop(getVars) : null;
 
   const wrapper = document.createElement('div');
   wrapper.className = 'kv-table-wrapper';
@@ -48,26 +50,6 @@ export function createKeyValueTable(options = {}) {
 
   function _applyVarStyle(inp) {
     inp.classList.toggle('kv-value--var-ref', _isVarRef(inp.value));
-  }
-
-  function _handleAutocomplete(inp) {
-    const val = inp.value;
-    const caret = inp.selectionStart ?? val.length;
-    const before = val.slice(0, caret);
-    const openAt = before.lastIndexOf('{{');
-    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
-      const partial = before.slice(openAt + 2);
-      _picker.open(inp, (varToken) => {
-        const after = val.slice(caret);
-        inp.value = val.slice(0, openAt) + varToken + after;
-        const newPos = openAt + varToken.length;
-        inp.setSelectionRange(newPos, newPos);
-        inp.dispatchEvent(new Event('input'));
-        inp.focus();
-      }, partial);
-    } else {
-      _picker.close();
-    }
   }
 
   function _addRow(data = {}) {
@@ -106,10 +88,8 @@ export function createKeyValueTable(options = {}) {
     tr.appendChild(valTd);
 
     if (!readOnly) {
-      valInput.addEventListener('input', (e) => {
-        _applyVarStyle(valInput);
-        if (varPickerEnabled && e.isTrusted) _handleAutocomplete(valInput);
-      });
+      valInput.addEventListener('input', () => _applyVarStyle(valInput));
+      if (varPickerEnabled) _inlineDrop.watchInput(valInput);
     }
 
     if (varPickerEnabled && !readOnly) {

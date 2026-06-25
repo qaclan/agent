@@ -2,6 +2,7 @@ import { createKeyValueTable } from '../components/key-value-table.js';
 import { createAssertionBuilder } from '../components/assertion-builder.js';
 import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
+import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
 
 /**
@@ -197,6 +198,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodyTypeGroup.appendChild(minifyBtn);
 
   const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
+  const _bodyInlineDrop = createInlineVarDrop(getAllVars);
   const bodyVarBtn = document.createElement('button');
   bodyVarBtn.type = 'button';
   bodyVarBtn.title = 'Insert variable at cursor';
@@ -331,24 +333,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodyFallback.addEventListener('input', (e) => {
     bodyTextarea.value = bodyFallback.value;
     _validateFallback();
-    if (!e.isTrusted) return;
-    const val = bodyFallback.value;
-    const caret = bodyFallback.selectionStart ?? val.length;
-    const before = val.slice(0, caret);
-    const openAt = before.lastIndexOf('{{');
-    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
-      const partial = before.slice(openAt + 2);
-      _bodyVarPicker.open(bodyFallback, (varToken) => {
-        const after = val.slice(caret);
-        bodyFallback.value = val.slice(0, openAt) + varToken + after;
-        bodyTextarea.value = bodyFallback.value;
-        bodyFallback.setSelectionRange(openAt + varToken.length, openAt + varToken.length);
-        bodyFallback.focus();
-      }, partial);
-    } else {
-      _bodyVarPicker.close();
-    }
   });
+  _bodyInlineDrop.watchInput(bodyFallback);
 
   async function _activateCmEditor(val) {
     cmWrap.innerHTML = '';
@@ -448,6 +434,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     ? JSON.stringify(r.auth_config, null, 2)
     : (r.auth_config || '{}');
 
+  const _authInlineDrop = createInlineVarDrop(getAllVars);
+
   function _makeField(labelText, placeholder, getValue, setValue) {
     const wrap = document.createElement('div');
     wrap.className = 'req-auth-field';
@@ -459,12 +447,14 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     inp.placeholder = placeholder;
     inp.value = getValue() || '';
     inp.oninput = () => setValue(inp.value);
+    _authInlineDrop.watchInput(inp);
     wrap.appendChild(lbl);
     wrap.appendChild(inp);
     return wrap;
   }
 
   function _renderAuthFields(type) {
+    _authInlineDrop.close();
     authFieldsDiv.innerHTML = '';
     let cfg = {};
     try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
@@ -642,6 +632,54 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     return ul;
   }
 
+  function makePreScriptSection(lang, code, extractorRules) {
+    const container = document.createElement('div');
+
+    const subBar = document.createElement('div');
+    subBar.style.cssText = 'display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:14px;';
+
+    const extractorPane = _buildExtractorPane(
+      extractorRules || [],
+      null,
+      'Extract values from the previous request\'s response (JSON path) and inject as variables into this request.'
+    );
+    const scriptPane = makeScriptSection(
+      lang, code,
+      'Runs before the request. Use qc.set("var", value) to inject variables into URL/headers/body.'
+    );
+
+    const paneArea = document.createElement('div');
+    paneArea.appendChild(extractorPane);
+
+    [['Extractor', extractorPane], ['Script', scriptPane]].forEach(([label, pane], idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = label;
+      btn.style.cssText = `background:none;border:none;padding:6px 14px;font-size:12px;cursor:pointer;border-bottom:2px solid ${idx === 0 ? 'var(--primary)' : 'transparent'};color:${idx === 0 ? 'var(--primary)' : 'var(--text-muted)'};font-weight:${idx === 0 ? '600' : '400'};`;
+      btn.onclick = () => {
+        subBar.querySelectorAll('button').forEach(b => {
+          b.style.borderBottomColor = 'transparent';
+          b.style.color = 'var(--text-muted)';
+          b.style.fontWeight = '400';
+        });
+        btn.style.borderBottomColor = 'var(--primary)';
+        btn.style.color = 'var(--primary)';
+        btn.style.fontWeight = '600';
+        paneArea.innerHTML = '';
+        paneArea.appendChild(pane);
+      };
+      subBar.appendChild(btn);
+    });
+
+    container.appendChild(subBar);
+    container.appendChild(paneArea);
+
+    container._getLang = () => scriptPane._getLang();
+    container._getCode = () => scriptPane._getCode();
+    container._getExtractor = () => extractorPane._getRows();
+    return container;
+  }
+
   function makePostScriptSection(lang, code, extractorRules, responseSchema) {
     const container = document.createElement('div');
 
@@ -689,13 +727,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     return container;
   }
 
-  function _buildExtractorPane(initialRules, responseSchema) {
+  function _buildExtractorPane(initialRules, responseSchema, hintText) {
     const div = document.createElement('div');
     const _namePicker = createVarPicker({ getVars: getAllVars });
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = 'Extract values from the response JSON and save as variables. Use {{VAR_NAME}} in later requests.';
+    hint.textContent = hintText || 'Extract values from the response JSON and save as variables. Use {{VAR_NAME}} in later requests.';
     div.appendChild(hint);
 
     // Schema tree (populated after _addRow is defined below)
@@ -806,9 +844,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     return div;
   }
 
-  const preScriptSection = makeScriptSection(
-    r.pre_lang, r.pre_script,
-    'Runs before the request. Use qc.set("var", value) to inject variables into URL/headers/body.'
+  const preScriptSection = makePreScriptSection(
+    r.pre_lang, r.pre_script, r.pre_extractor || []
   );
   const postScriptSection = makePostScriptSection(
     r.post_lang, r.post_script, r.post_extractor || [], r.response_schema || null
@@ -884,6 +921,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       auth_config: parsedAuth,
       pre_lang: preScriptSection._getLang(),
       pre_script: preScriptSection._getCode() || null,
+      pre_extractor: preScriptSection._getExtractor(),
       post_lang: postScriptSection._getLang(),
       post_script: postScriptSection._getCode() || null,
       post_extractor: postScriptSection._getExtractor(),
