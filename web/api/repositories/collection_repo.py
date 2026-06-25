@@ -10,7 +10,7 @@ class CollectionRepo:
     def list(self, project_id: str) -> list[dict]:
         conn = get_conn()
         rows = conn.execute(
-            "SELECT ac.id, ac.name, ac.description, ac.env_name, ac.created_at, "
+            "SELECT ac.id, ac.name, ac.description, ac.env_name, ac.auth_type, ac.auth_config, ac.created_at, "
             "COUNT(ar.id) AS request_count "
             "FROM api_collections ac "
             "LEFT JOIN api_requests ar ON ar.collection_id = ac.id "
@@ -23,30 +23,33 @@ class CollectionRepo:
     def get(self, id: str, project_id: str) -> dict | None:
         conn = get_conn()
         row = conn.execute(
-            "SELECT id, name, description, env_name, created_at FROM api_collections "
+            "SELECT id, name, description, env_name, auth_type, auth_config, created_at FROM api_collections "
             "WHERE id = ? AND project_id = ?",
             (id, project_id),
         ).fetchone()
         return dict(row) if row else None
 
-    def create(self, project_id: str, name: str, description: str | None = None, env_name: str | None = None) -> dict:
+    def create(self, project_id: str, name: str, description: str | None = None,
+               env_name: str | None = None, auth_type: str = "none", auth_config: str = "{}") -> dict:
         conn = get_conn()
         cid = generate_id("apicol")
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO api_collections (id, project_id, name, description, env_name, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (cid, project_id, name, description, env_name, now),
+            "INSERT INTO api_collections (id, project_id, name, description, env_name, auth_type, auth_config, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (cid, project_id, name, description, env_name, auth_type, auth_config, now),
         )
         conn.commit()
         logger.info("CollectionRepo.create: %s (%s)", name, cid)
-        return {"id": cid, "name": name, "description": description, "env_name": env_name, "created_at": now, "request_count": 0}
+        return {"id": cid, "name": name, "description": description, "env_name": env_name,
+                "auth_type": auth_type, "auth_config": auth_config, "created_at": now, "request_count": 0}
 
-    def update(self, id: str, name: str, description: str | None = None, env_name: str | None = None) -> bool:
+    def update(self, id: str, name: str, description: str | None = None,
+               env_name: str | None = None, auth_type: str = "none", auth_config: str = "{}") -> bool:
         conn = get_conn()
         cur = conn.execute(
-            "UPDATE api_collections SET name = ?, description = ?, env_name = ? WHERE id = ?",
-            (name, description, env_name, id),
+            "UPDATE api_collections SET name = ?, description = ?, env_name = ?, auth_type = ?, auth_config = ? WHERE id = ?",
+            (name, description, env_name, auth_type, auth_config, id),
         )
         conn.commit()
         return cur.rowcount > 0

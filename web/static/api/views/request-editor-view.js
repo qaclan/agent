@@ -2,6 +2,7 @@ import { createKeyValueTable } from '../components/key-value-table.js';
 import { createAssertionBuilder } from '../components/assertion-builder.js';
 import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
+import { createJsonEditor } from '../components/json-editor.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -97,9 +98,6 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlBar.appendChild(sendBtn);
   editor.appendChild(urlBar);
 
-  urlInput.addEventListener('input', _syncPathVars);
-  _syncPathVars();
-
   // ── Tab bar ──
   const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions'];
   const tabBar = document.createElement('div');
@@ -155,6 +153,9 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     pathVarsTable.setRows(keys.map(key => ({ key, value: current[key] ?? stored[key] ?? '', enabled: true })));
   }
 
+  urlInput.addEventListener('input', _syncPathVars);
+  _syncPathVars();
+
   const assertionBuilder = createAssertionBuilder();
   assertionBuilder.setAssertions(r.assertions || []);
 
@@ -165,8 +166,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const bodyTypeGroup = document.createElement('div');
   bodyTypeGroup.className = 'req-body-type-group';
-  bodyTypeGroup.style.display = 'flex';
-  bodyTypeGroup.style.alignItems = 'center';
+  bodyTypeGroup.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:4px;';
 
   BODY_TYPES.forEach(t => {
     const btn = document.createElement('button');
@@ -178,50 +178,197 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     bodyTypeGroup.appendChild(btn);
   });
 
-  // {} insert variable button — visible only for raw/graphql body types
+  const _bodyToolbarSpacer = document.createElement('span');
+  _bodyToolbarSpacer.style.flex = '1';
+  bodyTypeGroup.appendChild(_bodyToolbarSpacer);
+
+  const formatBtn = document.createElement('button');
+  formatBtn.type = 'button';
+  formatBtn.title = 'Format JSON (Ctrl+Shift+F)';
+  formatBtn.style.cssText = 'font-size:11px;padding:3px 8px;border:1px solid var(--border-default);border-radius:4px;background:none;cursor:pointer;color:var(--text-muted);display:none;';
+  formatBtn.textContent = 'Format';
+  bodyTypeGroup.appendChild(formatBtn);
+
+  const minifyBtn = document.createElement('button');
+  minifyBtn.type = 'button';
+  minifyBtn.title = 'Minify JSON';
+  minifyBtn.style.cssText = 'font-size:11px;padding:3px 8px;border:1px solid var(--border-default);border-radius:4px;background:none;cursor:pointer;color:var(--text-muted);display:none;';
+  minifyBtn.textContent = 'Minify';
+  bodyTypeGroup.appendChild(minifyBtn);
+
   const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
   const bodyVarBtn = document.createElement('button');
   bodyVarBtn.type = 'button';
   bodyVarBtn.title = 'Insert variable at cursor';
-  bodyVarBtn.style.cssText = 'margin-left:auto;font-size:11px;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:none;cursor:pointer;color:var(--text-muted);';
+  bodyVarBtn.style.cssText = 'font-size:11px;padding:3px 8px;border:1px solid var(--border-default);border-radius:4px;background:none;cursor:pointer;color:var(--text-muted);display:none;';
   bodyVarBtn.textContent = '{ }';
-  bodyVarBtn.style.display = 'none';
-  bodyVarBtn.onclick = () => {
-    _bodyVarPicker.open(bodyVarBtn, (varToken) => {
-      const start = bodyTextarea.selectionStart;
-      const end = bodyTextarea.selectionEnd;
-      bodyTextarea.value = bodyTextarea.value.slice(0, start) + varToken + bodyTextarea.value.slice(end);
-      const newPos = start + varToken.length;
-      bodyTextarea.setSelectionRange(newPos, newPos);
-      bodyTextarea.focus();
-    });
-  };
   bodyTypeGroup.appendChild(bodyVarBtn);
 
+  // Hidden textarea — source of truth for _save(), kept in sync by CM onChange
   const bodyTextarea = document.createElement('textarea');
-  bodyTextarea.className = 'input-sm';
-  bodyTextarea.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;margin-top:4px;';
+  bodyTextarea.className = 'input-sm body-json-editor';
+  bodyTextarea.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;display:none;';
   bodyTextarea.value = r.body || '';
-  bodyTextarea.addEventListener('input', () => {
-    const val = bodyTextarea.value;
-    const caret = bodyTextarea.selectionStart ?? val.length;
+  bodyTextarea.spellcheck = false;
+
+  // CM editor wrapper — shown instead of textarea when CM loads
+  const cmWrap = document.createElement('div');
+  cmWrap.style.display = 'none';
+
+  // Fallback textarea — shown when CM unavailable (offline)
+  const bodyFallback = document.createElement('textarea');
+  bodyFallback.className = 'input-sm body-json-editor';
+  bodyFallback.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;display:none;';
+  bodyFallback.spellcheck = false;
+
+  const jsonErrorEl = document.createElement('div');
+  jsonErrorEl.style.cssText = 'display:none;font-size:11px;color:var(--danger,#e53e3e);padding:3px 6px;margin-top:2px;font-family:var(--font-mono);background:color-mix(in srgb,var(--danger,#e53e3e) 6%,transparent);border-radius:4px;';
+
+  let _cmEditor = null; // CodeMirror view instance (null when unavailable or non-raw type)
+  let _cmActive = false;
+
+  function _parseBodyWithVarSub(text) {
+    const vars = [];
+    const subbed = text.replace(/\{\{([^}]+)\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
+    return { parsed: JSON.parse(subbed), vars };
+  }
+
+  function _getBodyValue() {
+    if (_cmActive && _cmEditor) return _cmEditor.getValue();
+    if (_cmActive) return bodyFallback.value;
+    return bodyTextarea.value;
+  }
+
+  function _setBodyValue(val) {
+    bodyTextarea.value = val; // always keep hidden textarea in sync for _save()
+    if (_cmActive && _cmEditor) { _cmEditor.setValue(val); return; }
+    if (_cmActive) { bodyFallback.value = val; return; }
+  }
+
+  function _validateFallback() {
+    const val = bodyFallback.value.trim();
+    if (!val) { jsonErrorEl.style.display = 'none'; bodyFallback.style.borderColor = ''; return; }
+    try {
+      _parseBodyWithVarSub(val);
+      jsonErrorEl.style.display = 'none';
+      bodyFallback.style.borderColor = 'var(--success-border, #48bb78)';
+    } catch(e) {
+      jsonErrorEl.textContent = e.message;
+      jsonErrorEl.style.display = '';
+      bodyFallback.style.borderColor = 'var(--danger, #e53e3e)';
+    }
+  }
+
+  formatBtn.onclick = () => {
+    const val = _getBodyValue().trim();
+    if (!val) return;
+    try {
+      const { parsed, vars } = _parseBodyWithVarSub(val);
+      let pretty = JSON.stringify(parsed, null, 2);
+      pretty = pretty.replace(/"__QCVAR_(\d+)__"/g, (_, i) => vars[+i] || '"__VAR__"');
+      _setBodyValue(pretty);
+      if (!_cmEditor) _validateFallback();
+    } catch(e) {
+      if (!_cmEditor) _validateFallback();
+    }
+  };
+
+  minifyBtn.onclick = () => {
+    const val = _getBodyValue().trim();
+    if (!val) return;
+    try {
+      const { parsed, vars } = _parseBodyWithVarSub(val);
+      let minified = JSON.stringify(parsed);
+      minified = minified.replace(/"__QCVAR_(\d+)__"/g, (_, i) => vars[+i] || '__VAR__');
+      _setBodyValue(minified);
+      if (!_cmEditor) _validateFallback();
+    } catch(e) {
+      if (!_cmEditor) _validateFallback();
+    }
+  };
+
+  bodyVarBtn.onclick = () => {
+    const anchor = _cmActive ? bodyVarBtn : bodyVarBtn;
+    _bodyVarPicker.open(anchor, (varToken) => {
+      if (_cmActive && _cmEditor) {
+        // Insert at current cursor in CM
+        const view = _cmEditor;
+        // getValue/setValue approach as CM view is opaque here
+        const cur = _cmEditor.getValue();
+        _cmEditor.setValue(cur + varToken);
+        _cmEditor.focus();
+      } else {
+        const start = bodyFallback.selectionStart;
+        const end = bodyFallback.selectionEnd;
+        bodyFallback.value = bodyFallback.value.slice(0, start) + varToken + bodyFallback.value.slice(end);
+        bodyTextarea.value = bodyFallback.value;
+        bodyFallback.setSelectionRange(start + varToken.length, start + varToken.length);
+        bodyFallback.focus();
+      }
+    });
+  };
+
+  // Fallback textarea event handlers
+  bodyFallback.addEventListener('keydown', e => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const s = bodyFallback.selectionStart, end = bodyFallback.selectionEnd;
+      if (s === end) {
+        bodyFallback.value = bodyFallback.value.slice(0, s) + '  ' + bodyFallback.value.slice(end);
+        bodyFallback.setSelectionRange(s + 2, s + 2);
+      } else {
+        const before = bodyFallback.value.slice(0, s);
+        const sel = bodyFallback.value.slice(s, end);
+        const after = bodyFallback.value.slice(end);
+        const indented = sel.replace(/^/gm, '  ');
+        bodyFallback.value = before + indented + after;
+        bodyFallback.setSelectionRange(s, s + indented.length);
+      }
+    }
+    if (e.key === 'F' && (e.ctrlKey || e.metaKey) && e.shiftKey) { e.preventDefault(); formatBtn.click(); }
+  });
+
+  bodyFallback.addEventListener('input', (e) => {
+    bodyTextarea.value = bodyFallback.value;
+    _validateFallback();
+    if (!e.isTrusted) return;
+    const val = bodyFallback.value;
+    const caret = bodyFallback.selectionStart ?? val.length;
     const before = val.slice(0, caret);
     const openAt = before.lastIndexOf('{{');
-    if (openAt !== -1 && !before.slice(openAt).includes('}}')) {
+    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
       const partial = before.slice(openAt + 2);
-      _bodyVarPicker.open(bodyTextarea, (varToken) => {
+      _bodyVarPicker.open(bodyFallback, (varToken) => {
         const after = val.slice(caret);
-        bodyTextarea.value = val.slice(0, openAt) + varToken + after;
-        const newPos = openAt + varToken.length;
-        bodyTextarea.setSelectionRange(newPos, newPos);
-        bodyTextarea.focus();
+        bodyFallback.value = val.slice(0, openAt) + varToken + after;
+        bodyTextarea.value = bodyFallback.value;
+        bodyFallback.setSelectionRange(openAt + varToken.length, openAt + varToken.length);
+        bodyFallback.focus();
       }, partial);
     } else {
       _bodyVarPicker.close();
     }
   });
 
-  // Form body — KV table with var picker
+  async function _activateCmEditor(val) {
+    cmWrap.innerHTML = '';
+    const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+    _cmEditor = await createJsonEditor({
+      parent: cmWrap,
+      value: val,
+      isDark,
+      onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+    });
+    if (!_cmEditor) {
+      // CM unavailable — show fallback textarea instead
+      cmWrap.style.display = 'none';
+      bodyFallback.value = val;
+      bodyFallback.style.display = '';
+      jsonErrorEl.style.display = 'none';
+    }
+  }
+
+  // Form body
   let _formBodyRows = [];
   try {
     const parsed = JSON.parse(r.body || '[]');
@@ -236,17 +383,41 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.type === type);
     });
-    bodyTextarea.style.display = (type === 'raw' || type === 'graphql') ? '' : 'none';
+    const isText = type === 'raw' || type === 'graphql';
+
+    if (!isText && _cmEditor) {
+      // Leaving text mode — read current value before destroying
+      bodyTextarea.value = _cmEditor.getValue();
+      _cmEditor.destroy();
+      _cmEditor = null;
+      cmWrap.style.display = 'none';
+      bodyFallback.style.display = 'none';
+      _cmActive = false;
+    }
+
     formBodyTable.el.style.display = type === 'form' ? '' : 'none';
-    bodyVarBtn.style.display = (type === 'raw' || type === 'graphql') ? '' : 'none';
-    if (type === 'graphql') bodyTextarea.placeholder = '{ "query": "{ users { id name } }" }';
-    else bodyTextarea.placeholder = '{\n  "key": "value"\n}';
+    bodyVarBtn.style.display = isText ? '' : 'none';
+    formatBtn.style.display = isText ? '' : 'none';
+    minifyBtn.style.display = isText ? '' : 'none';
+    jsonErrorEl.style.display = 'none';
+
+    if (isText) {
+      _cmActive = true;
+      cmWrap.style.display = '';
+      bodyFallback.style.display = 'none';
+      _activateCmEditor(bodyTextarea.value);
+      if (type === 'graphql') bodyFallback.placeholder = '{ "query": "{ users { id name } }" }';
+      else bodyFallback.placeholder = '{\n  "key": "value"\n}';
+    }
   }
 
   _setBodyType(activeBodyType);
 
   bodySection.appendChild(bodyTypeGroup);
-  bodySection.appendChild(bodyTextarea);
+  bodySection.appendChild(bodyTextarea);   // hidden — source of truth for _save()
+  bodySection.appendChild(cmWrap);
+  bodySection.appendChild(bodyFallback);
+  bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
 
   // ── Auth section ──
@@ -255,13 +426,20 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const authTypeSelect = document.createElement('select');
   authTypeSelect.className = 'input-sm';
   authTypeSelect.style.marginBottom = '14px';
-  const AUTH_LABELS = { none: 'No Auth', bearer: 'Bearer Token', basic: 'Basic Auth', api_key: 'API Key', oauth2: 'OAuth 2 / Custom' };
+  const AUTH_LABELS = {
+    inherit: collectionId ? 'Inherit from Collection' : 'Inherit from Collection (no collection)',
+    none: 'No Auth',
+    bearer: 'Bearer Token',
+    basic: 'Basic Auth',
+    api_key: 'API Key',
+    oauth2: 'OAuth 2 / Custom',
+  };
   Object.entries(AUTH_LABELS).forEach(([val, label]) => {
     const opt = document.createElement('option');
     opt.value = val; opt.textContent = label;
     authTypeSelect.appendChild(opt);
   });
-  authTypeSelect.value = r.auth_type || 'none';
+  authTypeSelect.value = r.auth_type || 'inherit';
 
   const authFieldsDiv = document.createElement('div');
   authFieldsDiv.className = 'req-auth-grid';
@@ -291,7 +469,15 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     let cfg = {};
     try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
 
-    if (type === 'none') {
+    if (type === 'inherit') {
+      const hint = document.createElement('p');
+      hint.className = 'req-section-hint';
+      hint.style.cssText = 'color:var(--text-secondary);';
+      hint.textContent = collectionId
+        ? 'Uses the auth configured on the parent collection. Override by selecting a specific type above.'
+        : 'No collection selected — behaves as No Auth.';
+      authFieldsDiv.appendChild(hint);
+    } else if (type === 'none') {
       const hint = document.createElement('p');
       hint.className = 'req-section-hint';
       hint.textContent = 'No authentication. Requests are sent without credentials.';
@@ -375,7 +561,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const textarea = document.createElement('textarea');
     textarea.className = 'input-sm';
     textarea.style.cssText = 'width:100%;min-height:110px;font-family:var(--font-mono);font-size:12px;';
-    textarea.placeholder = 'qc.set("token", response.json().access_token)';
+    const _ph = (l) => l === 'python'
+      ? 'qc.set("token", response.json()["access_token"])'
+      : 'qc.set("token", response.json().access_token)';
+    textarea.placeholder = _ph(lang || 'js');
+    langSelect.onchange = () => { textarea.placeholder = _ph(langSelect.value); };
     textarea.value = code || '';
     div.appendChild(textarea);
 
@@ -414,7 +604,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         addBtn.style.cssText = 'display:none;font-size:10px;color:var(--primary);margin-left:4px;padding:0 4px;border-radius:3px;background:var(--surface-3,var(--surface-2));';
         addBtn.title = `Add extractor for: ${currentPath}`;
         addBtn.textContent = '+ extract';
-        addBtn.onclick = (e) => { e.stopPropagation(); onLeafClick({ path: currentPath, name: '', prefix: '' }); };
+        addBtn.onclick = (e) => { e.stopPropagation(); onLeafClick({ path: currentPath, name: '' }); };
         row.appendChild(arrow); row.appendChild(keySpan); row.appendChild(typeTag); row.appendChild(addBtn);
         const children = _renderSchemaTree(val, currentPath, onLeafClick);
         children.style.display = 'none';
@@ -443,7 +633,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         const typeTag = document.createElement('span');
         typeTag.style.cssText = 'font-size:10px;color:var(--text-muted);background:var(--surface-2);padding:1px 5px;border-radius:3px;';
         typeTag.textContent = val || 'any';
-        row.onclick = () => onLeafClick({ path: currentPath, name: '', prefix: '' });
+        row.onclick = () => onLeafClick({ path: currentPath, name: '' });
         row.appendChild(dot); row.appendChild(keySpan); row.appendChild(typeTag);
         li.appendChild(row);
       }
@@ -501,6 +691,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   function _buildExtractorPane(initialRules, responseSchema) {
     const div = document.createElement('div');
+    const _namePicker = createVarPicker({ getVars: getAllVars });
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
@@ -534,8 +725,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     table.style.cssText = 'border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:8px;';
 
     const headerRow = document.createElement('div');
-    headerRow.style.cssText = 'display:grid;grid-template-columns:2fr 1.5fr 1fr 28px;gap:8px;padding:5px 10px;background:var(--surface-2);font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;';
-    headerRow.innerHTML = '<span>JSON Path</span><span>Variable Name</span><span>Prefix</span><span></span>';
+    headerRow.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 28px;gap:8px;padding:5px 10px;background:var(--surface-2);font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;';
+    headerRow.innerHTML = '<span>JSON Path</span><span>Variable Name</span><span></span>';
     table.appendChild(headerRow);
 
     const rowsEl = document.createElement('div');
@@ -553,7 +744,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     function _addRow(rule) {
       const row = document.createElement('div');
       row.className = '_extractor-row';
-      row.style.cssText = 'display:grid;grid-template-columns:2fr 1.5fr 1fr 28px;gap:8px;padding:5px 10px;border-top:1px solid var(--border);align-items:center;';
+      row.style.cssText = 'display:grid;grid-template-columns:2fr 2fr 28px;gap:8px;padding:5px 10px;border-top:1px solid var(--border);align-items:center;';
 
       const mk = (ph, val, mono) => {
         const inp = document.createElement('input');
@@ -565,9 +756,23 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         return inp;
       };
 
-      const pathInp   = mk('token  or  data.access_token', rule.path, true);
-      const nameInp   = mk('AUTHORIZATION', rule.name, false);
-      const prefixInp = mk('Bearer ', rule.prefix, false);
+      const pathInp = mk('data.access_token', rule.path, true);
+      const nameInp = mk('access_token', rule.name, false);
+
+      const nameWrap = document.createElement('div');
+      nameWrap.style.cssText = 'display:flex;align-items:center;gap:3px;min-width:0;';
+      const namePickerBtn = document.createElement('button');
+      namePickerBtn.type = 'button';
+      namePickerBtn.title = 'Pick existing variable';
+      namePickerBtn.style.cssText = 'flex-shrink:0;background:none;border:1px solid var(--border-default);border-radius:4px;padding:1px 5px;cursor:pointer;font-size:10px;color:var(--text-muted);line-height:1.4;';
+      namePickerBtn.textContent = '{}';
+      namePickerBtn.onclick = () => {
+        _namePicker.open(namePickerBtn, (varToken) => {
+          nameInp.value = varToken.replace(/^\{\{|\}\}$/g, '');
+        });
+      };
+      nameWrap.appendChild(nameInp);
+      nameWrap.appendChild(namePickerBtn);
 
       const del = document.createElement('button');
       del.type = 'button';
@@ -576,8 +781,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       del.onclick = () => row.remove();
 
       row.appendChild(pathInp);
-      row.appendChild(nameInp);
-      row.appendChild(prefixInp);
+      row.appendChild(nameWrap);
       row.appendChild(del);
       rowsEl.appendChild(row);
     }
@@ -591,10 +795,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     div._getRows = () => {
       const rows = [];
       rowsEl.querySelectorAll('._extractor-row').forEach(row => {
-        const [pathInp, nameInp, prefixInp] = row.querySelectorAll('input');
+        const [pathInp, nameInp] = row.querySelectorAll('input');
         const path = pathInp?.value.trim();
         const name = nameInp?.value.trim();
-        if (path && name) rows.push({ path, name, prefix: prefixInp?.value || '' });
+        if (path && name) rows.push({ path, name });
       });
       return rows;
     };
@@ -643,17 +847,14 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(responsePanel.el);
   container.appendChild(editor);
 
-  // ── Send ──
+  // ── Send ── (always saves first so extractor/scripts changes take effect)
   sendBtn.onclick = async () => {
-    let rid = requestId;
-    if (!rid) {
-      const saved = await _save();
-      if (!saved) return;
-      rid = saved;
-    }
     sendBtn.disabled = true;
-    sendBtn.textContent = 'Sending…';
+    sendBtn.textContent = 'Saving…';
     try {
+      const rid = await _save();
+      if (!rid) return;
+      sendBtn.textContent = 'Sending…';
       const res = await window.api('POST', `/api-requests/${rid}/send`, {});
       if (res.ok === false) await window._alertDialog('Send error: ' + res.error);
       else responsePanel.show(res.result);

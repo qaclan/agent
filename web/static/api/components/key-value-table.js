@@ -55,7 +55,7 @@ export function createKeyValueTable(options = {}) {
     const caret = inp.selectionStart ?? val.length;
     const before = val.slice(0, caret);
     const openAt = before.lastIndexOf('{{');
-    if (openAt !== -1 && !before.slice(openAt).includes('}}')) {
+    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
       const partial = before.slice(openAt + 2);
       _picker.open(inp, (varToken) => {
         const after = val.slice(caret);
@@ -63,6 +63,7 @@ export function createKeyValueTable(options = {}) {
         const newPos = openAt + varToken.length;
         inp.setSelectionRange(newPos, newPos);
         inp.dispatchEvent(new Event('input'));
+        inp.focus();
       }, partial);
     } else {
       _picker.close();
@@ -105,9 +106,9 @@ export function createKeyValueTable(options = {}) {
     tr.appendChild(valTd);
 
     if (!readOnly) {
-      valInput.addEventListener('input', () => {
+      valInput.addEventListener('input', (e) => {
         _applyVarStyle(valInput);
-        if (varPickerEnabled) _handleAutocomplete(valInput);
+        if (varPickerEnabled && e.isTrusted) _handleAutocomplete(valInput);
       });
     }
 
@@ -116,12 +117,13 @@ export function createKeyValueTable(options = {}) {
       const pickerBtn = document.createElement('button');
       pickerBtn.type = 'button';
       pickerBtn.title = 'Insert variable';
-      pickerBtn.style.cssText = 'background:none;border:1px solid var(--border);border-radius:4px;padding:1px 5px;cursor:pointer;font-size:10px;color:var(--text-muted);line-height:1.4;';
+      pickerBtn.style.cssText = 'background:none;border:1px solid var(--border-default);border-radius:4px;padding:1px 5px;cursor:pointer;font-size:10px;color:var(--text-muted);line-height:1.4;';
       pickerBtn.textContent = '{}';
       pickerBtn.onclick = () => {
         _picker.open(pickerBtn, (varToken) => {
           valInput.value = varToken;
           valInput.dispatchEvent(new Event('input'));
+          valInput.focus();
         });
       };
       pickerTd.appendChild(pickerBtn);

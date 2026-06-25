@@ -223,6 +223,27 @@ export function createResponsePanel(opts = {}) {
       table.appendChild(tbody);
       contentArea.appendChild(table);
 
+    } else if (tab === 'vars') {
+      const updates = r.state_updates || {};
+      const rows = Object.entries(updates);
+      if (!rows.length) {
+        contentArea.innerHTML = '<p class="text-muted text-sm" style="padding:10px">No variables extracted.</p>';
+        return;
+      }
+      const table = document.createElement('table');
+      table.className = 'kv-table';
+      table.innerHTML = '<thead><tr><th>Variable</th><th>Saved Value</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      rows.forEach(([k, v]) => {
+        const tr = document.createElement('tr');
+        const valStr = String(v);
+        const display = valStr.length > 80 ? valStr.slice(0, 77) + '…' : valStr;
+        tr.innerHTML = `<td style="font-family:var(--font-mono);font-weight:600">${_esc(k)}</td><td style="font-family:var(--font-mono);color:var(--text-secondary)">${_esc(display)}</td>`;
+        tbody.appendChild(tr);
+      });
+      table.appendChild(tbody);
+      contentArea.appendChild(table);
+
     } else if (tab === 'assertions') {
       const results = r.assertion_results || [];
       if (!results.length) {
@@ -266,6 +287,8 @@ export function createResponsePanel(opts = {}) {
     tabBar.appendChild(_renderTab('Body', 'body', true));
     tabBar.appendChild(_renderTab('Headers', 'headers', false));
     tabBar.appendChild(_renderTab(`Assertions (${assertPass}/${assertCount})`, 'assertions', false));
+    const _varCount = Object.keys(result.state_updates || {}).length;
+    if (_varCount) tabBar.appendChild(_renderTab(`Variables (${_varCount})`, 'vars', false));
 
     _renderContent('body');
   }

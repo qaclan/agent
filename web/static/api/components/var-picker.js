@@ -14,9 +14,9 @@ export function createVarPicker(opts = {}) {
   const pop = document.createElement('div');
   pop.style.cssText = [
     'position:fixed;z-index:1001;pointer-events:all;',
-    'background:var(--surface-1,#fff);',
-    'border:1px solid var(--border);border-radius:7px;',
-    'box-shadow:0 4px 18px rgba(0,0,0,.18);',
+    'background:var(--bg-elevated);',
+    'border:1px solid var(--border-default);border-radius:7px;',
+    'box-shadow:0 4px 18px rgba(0,0,0,.28);',
     'width:300px;overflow:hidden;',
     'display:flex;flex-direction:column;',
   ].join('');
@@ -28,11 +28,11 @@ export function createVarPicker(opts = {}) {
   });
 
   const searchWrap = document.createElement('div');
-  searchWrap.style.cssText = 'padding:7px 10px;border-bottom:1px solid var(--border);';
+  searchWrap.style.cssText = 'padding:7px 10px;border-bottom:1px solid var(--border-default);';
   const searchInp = document.createElement('input');
   searchInp.type = 'text';
   searchInp.placeholder = 'Filter variables…';
-  searchInp.style.cssText = 'width:100%;font-size:12px;border:none;outline:none;background:transparent;color:var(--text);';
+  searchInp.style.cssText = 'width:100%;font-size:12px;border:none;outline:none;background:transparent;color:var(--text-primary);';
   searchWrap.appendChild(searchInp);
   pop.appendChild(searchWrap);
 
@@ -85,7 +85,7 @@ export function createVarPicker(opts = {}) {
         'padding:4px 12px 2px;font-size:10px;font-weight:600;',
         'text-transform:uppercase;letter-spacing:.07em;',
         'color:var(--text-muted);',
-        gi > 0 ? 'border-top:1px solid var(--border);margin-top:2px;padding-top:6px;' : '',
+        gi > 0 ? 'border-top:1px solid var(--border-default);margin-top:2px;padding-top:6px;' : '',
       ].join('');
       hdr.textContent = g;
       list.appendChild(hdr);
@@ -95,10 +95,10 @@ export function createVarPicker(opts = {}) {
 
   function _addItemRow(v) {
     const row = document.createElement('div');
-    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;font-size:12px;';
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;font-size:12px;color:var(--text-primary);';
     row.onmouseenter = () => {
       _clearHighlight();
-      row.style.background = 'var(--surface-2)';
+      row.style.background = 'var(--bg-panel)';
       _activeIdx = _itemEls.indexOf(row);
     };
     row.onmouseleave = () => {
@@ -145,12 +145,12 @@ export function createVarPicker(opts = {}) {
       e.preventDefault();
       _activeIdx = Math.min(_activeIdx + 1, _itemEls.length - 1);
       _clearHighlight();
-      _itemEls[_activeIdx].style.background = 'var(--surface-2)';
+      _itemEls[_activeIdx].style.background = 'var(--bg-panel)';
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       _activeIdx = Math.max(_activeIdx - 1, 0);
       _clearHighlight();
-      _itemEls[_activeIdx].style.background = 'var(--surface-2)';
+      _itemEls[_activeIdx].style.background = 'var(--bg-panel)';
     } else if (e.key === 'Enter') {
       e.preventDefault();
       if (_itemEls[_activeIdx]) _itemEls[_activeIdx].click();

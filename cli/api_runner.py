@@ -78,15 +78,22 @@ def _apply_auth(headers: dict, params: dict, auth_type: str, auth_config: dict,
     headers = dict(headers)
     params = dict(params)
 
+    def _set_auth(value: str) -> None:
+        for k in list(headers.keys()):
+            if k.lower() == "authorization":
+                del headers[k]
+        headers["Authorization"] = value
+
     if auth_type == "bearer":
         token = resolve_vars(auth_config.get("token", ""), env_vars, state)
-        headers["Authorization"] = f"Bearer {token}"
+        if token:
+            _set_auth(f"Bearer {token}")
 
     elif auth_type == "basic":
         username = resolve_vars(auth_config.get("username", ""), env_vars, state)
         password = resolve_vars(auth_config.get("password", ""), env_vars, state)
         encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
-        headers["Authorization"] = f"Basic {encoded}"
+        _set_auth(f"Basic {encoded}")
 
     elif auth_type == "api_key":
         key_name = resolve_vars(auth_config.get("key", "X-API-Key"), env_vars, state)
@@ -119,7 +126,8 @@ def _apply_auth(headers: dict, params: dict, auth_type: str, auth_config: dict,
             except Exception as e:
                 logger.warning("OAuth2 token fetch failed: %s", e)
                 token = ""
-        headers["Authorization"] = f"Bearer {token or ''}"
+        if token:
+            _set_auth(f"Bearer {token}")
 
     return headers, params
 
@@ -183,6 +191,8 @@ def _apply_extractor(rules: list, response_body: str, state: dict) -> dict:
     for rule in rules:
         path = rule.get("path", "").strip()
         name = rule.get("name", "").strip()
+        if name.startswith("{{") and name.endswith("}}"):
+            name = name[2:-2].strip()
         if not path or not name:
             continue
         value = data
@@ -378,6 +388,13 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             raw_headers = json.loads(raw_headers)
         resolved_headers_list = _resolve_list(raw_headers, env_vars, state)
         headers = {item["key"]: item["value"] for item in resolved_headers_list if item["key"]}
+        # Drop Authorization header if it resolved to a bare scheme with no token
+        # (e.g. "Bearer " when {{access_token}} was missing) — httpx rejects these
+        _auth_key = next((k for k in headers if k.lower() == "authorization"), None)
+        if _auth_key:
+            _parts = headers[_auth_key].strip().split(None, 1)
+            if len(_parts) < 2 or not _parts[1].strip():
+                del headers[_auth_key]
 
         raw_params = req.get("params", [])
         if isinstance(raw_params, str):
@@ -387,11 +404,13 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         # 2. Apply auth
         auth_type = req.get("auth_type", "none")
+        print("Auth type:", auth_type)
         auth_config = req.get("auth_config", {})
+        print("Auth config before resolving vars:", auth_config)
         if isinstance(auth_config, str):
             auth_config = json.loads(auth_config)
         headers, params = _apply_auth(headers, params, auth_type, auth_config, env_vars, state)
-
+        print("Headers after auth:", headers)
         # 3. Pre-script
         pre_script = req.get("pre_script")
         pre_lang = req.get("pre_lang", "js")

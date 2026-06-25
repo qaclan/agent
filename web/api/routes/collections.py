@@ -101,6 +101,8 @@ def patch_collection(col_id):
             body.get("name", col["name"]),
             body.get("description", col.get("description")),
             body.get("env_name", col.get("env_name")),
+            body.get("auth_type", col.get("auth_type", "none")),
+            body.get("auth_config", col.get("auth_config", "{}")),
         )
         return jsonify({"ok": True, "collection": CollectionRepo().get(col_id, pid)})
     except ValueError as e:

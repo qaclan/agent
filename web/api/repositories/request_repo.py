@@ -14,7 +14,7 @@ _DEFAULTS = {
     "path_params": "[]",
     "body_type": None,
     "body": None,
-    "auth_type": "none",
+    "auth_type": "inherit",
     "auth_config": "{}",
     "pre_script": None,
     "pre_lang": "js",

@@ -71,6 +71,22 @@ def update_request(req_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/api-requests/<req_id>", methods=["PATCH"])
+def patch_request(req_id):
+    try:
+        pid = _project_id()
+        existing = _svc.get(req_id, pid)
+        patch = request.get_json(force=True) or {}
+        merged = {**existing, **patch}
+        req = _svc.update(req_id, pid, merged)
+        return jsonify({"ok": True, "request": req})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.exception("patch_request")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/api-requests/<req_id>", methods=["DELETE"])
 def delete_request(req_id):
     try:
