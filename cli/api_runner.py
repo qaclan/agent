@@ -365,7 +365,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         state_path: path to state.json file (for sandbox scripts that write state)
 
     Returns:
-        dict with keys: status, status_code, response_body, response_headers,
+        dict with keys: status, status_code, url, response_body, response_headers,
                         duration_ms, assertion_results, error_message, state_updates
     """
     import httpx
@@ -405,13 +405,10 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         # 2. Apply auth
         auth_type = req.get("auth_type", "none")
-        print("Auth type:", auth_type)
         auth_config = req.get("auth_config", {})
-        print("Auth config before resolving vars:", auth_config)
         if isinstance(auth_config, str):
             auth_config = json.loads(auth_config)
         headers, params = _apply_auth(headers, params, auth_type, auth_config, env_vars, state)
-        print("Headers after auth:", headers)
         # 3. Pre-script
         pre_script = req.get("pre_script")
         pre_lang = req.get("pre_lang", "js")

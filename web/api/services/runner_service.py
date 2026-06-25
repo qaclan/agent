@@ -93,7 +93,7 @@ class RunnerService:
                 "request_id": req["id"],
                 "name": req["name"],
                 "method": req["method"],
-                "url": result.get("url") or req.get("url", ""),
+                "url": result.get("url", ""),
                 **result,
             })
             run_repo.create_request_result(run_id, req, result, idx)
