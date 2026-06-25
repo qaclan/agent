@@ -108,13 +108,18 @@ async function _loadViews() {
     { renderRequestEditor },
     { showDiscoverModal },
     { renderDocsView },
+    { renderCollectionRunView },
+    { renderCollectionDetailView },
   ] = await Promise.all([
     import('./views/collections-view.js'),
     import('./views/request-editor-view.js'),
     import('./views/discover-modal.js'),
     import('./views/docs-view.js'),
+    import('./views/collection-run-view.js'),
+    import('./views/collection-detail-view.js'),
   ]);
-  return { renderCollectionsView, renderRequestEditor, showDiscoverModal, renderDocsView };
+  return { renderCollectionsView, renderRequestEditor, showDiscoverModal, renderDocsView,
+           renderCollectionRunView, renderCollectionDetailView };
 }
 
 let _views = null;
@@ -196,24 +201,52 @@ function renderApiPage(container) {
   tabDocs.onclick = () => _switchTab('docs');
 
   // Wire collections view
-  _getViews().then(({ renderCollectionsView, renderRequestEditor, showDiscoverModal }) => {
+  _getViews().then(({
+    renderCollectionsView, renderRequestEditor, showDiscoverModal,
+    renderCollectionRunView, renderCollectionDetailView,
+  }) => {
+    const mainEl = () => document.getElementById('api-main-content');
+
+    function _teardown() {
+      const el = mainEl();
+      if (el && el.__destroyRunView) { el.__destroyRunView(); el.__destroyRunView = null; }
+    }
+
+    function _emptyMain() {
+      _teardown();
+      const el = mainEl();
+      if (el) el.innerHTML = '<div class="empty-state"><p>Select a request or collection to get started.</p></div>';
+    }
+
+    function _showRunDetail(runId, colId, colName) {
+      _teardown();
+      renderCollectionRunView(mainEl(), runId, colId, colName, _emptyMain);
+    }
+
+    function _showCollectionDetail(col, runId) {
+      _teardown();
+      renderCollectionDetailView(
+        mainEl(), col, runId,
+        (rid) => _showRunDetail(rid, col.id, col.name),
+        _emptyMain
+      );
+    }
+
     renderCollectionsView(
       document.getElementById('api-collections-panel'),
       (requestId, defaultCollectionId, collectionId, collectionEnvName) => {
-        renderRequestEditor(
-          document.getElementById('api-main-content'),
-          requestId,
-          defaultCollectionId,
-          collectionId,
-          collectionEnvName,
-        );
-      }
+        _teardown();
+        renderRequestEditor(mainEl(), requestId, defaultCollectionId, collectionId, collectionEnvName);
+      },
+      (runId, colId, colName) => _showRunDetail(runId, colId, colName),
+      (col, runId) => _showCollectionDetail(col, runId)
     );
+
     document.getElementById('api-discover-btn').onclick = () => showDiscoverModal();
   }).catch(err => {
     console.error('API section load error:', err);
-    document.getElementById('api-main-content').innerHTML =
-      `<div class="empty-state"><p style="color:var(--danger)">Failed to load API module: ${err.message}</p></div>`;
+    const m = document.getElementById('api-main-content');
+    if (m) m.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">Failed to load API module: ${err.message}</p></div>`;
   });
 }
 
