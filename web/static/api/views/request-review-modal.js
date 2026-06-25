@@ -18,27 +18,29 @@ function _parseJson(val) {
 
 function _kvTable(data) {
   data = _parseJson(data);
-  if (!data) return '<em style="color:var(--text-muted);font-size:12px">None</em>';
+  if (!data) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   const entries = Array.isArray(data)
     ? data.map(h => [h.name ?? h.key ?? '', h.value ?? ''])
     : Object.entries(data);
-  if (!entries.length) return '<em style="color:var(--text-muted);font-size:12px">None</em>';
-  return `<table style="width:100%;border-collapse:collapse;font-size:12px;">
-    ${entries.map(([k, v]) => `
-      <tr>
-        <td style="padding:3px 8px 3px 0;color:var(--text-muted);white-space:nowrap;vertical-align:top;">${_esc(k)}</td>
-        <td style="padding:3px 0;word-break:break-all;">${_esc(String(v ?? ''))}</td>
-      </tr>`).join('')}
-  </table>`;
+  if (!entries.length) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
+  return `<div style="font-size:12px;">
+    <div style="display:grid;grid-template-columns:minmax(80px,160px) 1fr;border-bottom:1px solid var(--border-strong);">
+      <span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);padding:3px 10px 3px 0;">Key</span>
+      <span style="font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);padding:3px 0;">Value</span>
+    </div>
+    ${entries.map(([k, v], i) => `
+      <div style="display:grid;grid-template-columns:minmax(80px,160px) 1fr;padding:5px 0;${i < entries.length - 1 ? 'border-bottom:1px solid var(--border-subtle);' : ''}">
+        <span style="color:var(--accent);font-family:var(--font-mono,monospace);font-size:11px;padding-right:10px;word-break:break-all;">${_esc(k)}</span>
+        <span style="color:var(--text-primary);word-break:break-all;">${_esc(String(v ?? ''))}</span>
+      </div>`).join('')}
+  </div>`;
 }
 
 function _section(label, content) {
   return `
-    <div style="margin-bottom:10px;">
-      <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px;">${label}</div>
-      <div style="background:var(--bg-base);border:1px solid var(--border-strong);border-radius:6px;padding:8px 10px;">
-        ${content}
-      </div>
+    <div style="margin-bottom:14px;">
+      <div style="font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted);margin-bottom:6px;">${label}</div>
+      ${content}
     </div>`;
 }
 
@@ -47,30 +49,32 @@ function _detailHTML(req) {
   if (!Array.isArray(assertions)) assertions = [];
 
   const urlSection = _section('URL',
-    `<code style="font-size:11px;word-break:break-all;color:var(--text-primary);font-family:var(--font-mono,monospace);">${_esc(req.url)}</code>`);
+    `<code style="font-size:11px;word-break:break-all;color:var(--text-primary);font-family:var(--font-mono,monospace);line-height:1.6;">${_esc(req.url)}</code>`);
 
   const headersSection = _section('Headers', _kvTable(req.headers));
   const paramsSection  = _section('Query Params', _kvTable(req.params));
 
   const bodyContent = req.body
-    ? `<pre style="margin:0;font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);">${_esc(_fmt(req.body))}</pre>`
-    : '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">None</span>';
+    ? `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`
+    : '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   const bodySection = _section('Request Body', bodyContent);
 
   const assertionsSection = assertions.length ? _section('Assertions',
-    `<ul style="margin:0;padding-left:16px;font-size:12px;color:var(--text-primary);">
-       ${assertions.map(a => `<li style="margin-bottom:2px;">${_esc(typeof a === 'string' ? a : JSON.stringify(a))}</li>`).join('')}
-     </ul>`) : '';
+    assertions.map(a => `
+      <div style="display:flex;align-items:flex-start;gap:8px;padding:4px 0;border-bottom:1px solid var(--border-subtle);font-size:12px;">
+        <span style="color:var(--accent);flex-shrink:0;">✓</span>
+        <span style="color:var(--text-primary);">${_esc(typeof a === 'string' ? a : JSON.stringify(a))}</span>
+      </div>`).join('')) : '';
 
   const descSection = req.description
-    ? `<p style="font-size:12px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5;">${_esc(req.description)}</p>`
+    ? `<p style="font-size:12px;color:var(--text-secondary);margin:0 0 12px;line-height:1.6;border-left:3px solid var(--border-strong);padding-left:10px;">${_esc(req.description)}</p>`
     : '';
 
   return `
-    <div style="padding:10px 14px 14px;border-top:2px solid var(--accent-subtle);background:var(--bg-elevated);">
+    <div style="padding:12px 16px 16px;border-top:2px solid var(--accent-subtle);">
       ${descSection}
       ${urlSection}
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
         ${headersSection}
         ${paramsSection}
       </div>
