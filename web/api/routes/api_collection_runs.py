@@ -61,7 +61,7 @@ def download_api_report(run_id):
             },
         )
     except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 404
+        return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("download_api_report")
         return jsonify({"ok": False, "error": str(e)}), 500
