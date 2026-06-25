@@ -58,10 +58,13 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         .crv-spin{display:inline-block;width:11px;height:11px;border:2px solid var(--border,#444);border-top-color:var(--text-muted,#999);border-radius:50%;animation:crv-spin .7s linear infinite;}
         .crv-bar{height:4px;background:var(--border-subtle,rgba(255,255,255,.1));border-radius:2px;overflow:hidden;margin:10px 0 2px;}
         .crv-fill{height:100%;background:var(--primary,#6366f1);border-radius:2px;transition:width .4s;}
+        .crv-stat-grid{display:flex;align-items:stretch;border:1px solid var(--border,rgba(255,255,255,.15));border-radius:8px;overflow:hidden;margin-top:10px;}
+        .crv-stat-cell{padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:0;}
+        .crv-stat-val{font-size:17px;font-weight:700;line-height:1.2;color:var(--text-primary,#eee);}
+        .crv-stat-lbl{font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;}
+        .crv-stat-sep{width:1px;background:var(--border,rgba(255,255,255,.15));flex-shrink:0;}
         .crv-method{font-family:monospace;font-size:11px;font-weight:700;min-width:52px;}
         .crv-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .crv-code{font-size:11px;color:var(--text-secondary,#555);min-width:36px;text-align:right;}
-        .crv-dur{font-size:11px;color:var(--text-secondary,#555);min-width:56px;text-align:right;}
         .crv-chevron{font-size:10px;color:var(--text-secondary,#666);min-width:14px;text-align:right;}
         .crv-pass{color:var(--success,#22c55e);font-weight:600;}
         .crv-fail{color:var(--danger,#ef4444);font-weight:600;}
@@ -80,10 +83,18 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
             <button class="btn btn-xs btn-ghost" id="crv-report" style="display:none">⬇ Report</button>
           </div>
         </div>
-        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-          <span id="crv-badge"></span>
-          <span style="font-size:12px;color:var(--text-secondary,#555)" id="crv-counts"></span>
-          <span style="font-size:12px;color:var(--text-secondary,#555)">⏱ <span id="crv-elapsed">00:00</span></span>
+        <div class="crv-stat-grid">
+          <div class="crv-stat-cell" style="min-width:90px;"><span id="crv-badge"></span></div>
+          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-prog">—</span><span class="crv-stat-lbl">Progress</span></div>
+          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell"><span class="crv-stat-val crv-pass" id="crv-passed-c">0</span><span class="crv-stat-lbl">Passed</span></div>
+          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell"><span class="crv-stat-val crv-fail" id="crv-failed-c">0</span><span class="crv-stat-lbl">Failed</span></div>
+          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell"><span class="crv-stat-val crv-err" id="crv-errors-c">0</span><span class="crv-stat-lbl">Errors</span></div>
+          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-elapsed">00:00</span><span class="crv-stat-lbl">Elapsed</span></div>
         </div>
         <div class="crv-bar"><div class="crv-fill" id="crv-fill" style="width:0%"></div></div>
       </div>
@@ -104,7 +115,6 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
 
   function _updateHeader(run) {
     const badge   = document.getElementById('crv-badge');
-    const counts  = document.getElementById('crv-counts');
     const fill    = document.getElementById('crv-fill');
     const stopBtn = document.getElementById('crv-stop');
     const repBtn  = document.getElementById('crv-report');
@@ -113,11 +123,36 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     badge.innerHTML = _statusBadge(run.status);
     const done  = (run.request_results || []).length;
     const total = run.total || 0;
-    counts.textContent = `${done}/${total}  ·  ${run.passed} passed · ${run.failed} failed · ${run.error_count} errors`;
+    const prog    = document.getElementById('crv-prog');
+    const passedC = document.getElementById('crv-passed-c');
+    const failedC = document.getElementById('crv-failed-c');
+    const errorsC = document.getElementById('crv-errors-c');
+    if (prog)    prog.textContent    = `${done}/${total}`;
+    if (passedC) passedC.textContent = run.passed;
+    if (failedC) failedC.textContent = run.failed;
+    if (errorsC) errorsC.textContent = run.error_count;
     fill.style.width = total > 0 ? `${Math.round(done / total * 100)}%` : '0%';
 
     if (stopBtn) stopBtn.style.display = run.status === 'RUNNING' ? '' : 'none';
     if (repBtn)  repBtn.style.display  = run.status !== 'RUNNING' ? '' : 'none';
+  }
+
+  function _codeHtml(code) {
+    if (code == null) return '<span style="min-width:48px;display:inline-block;"></span>';
+    const n = parseInt(code, 10);
+    const color = n >= 200 && n < 300 ? 'var(--success,#22c55e)'
+      : n >= 300 && n < 400           ? 'var(--info,#60a5fa)'
+      : n >= 400                      ? 'var(--danger,#ef4444)'
+      :                                 'var(--text-secondary,#555)';
+    return `<span style="font-family:monospace;font-size:12px;font-weight:700;color:${color};min-width:48px;text-align:right;display:inline-block;">${code}</span>`;
+  }
+
+  function _durHtml(ms) {
+    if (ms == null) return '<span style="min-width:64px;display:inline-block;"></span>';
+    const color = ms < 300  ? 'var(--success,#22c55e)'
+      : ms < 1000           ? 'var(--warning,#f59e0b)'
+      :                       'var(--danger,#ef4444)';
+    return `<span style="font-size:12px;font-weight:600;color:${color};min-width:64px;text-align:right;display:inline-block;">${ms}ms</span>`;
   }
 
   function _renderRows(run) {
@@ -136,26 +171,30 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       const name   = result ? result.request_name : (spine.name   || `Request ${i + 1}`);
       const method = result ? result.method       : (spine.method || '');
 
-      let badge, code = '', dur = '', chevron = '';
+      let badge, codeHtml = '', durHtml = '', chevron = '';
       if (result) {
         if      (result.status === 'PASSED') badge = '<span class="crv-pass">✓</span>';
         else if (result.status === 'FAILED') badge = '<span class="crv-fail">✗</span>';
         else                                 badge = '<span class="crv-err">!</span>';
-        code    = result.status_code != null ? String(result.status_code) : '';
-        dur     = result.duration_ms  != null ? `${result.duration_ms}ms` : '';
-        chevron = '<span class="crv-chevron">▼</span>';
+        codeHtml = _codeHtml(result.status_code);
+        durHtml  = _durHtml(result.duration_ms);
+        chevron  = '<span class="crv-chevron">▼</span>';
       } else if (i === curIdx) {
-        badge = '<span class="crv-spin"></span>';
+        badge    = '<span class="crv-spin"></span>';
+        codeHtml = _codeHtml(null);
+        durHtml  = _durHtml(null);
       } else {
-        badge = '<span class="crv-pend">·</span>';
+        badge    = '<span class="crv-pend">·</span>';
+        codeHtml = _codeHtml(null);
+        durHtml  = _durHtml(null);
       }
 
       html += `<div class="crv-row" data-i="${i}">
         ${badge}
         <span class="crv-method">${_esc(method)}</span>
         <span class="crv-name">${_esc(name)}</span>
-        <span class="crv-code">${_esc(code)}</span>
-        <span class="crv-dur">${_esc(dur)}</span>
+        ${codeHtml}
+        ${durHtml}
         ${chevron}
       </div>`;
 
