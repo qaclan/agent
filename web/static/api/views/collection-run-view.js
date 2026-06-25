@@ -201,7 +201,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
               ${a.op ? ' ' + _esc(a.op) : ''}${a.value != null ? ' ' + _esc(String(a.value)) : ''}
               ${!a.passed && a.actual != null ? ' → actual: ' + _esc(String(a.actual)) : ''}
             </div>`).join('')
-          : '<div style="color:var(--text-muted)">No assertions</div>';
+          : '<div style="color:var(--text-muted,#888);font-style:italic;">No assertions — pass/fail determined by HTTP status code (&lt;400 = passed)</div>';
         const rawBody = result.response_body || '';
         let prettyBody = rawBody;
         if (rawBody) {

@@ -409,6 +409,15 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         if isinstance(auth_config, str):
             auth_config = json.loads(auth_config)
         headers, params = _apply_auth(headers, params, auth_type, auth_config, env_vars, state)
+        # 2.5. Pre-extractor — extract from previous request's response, before pre-script
+        pre_extractor = req.get("pre_extractor", [])
+        if isinstance(pre_extractor, str):
+            pre_extractor = json.loads(pre_extractor) if pre_extractor else []
+        if pre_extractor and state.get("_last_response"):
+            extracted = _apply_extractor(pre_extractor, state["_last_response"], state)
+            if extracted:
+                state.setdefault("qaclan_vars", {}).update(extracted)
+
         # 3. Pre-script
         pre_script = req.get("pre_script")
         pre_lang = req.get("pre_lang", "js")
@@ -477,6 +486,9 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         response_body = response.text
         response_headers = dict(response.headers)
 
+        # Store response for next request's pre-extractor
+        state["_last_response"] = response_body
+
         # 6. Post-extractor (no-code variable extraction)
         state_updates = {}
         post_extractor = req.get("post_extractor", [])
@@ -512,7 +524,10 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             assertions = json.loads(assertions)
         assertion_results = _evaluate_assertions(assertions, status_code, response_body, response_headers, duration_ms)
 
-        all_passed = all(r["passed"] for r in assertion_results) if assertion_results else True
+        if assertion_results:
+            all_passed = all(r["passed"] for r in assertion_results)
+        else:
+            all_passed = status_code < 400
         status = "PASSED" if all_passed else "FAILED"
 
         logger.info("run_api_request: %s %s → %d (%dms) %s",
