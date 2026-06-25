@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -795,4 +797,242 @@ def delete_script(script_id):
 
         return jsonify({"ok": True})
     except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/scripts/<script_id>/run', methods=['POST'])
+def run_script_solo(script_id):
+    """Run a single script ad-hoc without a suite. Creates a temporary suite_run."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        data = request.get_json(force=True) or {}
+        env_name = data.get("env_name")
+        browser_type = data.get("browser", "chromium")
+        headless = data.get("headless", False)
+        resolution = data.get("resolution") or None
+
+        conn = get_conn()
+        script_row = conn.execute(
+            "SELECT * FROM scripts WHERE id = ? AND project_id = ?",
+            (script_id, project_id),
+        ).fetchone()
+        if not script_row:
+            return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
+
+        script = dict(script_row)
+
+        # Find or create a solo-run suite
+        solo_suite = conn.execute(
+            "SELECT id FROM suites WHERE project_id = ? AND name = '__solo_runs__' LIMIT 1",
+            (project_id,),
+        ).fetchone()
+        if not solo_suite:
+            solo_suite_id = generate_id("suite")
+            now_ts = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                "INSERT INTO suites (id, project_id, channel, name, created_at) VALUES (?, ?, 'web', '__solo_runs__', ?)",
+                (solo_suite_id, project_id, now_ts),
+            )
+            conn.commit()
+        else:
+            solo_suite_id = solo_suite["id"]
+
+        # Delegate to execute_run logic by posting to /api/runs internally
+        # We build a minimal suite_items entry temporarily
+        # Simpler: inline the run logic here for the single script case
+        import os, time, json, subprocess
+        from pathlib import Path
+        from cli.script_strategies import get_strategy
+        from cli.db import generate_id as gen_id
+        from cli.script_strategies._shared import substitute_template_vars
+        from web.routes.runs import (
+            RUNS_DIR, SCREENSHOTS_DIR, PER_SCRIPT_TIMEOUT_SEC,
+            DEFAULT_RECORD_RESOLUTION, _read_artifacts, _build_error_detail,
+            get_default_playwright_browsers_path, is_frozen_binary,
+        )
+        from cli import runtime_setup
+
+        language = script.get("language") or "python"
+        try:
+            get_strategy(language).validate_runtime()
+        except (ValueError, RuntimeError) as e:
+            payload = {"ok": False, "error": str(e)}
+            if not runtime_setup.runtime_initialized():
+                payload["needs_setup"] = True
+                payload["setup_command"] = "qaclan setup --runtime-only"
+            return jsonify(payload), 400
+
+        env_vars_dict = {}
+        environment_id = None
+        if env_name:
+            env_row = conn.execute(
+                "SELECT * FROM environments WHERE project_id = ? AND name = ?",
+                (project_id, env_name),
+            ).fetchone()
+            if not env_row:
+                return jsonify({"ok": False, "error": f"Environment '{env_name}' not found"}), 404
+            environment_id = env_row["id"]
+            from cli.crypto import decrypt
+            for v in conn.execute("SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?",
+                                  (env_row["id"],)).fetchall():
+                val = v["value"]
+                if v["is_secret"] and val:
+                    val = decrypt(val)
+                env_vars_dict[v["key"]] = val
+
+        run_id = gen_id("run")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless) "
+            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', 1, ?, ?, ?, ?)",
+            (run_id, solo_suite_id, project_id, environment_id, now, browser_type, resolution, 1 if headless else 0),
+        )
+        conn.commit()
+
+        run_dir = RUNS_DIR / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(run_dir, 0o700)
+        except OSError:
+            pass
+        SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+        state_file = run_dir / "state.json"
+
+        srun_id = gen_id("srun")
+        script_now = now
+        script_start = time.time()
+        screenshot_path = SCREENSHOTS_DIR / f"{srun_id}.png"
+        artifacts_path = run_dir / f"{srun_id}.artifacts.json"
+
+        try:
+            strategy = get_strategy(language)
+            script_path = script.get("file_path")
+            if not script_path or not os.path.exists(script_path):
+                raise FileNotFoundError(f"Script file not found: {script_path}")
+            source = Path(script_path).read_text(encoding="utf-8")
+
+            try:
+                script_var_keys = json.loads(script.get("var_keys") or "[]")
+            except (TypeError, ValueError):
+                script_var_keys = []
+            if script_var_keys:
+                source, _ = substitute_template_vars(
+                    source, script_var_keys, env_vars_dict,
+                    script.get("start_url_key"), script.get("start_url_value"),
+                    escape_fn=strategy.escape_for_literal,
+                )
+
+            rendered_path = run_dir / f"{srun_id}{strategy.file_extension}"
+            rendered_path.write_text(source, encoding="utf-8")
+
+            child_env = os.environ.copy()
+            child_env.update(env_vars_dict)
+            child_env["QACLAN_STORAGE_STATE"] = str(state_file)
+            child_env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
+            child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
+            child_env["QACLAN_BROWSER"] = browser_type
+            child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
+            child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
+            child_env["QACLAN_EXPECT_TIMEOUT"] = "15000"
+            child_env["QACLAN_ACTION_TIMEOUT"] = "15000"
+
+            pw_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+            rt_browsers = runtime_setup.browsers_path_if_present()
+            if not pw_browsers_path and rt_browsers:
+                child_env["PLAYWRIGHT_BROWSERS_PATH"] = str(rt_browsers)
+            elif is_frozen_binary() and not pw_browsers_path:
+                default_browsers = get_default_playwright_browsers_path()
+                if os.path.isdir(default_browsers):
+                    child_env["PLAYWRIGHT_BROWSERS_PATH"] = default_browsers
+
+            child_env.update(strategy.extra_env())
+            cmd = strategy.build_run_command(str(rendered_path))
+
+            proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True, timeout=PER_SCRIPT_TIMEOUT_SEC)
+            duration_ms = int((time.time() - script_start) * 1000)
+            finished_at = datetime.now(timezone.utc).isoformat()
+            console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
+
+            if proc.returncode == 0:
+                status = "PASSED"
+                error_msg = None
+                error_detail = None
+                saved_screenshot = None
+            else:
+                status = "FAILED"
+                error_detail, error_msg = _build_error_detail(
+                    kind="subprocess", returncode=proc.returncode,
+                    stdout=proc.stdout, stderr=proc.stderr,
+                    artifacts_error=artifacts_error,
+                    has_network_failures=bool(network_failures),
+                )
+                saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
+
+            conn.execute(
+                "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                "duration_ms, error_message, error_detail, console_errors, network_failures, "
+                "screenshot_path, started_at, finished_at) "
+                "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (srun_id, run_id, script_id, status, duration_ms,
+                 error_msg, json.dumps(error_detail) if error_detail else None,
+                 len(console_errors), len(network_failures), saved_screenshot,
+                 script_now, finished_at),
+            )
+            final_status = status
+        except subprocess.TimeoutExpired:
+            duration_ms = int((time.time() - script_start) * 1000)
+            finished_at = datetime.now(timezone.utc).isoformat()
+            error_detail, error_msg = _build_error_detail(kind="timeout")
+            status = "FAILED"
+            saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
+            console_errors, network_failures, _ = _read_artifacts(artifacts_path)
+            conn.execute(
+                "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                "duration_ms, error_message, error_detail, console_errors, network_failures, "
+                "screenshot_path, started_at, finished_at) VALUES (?, ?, ?, 0, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (srun_id, run_id, script_id, duration_ms, error_msg,
+                 json.dumps(error_detail), len(console_errors), len(network_failures),
+                 saved_screenshot, script_now, finished_at),
+            )
+            final_status = "FAILED"
+        except Exception as exc:
+            duration_ms = int((time.time() - script_start) * 1000)
+            finished_at = datetime.now(timezone.utc).isoformat()
+            error_detail, error_msg = _build_error_detail(kind="internal", exc=exc)
+            conn.execute(
+                "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
+                "duration_ms, error_message, error_detail, started_at, finished_at) "
+                "VALUES (?, ?, ?, 0, 'FAILED', ?, ?, ?, ?, ?)",
+                (srun_id, run_id, script_id, duration_ms, error_msg,
+                 json.dumps(error_detail), script_now, finished_at),
+            )
+            final_status = "FAILED"
+
+        env_vars_dict.clear()
+        conn.execute(
+            "UPDATE suite_runs SET status=?, passed=?, failed=?, finished_at=? WHERE id=?",
+            (final_status, 1 if final_status == "PASSED" else 0,
+             0 if final_status == "PASSED" else 1, finished_at, run_id),
+        )
+        conn.commit()
+
+        return jsonify({
+            "ok": True,
+            "result": {
+                "run_id": run_id,
+                "script_id": script_id,
+                "name": script.get("name"),
+                "status": final_status,
+                "duration_ms": duration_ms,
+                "error_message": error_msg if final_status != "PASSED" else None,
+                "error_detail": error_detail if final_status != "PASSED" else None,
+                "screenshot_path": saved_screenshot if final_status != "PASSED" else None,
+            },
+        })
+
+    except Exception as e:
+        logger.exception("run_script_solo")
         return jsonify({"ok": False, "error": str(e)}), 500

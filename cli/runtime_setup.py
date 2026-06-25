@@ -35,7 +35,11 @@ def _load_package_template() -> dict:
 
 PINNED_PLAYWRIGHT_VERSION = _load_package_template()["dependencies"]["playwright"]
 
-REQUIREMENTS = [f"playwright=={PINNED_PLAYWRIGHT_VERSION}"]
+REQUIREMENTS = [
+    f"playwright=={PINNED_PLAYWRIGHT_VERSION}",
+    "httpx>=0.27.0",
+    "jsonpath-ng>=1.6.0",
+]
 
 
 # ---- Paths ----
@@ -167,7 +171,7 @@ def venv_pip_install(force: bool = False) -> bool:
         raise RuntimeError(f"venv Python not found at {py}. Run create_venv first.")
     if not force:
         result = subprocess.run(
-            [str(py), "-c", f"import playwright, sys; "
+            [str(py), "-c", f"import playwright, httpx, jsonpath_ng, sys; "
                             f"import importlib.metadata as m; "
                             f"sys.exit(0 if m.version('playwright') == '{PINNED_PLAYWRIGHT_VERSION}' else 1)"],
             capture_output=True,

@@ -140,6 +140,119 @@ def init_db():
     _migrate_script_language(conn)
     _migrate_script_wait_timeout(conn)
     _migrate_error_detail(conn)
+    _migrate_api_tables(conn)
+    _migrate_api_extractor(conn)
+    _migrate_api_schemas(conn)
+    _migrate_api_docs(conn)
+    _migrate_var_picker(conn)
+    _migrate_collection_auth(conn)
+    _migrate_api_collection_runs(conn)
+    _migrate_pre_extractor(conn)
+    _migrate_collection_run_progress(conn)
+
+
+def _migrate_collection_run_progress(conn):
+    """Add current_request_index and stop_requested to api_collection_runs."""
+    try:
+        conn.execute(
+            "ALTER TABLE api_collection_runs ADD COLUMN current_request_index INTEGER DEFAULT -1"
+        )
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute(
+            "ALTER TABLE api_collection_runs ADD COLUMN stop_requested INTEGER DEFAULT 0"
+        )
+    except Exception:
+        pass  # already exists
+    conn.commit()
+
+
+def _migrate_var_picker(conn):
+    """Add env_name to api_collections, path_params to api_requests, create collection_vars."""
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN env_name TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN path_params TEXT NOT NULL DEFAULT '[]'")
+    except Exception:
+        pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS collection_vars (
+            id TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL,
+            key TEXT NOT NULL,
+            initial_value TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(collection_id, key),
+            FOREIGN KEY(collection_id) REFERENCES api_collections(id) ON DELETE CASCADE
+        )
+    """)
+    conn.commit()
+
+
+def _migrate_collection_auth(conn):
+    """Add auth_type and auth_config to api_collections for collection-level auth."""
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN auth_type TEXT NOT NULL DEFAULT 'none'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN auth_config TEXT NOT NULL DEFAULT '{}'")
+    except Exception:
+        pass
+    conn.commit()
+
+
+def _migrate_api_collection_runs(conn):
+    """Create api_collection_runs and api_request_results tables."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_collection_runs (
+            id              TEXT PRIMARY KEY,
+            project_id      TEXT NOT NULL,
+            collection_id   TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            collection_name TEXT NOT NULL,
+            env_name        TEXT,
+            status          TEXT NOT NULL,
+            total           INTEGER NOT NULL DEFAULT 0,
+            passed          INTEGER NOT NULL DEFAULT 0,
+            failed          INTEGER NOT NULL DEFAULT 0,
+            error_count     INTEGER NOT NULL DEFAULT 0,
+            started_at      TEXT NOT NULL,
+            finished_at     TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_request_results (
+            id                TEXT PRIMARY KEY,
+            collection_run_id TEXT NOT NULL REFERENCES api_collection_runs(id) ON DELETE CASCADE,
+            api_request_id    TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            request_name      TEXT NOT NULL,
+            method            TEXT,
+            url               TEXT,
+            order_index       INTEGER NOT NULL DEFAULT 0,
+            status            TEXT,
+            status_code       INTEGER,
+            response_body     TEXT,
+            response_headers  TEXT,
+            duration_ms       INTEGER,
+            assertion_results TEXT,
+            error_message     TEXT,
+            started_at        TEXT,
+            finished_at       TEXT
+        )
+    """)
+    conn.commit()
+
+
+def _migrate_pre_extractor(conn):
+    """Add pre_extractor column to api_requests — JSON array of {path, name, prefix} rules applied to the previous response."""
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN pre_extractor TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
 
 
 def _migrate_error_detail(conn):
@@ -150,6 +263,154 @@ def _migrate_error_detail(conn):
     docs/error-reporting-plan.md (section 2.4)."""
     try:
         conn.execute("ALTER TABLE script_runs ADD COLUMN error_detail TEXT")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_tables(conn):
+    """Create api_collections, api_requests, api_runs tables and extend suite_items."""
+    # 1. api_collections
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_collections (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 2. api_requests
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_requests (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            feature_id TEXT REFERENCES features(id) ON DELETE SET NULL,
+            collection_id TEXT REFERENCES api_collections(id) ON DELETE SET NULL,
+            name TEXT NOT NULL,
+            method TEXT NOT NULL DEFAULT 'GET',
+            url TEXT NOT NULL,
+            headers TEXT NOT NULL DEFAULT '[]',
+            params TEXT NOT NULL DEFAULT '[]',
+            body_type TEXT DEFAULT NULL,
+            body TEXT DEFAULT NULL,
+            auth_type TEXT NOT NULL DEFAULT 'none',
+            auth_config TEXT NOT NULL DEFAULT '{}',
+            pre_script TEXT DEFAULT NULL,
+            pre_lang TEXT DEFAULT 'js',
+            post_script TEXT DEFAULT NULL,
+            post_lang TEXT DEFAULT 'js',
+            assertions TEXT NOT NULL DEFAULT '[]',
+            follow_redirects INTEGER DEFAULT 1,
+            timeout_ms INTEGER DEFAULT 30000,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    # 3. api_runs
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_runs (
+            id TEXT PRIMARY KEY,
+            suite_run_id TEXT NOT NULL REFERENCES suite_runs(id) ON DELETE CASCADE,
+            api_request_id TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            order_index INTEGER NOT NULL DEFAULT 0,
+            status TEXT,
+            status_code INTEGER,
+            response_body TEXT,
+            response_headers TEXT,
+            duration_ms INTEGER,
+            assertion_results TEXT,
+            error_message TEXT,
+            started_at TEXT,
+            finished_at TEXT
+        )
+    """)
+
+    # 4. Recreate suite_items with nullable script_id + item_type + api_request_id
+    #    Guard: skip if item_type column already exists
+    has_item_type = conn.execute(
+        "SELECT COUNT(*) FROM pragma_table_info('suite_items') WHERE name='item_type'"
+    ).fetchone()[0]
+    if not has_item_type:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("ALTER TABLE suite_items RENAME TO _suite_items_old")
+        conn.execute("""
+            CREATE TABLE suite_items (
+                id TEXT PRIMARY KEY,
+                suite_id TEXT NOT NULL REFERENCES suites(id) ON DELETE CASCADE,
+                script_id TEXT REFERENCES scripts(id) ON DELETE CASCADE,
+                api_request_id TEXT REFERENCES api_requests(id) ON DELETE CASCADE,
+                item_type TEXT NOT NULL DEFAULT 'script',
+                order_index INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            INSERT INTO suite_items (id, suite_id, script_id, item_type, order_index, created_at)
+            SELECT id, suite_id, script_id, 'script', order_index, created_at
+            FROM _suite_items_old
+        """)
+        conn.execute("DROP TABLE _suite_items_old")
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    # 5. Add description column to suites (safe — nullable, no default needed)
+    has_desc = conn.execute(
+        "SELECT COUNT(*) FROM pragma_table_info('suites') WHERE name='description'"
+    ).fetchone()[0]
+    if not has_desc:
+        conn.execute("ALTER TABLE suites ADD COLUMN description TEXT")
+
+    conn.commit()
+
+
+def _migrate_api_extractor(conn):
+    """Add post_extractor column to api_requests — JSON array of {path, name, prefix} rules."""
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN post_extractor TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_schemas(conn):
+    """Add request_schema and response_schema columns — inferred JSON type trees from HAR."""
+    for col in ("request_schema", "response_schema"):
+        try:
+            conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+        except Exception:
+            pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_docs(conn):
+    """Create api_doc_entries table and add include_in_docs to api_requests."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_doc_entries (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            method TEXT NOT NULL,
+            path_pattern TEXT NOT NULL,
+            description TEXT,
+            request_schema TEXT DEFAULT NULL,
+            response_schema TEXT DEFAULT NULL,
+            headers_schema TEXT DEFAULT NULL,
+            params_schema TEXT DEFAULT NULL,
+            source_request_ids TEXT DEFAULT '[]',
+            include_in_docs INTEGER DEFAULT 1,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL
+        )
+    """)
+    try:
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_api_doc_entries_unique "
+            "ON api_doc_entries(project_id, method, path_pattern)"
+        )
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN include_in_docs INTEGER DEFAULT 1")
     except Exception:
         pass  # Column already exists
     conn.commit()

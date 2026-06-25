@@ -38,6 +38,8 @@ npm install --silent --no-audit --no-fund \
   @codemirror/search@6 \
   @codemirror/lang-python@6 \
   @codemirror/lang-javascript@6 \
+  @codemirror/lang-json@6 \
+  @codemirror/lint@6 \
   @codemirror/theme-one-dark@6 \
   esbuild@0.24
 
