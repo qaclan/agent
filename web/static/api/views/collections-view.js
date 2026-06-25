@@ -19,6 +19,10 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
       _runningByColId = fresh;
       if (changed) _updateRunningDots();
+      if (Object.keys(_runningByColId).length === 0 && _runningPollTimer) {
+        clearInterval(_runningPollTimer);
+        _runningPollTimer = null;
+      }
     } catch (_) {}
   }
 

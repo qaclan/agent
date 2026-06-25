@@ -60,9 +60,9 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         .crv-fill{height:100%;background:var(--primary,#6366f1);border-radius:2px;transition:width .4s;}
         .crv-method{font-family:monospace;font-size:11px;font-weight:700;min-width:52px;}
         .crv-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-        .crv-code{font-size:11px;color:var(--text-muted);min-width:36px;text-align:right;}
-        .crv-dur{font-size:11px;color:var(--text-muted);min-width:56px;text-align:right;}
-        .crv-chevron{font-size:10px;color:var(--text-muted);min-width:14px;text-align:right;}
+        .crv-code{font-size:11px;color:var(--text-secondary,#555);min-width:36px;text-align:right;}
+        .crv-dur{font-size:11px;color:var(--text-secondary,#555);min-width:56px;text-align:right;}
+        .crv-chevron{font-size:10px;color:var(--text-secondary,#666);min-width:14px;text-align:right;}
         .crv-pass{color:var(--success,#22c55e);font-weight:600;}
         .crv-fail{color:var(--danger,#ef4444);font-weight:600;}
         .crv-err{color:var(--warning,#f59e0b);font-weight:600;}
@@ -82,8 +82,8 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         </div>
         <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
           <span id="crv-badge"></span>
-          <span style="font-size:12px;color:var(--text-muted)" id="crv-counts"></span>
-          <span style="font-size:12px;color:var(--text-muted)">⏱ <span id="crv-elapsed">00:00</span></span>
+          <span style="font-size:12px;color:var(--text-secondary,#555)" id="crv-counts"></span>
+          <span style="font-size:12px;color:var(--text-secondary,#555)">⏱ <span id="crv-elapsed">00:00</span></span>
         </div>
         <div class="crv-bar"><div class="crv-fill" id="crv-fill" style="width:0%"></div></div>
       </div>
@@ -168,15 +168,19 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
               ${!a.passed && a.actual != null ? ' → actual: ' + _esc(String(a.actual)) : ''}
             </div>`).join('')
           : '<div style="color:var(--text-muted)">No assertions</div>';
-        const body    = result.response_body || '';
-        const preview = body.length > 500 ? body.slice(0, 500) + '\n… (truncated)' : body;
+        const rawBody = result.response_body || '';
+        let prettyBody = rawBody;
+        if (rawBody) {
+          try { prettyBody = JSON.stringify(JSON.parse(rawBody), null, 2); } catch (_) {}
+        }
+        const preview = prettyBody.length > 2000 ? prettyBody.slice(0, 2000) + '\n… (truncated)' : prettyBody;
         const errHtml = result.error_message
           ? `<div style="color:var(--danger,#ef4444);margin-bottom:6px">Error: ${_esc(result.error_message)}</div>` : '';
         html += `<div class="crv-detail" id="crv-det-${i}">
           ${errHtml}
-          <div style="font-weight:600;color:var(--text-secondary);margin-bottom:4px">Assertions</div>
+          <div style="font-weight:600;color:var(--text-secondary,#444);margin-bottom:4px">Assertions</div>
           ${assertHtml}
-          ${body ? `<div style="font-weight:600;color:var(--text-secondary);margin-top:8px;margin-bottom:4px">Response body</div>
+          ${rawBody ? `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Response body</div>
           <pre class="crv-body">${_esc(preview)}</pre>` : ''}
         </div>`;
       }
