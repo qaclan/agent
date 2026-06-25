@@ -147,6 +147,25 @@ def init_db():
     _migrate_var_picker(conn)
     _migrate_collection_auth(conn)
     _migrate_api_collection_runs(conn)
+    _migrate_pre_extractor(conn)
+    _migrate_collection_run_progress(conn)
+
+
+def _migrate_collection_run_progress(conn):
+    """Add current_request_index and stop_requested to api_collection_runs."""
+    try:
+        conn.execute(
+            "ALTER TABLE api_collection_runs ADD COLUMN current_request_index INTEGER DEFAULT -1"
+        )
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute(
+            "ALTER TABLE api_collection_runs ADD COLUMN stop_requested INTEGER DEFAULT 0"
+        )
+    except Exception:
+        pass  # already exists
+    conn.commit()
 
 
 def _migrate_var_picker(conn):
@@ -224,6 +243,15 @@ def _migrate_api_collection_runs(conn):
             finished_at       TEXT
         )
     """)
+    conn.commit()
+
+
+def _migrate_pre_extractor(conn):
+    """Add pre_extractor column to api_requests — JSON array of {path, name, prefix} rules applied to the previous response."""
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN pre_extractor TEXT DEFAULT NULL")
+    except Exception:
+        pass  # Column already exists
     conn.commit()
 
 
