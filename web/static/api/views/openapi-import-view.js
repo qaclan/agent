@@ -1,50 +1,56 @@
-function _esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
+import { showRequestReviewModal } from './request-review-modal.js';
 
 export function showOpenApiImport() {
   const body = `
     <div style="margin-bottom:12px;">
       <label class="form-label">Import from URL</label>
-      <input id="openapi-url" type="url" class="input-sm" style="width:100%" placeholder="https://api.example.com/openapi.json">
+      <input id="openapi-url" type="url" class="input-sm" style="width:100%"
+        placeholder="https://api.example.com/openapi.json">
     </div>
     <div style="text-align:center;color:var(--text-muted);margin:8px 0;font-size:12px;">— or —</div>
     <div style="margin-bottom:12px;">
       <label class="form-label">Upload file (.json, .yaml)</label>
       <input id="openapi-file" type="file" accept=".json,.yaml,.yml" class="input-sm">
     </div>
-    <div id="openapi-result" style="display:none;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:13px;"></div>`;
+    <p id="openapi-status" style="font-size:12px;color:var(--text-muted);margin-top:4px;display:none"></p>`;
 
   window.showModal('Import OpenAPI / Swagger', body, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
-    { label: 'Import', cls: 'btn-primary', action: _doImport },
+    { label: 'Preview Requests', cls: 'btn-primary', action: _doPreview },
   ]);
 
-  async function _doImport() {
+  async function _doPreview() {
     const urlInput = document.getElementById('openapi-url');
     const fileInput = document.getElementById('openapi-file');
-    const resultDiv = document.getElementById('openapi-result');
+    const status = document.getElementById('openapi-status');
 
-    let res;
-    if (fileInput?.files[0]) {
-      const formData = new FormData();
-      formData.append('file', fileInput.files[0]);
-      res = await fetch('/api/discover/openapi', { method: 'POST', body: formData });
-      res = await res.json();
-    } else if (urlInput?.value.trim()) {
-      res = await window.api('POST', '/discover/openapi', { url: urlInput.value.trim() });
-    } else {
-      await window._alertDialog('Provide a URL or upload a file.');
+    if (status) { status.style.display = ''; status.textContent = 'Parsing…'; }
+
+    let data;
+    try {
+      if (fileInput?.files[0]) {
+        const formData = new FormData();
+        formData.append('file', fileInput.files[0]);
+        const res = await fetch('/api/discover/openapi/preview', { method: 'POST', body: formData });
+        data = await res.json();
+      } else if (urlInput?.value.trim()) {
+        data = await window.api('POST', '/discover/openapi/preview', { url: urlInput.value.trim() });
+      } else {
+        if (status) status.style.display = 'none';
+        await window._alertDialog('Provide a URL or upload a file.');
+        return;
+      }
+    } catch (e) {
+      await window._alertDialog('Network error: ' + e.message);
       return;
     }
 
-    resultDiv.style.display = '';
-    if (res.ok) {
-      const cols = res.collections || [];
-      resultDiv.innerHTML = `<strong>Imported ${_esc(String(res.imported))} requests</strong> across ${_esc(String(cols.length))} collections.<br>
-        ${cols.map(c => `• ${_esc(c.name)} (${_esc(String(c.count))})`).join('<br>')}`;
-    } else {
-      resultDiv.innerHTML = `<span style="color:var(--danger)">${_esc(res.error)}</span>`;
-    }
+    if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
+
+    window.closeModal();
+    const defaultName = fileInput?.files[0]
+      ? fileInput.files[0].name.replace(/\.(json|yaml|yml)$/i, '')
+      : 'OpenAPI Import';
+    showRequestReviewModal(data.requests, defaultName);
   }
 }

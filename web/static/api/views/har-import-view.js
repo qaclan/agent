@@ -1,107 +1,61 @@
-function _esc(s) {
-  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
-}
+import { showRequestReviewModal } from './request-review-modal.js';
 
 export function showHarImport() {
   const body = `
-    <div id="har-drop-zone" style="border:2px dashed var(--border);border-radius:8px;padding:32px;text-align:center;cursor:pointer;margin-bottom:12px;">
+    <div id="har-drop-zone" style="border:2px dashed var(--border);border-radius:8px;padding:32px;text-align:center;cursor:pointer;">
       <p style="margin:0;color:var(--text-muted)">Drag & drop .har file here, or <strong>click to browse</strong></p>
       <input type="file" id="har-file-input" accept=".har,application/json" style="display:none">
     </div>
-    <div id="har-preview" style="display:none">
-      <p id="har-summary" style="font-size:13px;color:var(--text-muted)"></p>
-      <div id="har-request-list" style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;"></div>
-    </div>`;
+    <p id="har-status" style="font-size:12px;color:var(--text-muted);margin-top:8px;display:none"></p>`;
 
   window.showModal('Import HAR', body, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
-    { label: 'Import Selected', cls: 'btn-primary', action: _doImport },
+    { label: 'Preview Requests', cls: 'btn-primary', action: _doPreview },
   ]);
 
-  let _parsedRequests = [];
+  let _selectedFile = null;
 
   requestAnimationFrame(() => {
     const dropZone = document.getElementById('har-drop-zone');
     const fileInput = document.getElementById('har-file-input');
 
     dropZone.onclick = () => fileInput.click();
-    fileInput.onchange = (e) => e.target.files[0] && _loadHarFile(e.target.files[0]);
-
-    dropZone.ondragover = (e) => { e.preventDefault(); dropZone.style.borderColor = 'var(--primary)'; };
+    fileInput.onchange = e => e.target.files[0] && _setFile(e.target.files[0]);
+    dropZone.ondragover = e => { e.preventDefault(); dropZone.style.borderColor = 'var(--primary)'; };
     dropZone.ondragleave = () => { dropZone.style.borderColor = 'var(--border)'; };
-    dropZone.ondrop = (e) => {
+    dropZone.ondrop = e => {
       e.preventDefault();
       dropZone.style.borderColor = 'var(--border)';
-      const f = e.dataTransfer.files[0];
-      if (f) _loadHarFile(f);
+      if (e.dataTransfer.files[0]) _setFile(e.dataTransfer.files[0]);
     };
   });
 
-  async function _loadHarFile(file) {
-    const text = await file.text();
-    let har;
-    try { har = JSON.parse(text); } catch(e) { await window._alertDialog('Invalid HAR file — could not parse JSON.'); return; }
-
-    const entries = har.log?.entries || [];
-    const preview = document.getElementById('har-preview');
-    const summary = document.getElementById('har-summary');
-    const list = document.getElementById('har-request-list');
-
-    summary.textContent = `Found ${entries.length} network entries. Static assets unchecked by default.`;
-    list.innerHTML = '';
-    _parsedRequests = [];
-
-    entries.forEach((entry, i) => {
-      const req = entry.request || {};
-      const method = req.method || 'GET';
-      const url = req.url || '';
-      const isStatic = /\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|svg|webp)$/i.test(url)
-                    || url.includes('/static/');
-
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;';
-
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = !isStatic;
-      cb.id = `har-req-${i}`;
-
-      const label = document.createElement('label');
-      label.htmlFor = `har-req-${i}`;
-      label.style.cssText = 'flex:1;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-      label.innerHTML = `<span class="method-badge method-${_esc(method)}" style="font-size:10px;padding:1px 5px;">${_esc(method)}</span> ${_esc(url.replace(/\?.*/, ''))}`;
-
-      row.appendChild(cb);
-      row.appendChild(label);
-      list.appendChild(row);
-      _parsedRequests.push({ entry, cb });
-    });
-
-    preview.style.display = '';
-    window._harData = har;
-    window._harFile = file;
+  function _setFile(file) {
+    _selectedFile = file;
+    const status = document.getElementById('har-status');
+    if (status) { status.style.display = ''; status.textContent = `Selected: ${file.name}`; }
   }
 
-  async function _doImport() {
-    if (!window._harFile) { await window._alertDialog('Please select a HAR file first.'); return; }
+  async function _doPreview() {
+    if (!_selectedFile) { await window._alertDialog('Please select a HAR file first.'); return; }
 
-    // Build filtered HAR with only checked entries
-    const har = window._harData;
-    har.log.entries = har.log.entries.filter((_, i) => {
-      return _parsedRequests[i]?.cb?.checked;
-    });
+    const status = document.getElementById('har-status');
+    if (status) { status.textContent = 'Parsing…'; status.style.display = ''; }
 
     const formData = new FormData();
-    formData.append('file', new Blob([JSON.stringify(har)], { type: 'application/json' }), 'import.har');
-    formData.append('collection_name', window._harFile.name.replace('.har', ''));
-
-    const res = await fetch('/api/discover/har', { method: 'POST', body: formData });
-    const data = await res.json();
-    window.closeModal();
-    if (data.ok) {
-      window._toast(`Imported ${data.imported} requests.`);
-    } else {
-      await window._alertDialog('Import failed: ' + data.error);
+    formData.append('file', _selectedFile);
+    let data;
+    try {
+      const res = await fetch('/api/discover/har/preview', { method: 'POST', body: formData });
+      data = await res.json();
+    } catch (e) {
+      await window._alertDialog('Network error: ' + e.message);
+      return;
     }
+
+    if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
+
+    window.closeModal();
+    showRequestReviewModal(data.requests, _selectedFile.name.replace(/\.har$/i, ''));
   }
 }
