@@ -60,10 +60,12 @@ class RunnerService:
     def run_collection(self, collection_id: str, project_id: str,
                        env_name: str | None = None,
                        seed_vars: dict | None = None) -> dict:
-        """Run all requests in a collection sequentially. Results returned in-memory, NOT stored in api_runs."""
+        """Run all requests in a collection sequentially. Results persisted to api_collection_runs."""
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
+        from web.api.repositories.collection_run_repo import CollectionRunRepo
         from cli.api_runner import run_api_request
+        from datetime import datetime, timezone
 
         col = CollectionRepo().get(collection_id, project_id)
         if col is None:
@@ -72,27 +74,48 @@ class RunnerService:
         requests = RequestRepo().list(project_id, collection_id=collection_id)
         env_vars = load_env_vars(project_id, env_name)
 
-        # Pre-seed state with collection vars initial values
         state: dict = {"qaclan_vars": dict(seed_vars)} if seed_vars else {}
-        results = []
-        passed = failed = 0
 
-        for req in requests:
+        started_at = datetime.now(timezone.utc).isoformat()
+        run_repo = CollectionRunRepo()
+        run_id = run_repo.create_run(
+            collection_id=collection_id,
+            project_id=project_id,
+            collection_name=col["name"],
+            env_name=env_name,
+            started_at=started_at,
+        )
+
+        results = []
+        for idx, req in enumerate(requests):
             result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
             results.append({
                 "request_id": req["id"],
                 "name": req["name"],
                 "method": req["method"],
-                "url": req["url"],
+                "url": result.get("url") or req.get("url", ""),
                 **result,
             })
-            if result["status"] == "PASSED":
-                passed += 1
-            else:
-                failed += 1
+            run_repo.create_request_result(run_id, req, result, idx)
 
-        final_status = "PASSED" if failed == 0 else "FAILED"
+        passed = sum(1 for r in results if r["status"] == "PASSED")
+        failed = sum(1 for r in results if r["status"] == "FAILED")
+        error_count = sum(1 for r in results if r["status"] == "ERROR")
+        final_status = "PASSED" if (failed + error_count) == 0 else "FAILED"
+        finished_at = datetime.now(timezone.utc).isoformat()
+
+        run_repo.finish_run(
+            run_id=run_id,
+            status=final_status,
+            total=len(requests),
+            passed=passed,
+            failed=failed,
+            error_count=error_count,
+            finished_at=finished_at,
+        )
+
         return {
+            "run_id": run_id,
             "collection_id": collection_id,
             "collection_name": col["name"],
             "status": final_status,

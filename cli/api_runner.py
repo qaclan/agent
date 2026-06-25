@@ -372,6 +372,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
     started_at = datetime.now(timezone.utc).isoformat()
     start_time = time.time()
+    url = req.get("url", "")          # initialised before try so error returns always have a url
 
     try:
         # 1. Resolve variables in URL, headers, params
@@ -523,6 +524,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         return {
             "status": status,
             "status_code": status_code,
+            "url": url,
             "response_body": response_body,
             "response_headers": response_headers,
             "duration_ms": duration_ms,
@@ -540,6 +542,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         return {
             "status": "ERROR",
             "status_code": None,
+            "url": url,
             "response_body": None,
             "response_headers": {},
             "duration_ms": duration_ms,
@@ -557,6 +560,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         return {
             "status": "ERROR",
             "status_code": None,
+            "url": url,
             "response_body": None,
             "response_headers": {},
             "duration_ms": duration_ms,
