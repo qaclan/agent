@@ -43,7 +43,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     const pulse = status === 'RUNNING'
       ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning,#f59e0b);margin-right:5px;animation:crv-pulse 1s infinite"></span>'
       : '';
-    return `<span style="font-weight:600;font-size:13px;color:${color}">${pulse}${_esc(status)}</span>`;
+    return `<span style="font-weight:700;font-size:14px;color:${color};letter-spacing:.03em;">${pulse}${_esc(status)}</span>`;
   }
 
   function _renderShell() {
@@ -58,11 +58,11 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         .crv-spin{display:inline-block;width:11px;height:11px;border:2px solid var(--border,#444);border-top-color:var(--text-muted,#999);border-radius:50%;animation:crv-spin .7s linear infinite;}
         .crv-bar{height:4px;background:var(--border-subtle,rgba(255,255,255,.1));border-radius:2px;overflow:hidden;margin:10px 0 2px;}
         .crv-fill{height:100%;background:var(--primary,#6366f1);border-radius:2px;transition:width .4s;}
-        .crv-stat-grid{display:flex;align-items:stretch;border:1px solid var(--border,rgba(255,255,255,.15));border-radius:8px;overflow:hidden;margin-top:10px;}
-        .crv-stat-cell{padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:0;}
-        .crv-stat-val{font-size:17px;font-weight:700;line-height:1.2;color:var(--text-primary,#eee);}
+        .crv-stat-grid{display:flex;align-items:stretch;margin-top:10px;}
+        .crv-stat-cell{padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:0;border-right:1px solid rgba(128,128,128,.2);}
+        .crv-stat-cell:last-child{border-right:none;}
+        .crv-stat-val{font-size:17px;font-weight:700;line-height:1.2;}
         .crv-stat-lbl{font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;}
-        .crv-stat-sep{width:1px;background:var(--border,rgba(255,255,255,.15));flex-shrink:0;}
         .crv-method{font-family:monospace;font-size:11px;font-weight:700;min-width:52px;}
         .crv-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
         .crv-chevron{font-size:10px;color:var(--text-secondary,#666);min-width:14px;text-align:right;}
@@ -84,16 +84,11 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
           </div>
         </div>
         <div class="crv-stat-grid">
-          <div class="crv-stat-cell" style="min-width:90px;"><span id="crv-badge"></span></div>
-          <div class="crv-stat-sep"></div>
+          <div class="crv-stat-cell" style="min-width:90px;"><span id="crv-badge"></span><span class="crv-stat-lbl">Status</span></div>
           <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-prog">—</span><span class="crv-stat-lbl">Progress</span></div>
-          <div class="crv-stat-sep"></div>
           <div class="crv-stat-cell"><span class="crv-stat-val crv-pass" id="crv-passed-c">0</span><span class="crv-stat-lbl">Passed</span></div>
-          <div class="crv-stat-sep"></div>
           <div class="crv-stat-cell"><span class="crv-stat-val crv-fail" id="crv-failed-c">0</span><span class="crv-stat-lbl">Failed</span></div>
-          <div class="crv-stat-sep"></div>
           <div class="crv-stat-cell"><span class="crv-stat-val crv-err" id="crv-errors-c">0</span><span class="crv-stat-lbl">Errors</span></div>
-          <div class="crv-stat-sep"></div>
           <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-elapsed">00:00</span><span class="crv-stat-lbl">Elapsed</span></div>
         </div>
         <div class="crv-bar"><div class="crv-fill" id="crv-fill" style="width:0%"></div></div>
