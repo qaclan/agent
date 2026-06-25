@@ -51,14 +51,26 @@ def get_suite(suite_id):
 
         suite = dict(row)
 
-        # Load ordered scripts
+        # Load all ordered items (scripts and api_requests)
         items = conn.execute(
-            "SELECT si.script_id, s.name, s.language, si.order_index "
-            "FROM suite_items si JOIN scripts s ON si.script_id = s.id "
+            "SELECT si.id AS item_id, si.item_type, si.order_index, "
+            "si.script_id, s.name AS script_name, s.language, "
+            "si.api_request_id, ar.name AS api_request_name, ar.method, ar.url "
+            "FROM suite_items si "
+            "LEFT JOIN scripts s ON si.script_id = s.id "
+            "LEFT JOIN api_requests ar ON si.api_request_id = ar.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
         ).fetchall()
-        suite["scripts"] = [dict(i) for i in items]
+        all_items = [dict(i) for i in items]
+        # Backward-compatible: keep 'scripts' key for existing UI
+        suite["scripts"] = [
+            {"script_id": i["script_id"], "name": i["script_name"],
+             "language": i["language"], "order_index": i["order_index"]}
+            for i in all_items if i["item_type"] == "script"
+        ]
+        # New: all items with type info for the extended suite builder
+        suite["items"] = all_items
 
         return jsonify({"ok": True, "suite": suite})
     except Exception as e:
@@ -208,6 +220,95 @@ def remove_script_from_suite(suite_id, script_id):
         from cli.sync_queue import enqueue
         enqueue("suite_items", suite_id, "upsert")
 
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/suites/<suite_id>/items', methods=['POST'])
+def add_suite_item(suite_id):
+    """Add a script or api_request item to a suite."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        data = request.get_json(force=True)
+        item_type = data.get("item_type", "script")
+        script_id = data.get("script_id")
+        api_request_id = data.get("api_request_id")
+
+        if item_type not in ("script", "api_request"):
+            return jsonify({"ok": False, "error": "item_type must be 'script' or 'api_request'"}), 400
+        if item_type == "script" and not script_id:
+            return jsonify({"ok": False, "error": "script_id required for item_type='script'"}), 400
+        if item_type == "api_request" and not api_request_id:
+            return jsonify({"ok": False, "error": "api_request_id required for item_type='api_request'"}), 400
+
+        conn = get_conn()
+
+        # Verify suite belongs to project
+        suite = conn.execute(
+            "SELECT id FROM suites WHERE id = ? AND project_id = ?", (suite_id, project_id)
+        ).fetchone()
+        if not suite:
+            return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
+
+        # Verify referenced entity exists
+        if item_type == "script":
+            ref = conn.execute(
+                "SELECT id FROM scripts WHERE id = ? AND project_id = ?", (script_id, project_id)
+            ).fetchone()
+            if not ref:
+                return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
+        else:
+            ref = conn.execute(
+                "SELECT id FROM api_requests WHERE id = ? AND project_id = ?", (api_request_id, project_id)
+            ).fetchone()
+            if not ref:
+                return jsonify({"ok": False, "error": f"API request {api_request_id} not found"}), 404
+
+        # Calculate next order_index
+        max_order = conn.execute(
+            "SELECT COALESCE(MAX(order_index), -1) FROM suite_items WHERE suite_id = ?", (suite_id,)
+        ).fetchone()[0]
+        order_index = max_order + 1
+
+        item_id = generate_id("si")
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO suite_items (id, suite_id, script_id, api_request_id, item_type, order_index, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (item_id, suite_id, script_id, api_request_id, item_type, order_index, now),
+        )
+        conn.commit()
+
+        return jsonify({"ok": True, "item_id": item_id, "order_index": order_index}), 201
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/suites/<suite_id>/items/<item_id>', methods=['DELETE'])
+def remove_suite_item(suite_id, item_id):
+    """Remove any suite item (script or api_request) by suite_items.id."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        conn = get_conn()
+        suite = conn.execute(
+            "SELECT id FROM suites WHERE id = ? AND project_id = ?", (suite_id, project_id)
+        ).fetchone()
+        if not suite:
+            return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
+
+        cur = conn.execute(
+            "DELETE FROM suite_items WHERE id = ? AND suite_id = ?", (item_id, suite_id)
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"ok": False, "error": f"Item {item_id} not found"}), 404
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

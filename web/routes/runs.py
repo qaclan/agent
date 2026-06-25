@@ -268,21 +268,25 @@ def execute_run():
             }), 400
 
         items = conn.execute(
-            "SELECT si.order_index, sc.id AS script_id, sc.name AS script_name, sc.file_path, "
-            "sc.language, sc.start_url_key, sc.start_url_value, sc.var_keys, sc.wait_timeout "
-            "FROM suite_items si JOIN scripts sc ON si.script_id = sc.id "
+            "SELECT si.id AS item_id, si.order_index, si.item_type, "
+            "si.script_id, si.api_request_id, "
+            "sc.name AS script_name, sc.file_path, sc.language, sc.start_url_key, "
+            "sc.start_url_value, sc.var_keys, sc.wait_timeout "
+            "FROM suite_items si "
+            "LEFT JOIN scripts sc ON si.script_id = sc.id "
             "WHERE si.suite_id = ? ORDER BY si.order_index",
             (suite_id,),
         ).fetchall()
         if not items:
-            logger.warning("execute_run: suite %s has no scripts", suite_id)
-            return jsonify({"ok": False, "error": "Suite has no scripts"}), 400
+            logger.warning("execute_run: suite %s has no items", suite_id)
+            return jsonify({"ok": False, "error": "Suite has no items"}), 400
 
         logger.info("execute_run: loaded %d scripts for suite %s (%s)", len(items), suite_id, suite["name"])
 
         # Pre-flight: every language present in the suite must have a working runtime.
+        # Only script items have a language; api_request items need no runtime validation.
         from cli import runtime_setup
-        languages_in_suite = {item["language"] or "python" for item in items}
+        languages_in_suite = {item["language"] or "python" for item in items if item["item_type"] == "script"}
         for lang in languages_in_suite:
             try:
                 get_strategy(lang).validate_runtime()
@@ -377,21 +381,125 @@ def execute_run():
             language = item["language"] or "python"
 
             if stopped:
-                logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item["script_name"])
-                conn.execute(
-                    "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
-                    (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
-                )
-                skipped += 1
-                script_results.append({
-                    "script_id": item["script_id"],
-                    "name": item["script_name"],
-                    "status": "SKIPPED",
-                    "duration_ms": 0,
-                    "error_message": None,
-                })
+                logger.info("execute_run: [%d/%d] %s — SKIPPED (stop-on-fail)", idx + 1, total, item.get("script_name") or item.get("api_request_id"))
+                if item["item_type"] == "api_request":
+                    skipped += 1
+                    script_results.append({
+                        "item_type": "api_request",
+                        "api_request_id": item["api_request_id"],
+                        "name": item.get("api_request_id"),
+                        "status": "SKIPPED",
+                        "duration_ms": 0,
+                        "error_message": None,
+                    })
+                else:
+                    conn.execute(
+                        "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, started_at, finished_at) "
+                        "VALUES (?, ?, ?, ?, 'SKIPPED', ?, ?)",
+                        (srun_id, run_id, item["script_id"], item["order_index"], script_now, script_now),
+                    )
+                    skipped += 1
+                    script_results.append({
+                        "script_id": item["script_id"],
+                        "name": item.get("script_name") or item.get("api_request_id"),
+                        "status": "SKIPPED",
+                        "duration_ms": 0,
+                        "error_message": None,
+                    })
                 continue
+
+            # --- API request item branch ---
+            if item["item_type"] == "api_request":
+                api_req_id = item["api_request_id"]
+                api_start = time.time()
+
+                try:
+                    from cli.api_runner import run_api_request
+                    from web.api.repositories.api_run_repo import ApiRunRepo
+
+                    # Load the api_request row
+                    api_req_row = conn.execute(
+                        "SELECT * FROM api_requests WHERE id = ?", (api_req_id,)
+                    ).fetchone()
+                    if not api_req_row:
+                        raise LookupError(f"api_request {api_req_id} not found")
+
+                    import json as _json
+                    api_req = dict(api_req_row)
+                    for _key in ("headers", "params", "assertions"):
+                        if isinstance(api_req.get(_key), str):
+                            try:
+                                api_req[_key] = _json.loads(api_req[_key])
+                            except (ValueError, TypeError):
+                                api_req[_key] = []
+                    if isinstance(api_req.get("auth_config"), str):
+                        try:
+                            api_req["auth_config"] = _json.loads(api_req["auth_config"])
+                        except (ValueError, TypeError):
+                            api_req["auth_config"] = {}
+
+                    # Load state.json and extract qaclan_vars
+                    state_dict: dict = {}
+                    if state_file.exists():
+                        try:
+                            state_dict = _json.loads(state_file.read_text(encoding="utf-8"))
+                        except (ValueError, OSError):
+                            state_dict = {}
+
+                    api_result = run_api_request(
+                        api_req, env_vars_dict, state_dict, state_path=str(state_file)
+                    )
+
+                    # Merge state_updates back into state.json qaclan_vars
+                    state_updates = api_result.get("state_updates", {})
+                    if state_updates:
+                        state_dict.setdefault("qaclan_vars", {}).update(state_updates)
+                        try:
+                            state_file.write_text(_json.dumps(state_dict), encoding="utf-8")
+                        except OSError as _ose:
+                            logger.warning("execute_run: could not write state.json: %s", _ose)
+
+                    # Persist api_run row
+                    ApiRunRepo().create(run_id, api_req_id, item["order_index"], api_result)
+
+                    api_duration_ms = int((time.time() - api_start) * 1000)
+                    api_status = api_result.get("status", "ERROR")
+                    if api_status == "PASSED":
+                        passed += 1
+                    else:
+                        failed += 1
+                        if stop_on_fail:
+                            stopped = True
+
+                    script_results.append({
+                        "item_type": "api_request",
+                        "api_request_id": api_req_id,
+                        "name": api_req.get("name", api_req_id),
+                        "status": api_status,
+                        "duration_ms": api_duration_ms,
+                        "status_code": api_result.get("status_code"),
+                        "error_message": api_result.get("error_message"),
+                        "assertion_results": api_result.get("assertion_results", []),
+                    })
+                    logger.info("execute_run: [%d/%d] API '%s' — %s (%dms)",
+                                idx + 1, total, api_req.get("name"), api_status, api_duration_ms)
+
+                except Exception as _api_exc:
+                    failed += 1
+                    if stop_on_fail:
+                        stopped = True
+                    err_msg = str(_api_exc)
+                    logger.error("execute_run: [%d/%d] API item error: %s", idx + 1, total, err_msg)
+                    script_results.append({
+                        "item_type": "api_request",
+                        "api_request_id": api_req_id,
+                        "name": api_req_id,
+                        "status": "ERROR",
+                        "duration_ms": int((time.time() - api_start) * 1000),
+                        "error_message": err_msg,
+                    })
+                continue  # skip rest of script-item logic
+            # --- End API request item branch ---
 
             logger.info("execute_run: [%d/%d] running '%s' (%s, %s)...",
                         idx + 1, total, item["script_name"], item["script_id"], language)
@@ -459,6 +567,15 @@ def execute_run():
                     effective_wait_timeout = run_wait_timeout
                 child_env["QACLAN_EXPECT_TIMEOUT"] = str(effective_wait_timeout)
                 child_env["QACLAN_ACTION_TIMEOUT"] = str(effective_wait_timeout)
+                # Inject qaclan_vars from state.json so scripts can read them as QACLAN_STATE_* env vars
+                if state_file.exists():
+                    try:
+                        import json as _sjson
+                        _state = _sjson.loads(state_file.read_text(encoding="utf-8"))
+                        for _vk, _vv in _state.get("qaclan_vars", {}).items():
+                            child_env[f"QACLAN_STATE_{_vk}"] = str(_vv)
+                    except (ValueError, OSError):
+                        pass
                 if pw_browsers_path:
                     child_env["PLAYWRIGHT_BROWSERS_PATH"] = pw_browsers_path
 
