@@ -19,7 +19,8 @@ def _project_id():
 @bp.route("/api/api-collection-runs", methods=["GET"])
 def list_api_collection_runs():
     try:
-        runs = _repo.list_runs(_project_id())
+        status_filter = request.args.get("status") or None
+        runs = _repo.list_runs(_project_id(), status_filter=status_filter)
         return jsonify({"ok": True, "runs": runs})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -40,6 +41,24 @@ def get_api_collection_run(run_id):
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("get_api_collection_run")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/api-collection-runs/<run_id>/stop", methods=["POST"])
+def stop_api_collection_run(run_id):
+    try:
+        pid = _project_id()
+        run = _repo.get_run(run_id, pid)
+        if run is None:
+            return jsonify({"ok": False, "error": f"Run {run_id} not found"}), 404
+        if run["status"] != "RUNNING":
+            return jsonify({"ok": False, "error": "Run is not RUNNING"}), 400
+        _repo.request_stop(run_id)
+        return jsonify({"ok": True})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("stop_api_collection_run")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 

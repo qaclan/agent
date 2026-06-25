@@ -115,15 +115,15 @@ def patch_collection(col_id):
 @bp.route("/api/collections/<col_id>/run", methods=["POST"])
 def run_collection(col_id):
     try:
-        pid = _project_id()
-        col = CollectionRepo().get(col_id, pid)
-        if not col:
-            raise LookupError(f"Collection {col_id} not found")
         data = request.get_json(force=True) or {}
-        env_name = data.get("env_name") or col.get("env_name")
-        seed_vars = CollectionVarsRepo().as_seed_dict(col_id)
-        result = _runner_svc.run_collection(col_id, pid, env_name=env_name, seed_vars=seed_vars)
-        return jsonify({"ok": True, **result})
+        env_name = data.get("env_name") or None
+        seed_vars = data.get("seed_vars") or None
+        pid = _project_id()
+        run_id, already_running = _runner_svc.start_collection_run(
+            col_id, pid, env_name=env_name, seed_vars=seed_vars
+        )
+        return jsonify({"ok": True, "run_id": run_id, "status": "RUNNING",
+                        "already_running": already_running})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
     except ValueError as e:
