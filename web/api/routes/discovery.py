@@ -55,13 +55,15 @@ def discover_openapi():
                 spec = yaml.safe_load(raw)
             else:
                 spec = json.loads(raw)
-            result = _svc.import_openapi(pid, spec)
+            collection_name = request.form.get("collection_name") or None
+            result = _svc.import_openapi(pid, spec, collection_name=collection_name)
         else:
             data = request.get_json(force=True) or {}
             url = data.get("url", "")
             if not url:
                 return jsonify({"ok": False, "error": "Provide 'url' or upload a file"}), 400
-            result = _svc.import_openapi(pid, url)
+            collection_name = data.get("collection_name") or None
+            result = _svc.import_openapi(pid, url, collection_name=collection_name)
         return jsonify({"ok": True, **result})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -79,7 +81,8 @@ def discover_postman():
             return jsonify({"ok": False, "error": "No file uploaded (field: 'file')"}), 400
         f = request.files["file"]
         collection_json = json.loads(f.read().decode("utf-8"))
-        result = _svc.import_postman(pid, collection_json)
+        collection_name = request.form.get("collection_name") or None
+        result = _svc.import_postman(pid, collection_json, collection_name=collection_name)
         return jsonify({"ok": True, **result})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -99,7 +102,8 @@ def discover_bruno():
         bru_files = []
         for f in files:
             bru_files.append({"name": f.filename, "content": f.read().decode("utf-8")})
-        result = _svc.import_bruno(pid, bru_files)
+        collection_name = request.form.get("collection_name") or None
+        result = _svc.import_bruno(pid, bru_files, collection_name=collection_name)
         return jsonify({"ok": True, **result})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -132,6 +136,93 @@ def save_requests():
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("save_requests")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/discover/har/preview", methods=["POST"])
+def discover_har_preview():
+    """Parse HAR file and return request list without saving."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "No file uploaded (field: 'file')"}), 400
+        f = request.files["file"]
+        har_json = json.loads(f.read().decode("utf-8"))
+        from cli.api_discovery.har_parser import parse_har
+        requests_list = parse_har(har_json)
+        return jsonify({"ok": True, "requests": requests_list})
+    except Exception as e:
+        logger.exception("discover_har_preview")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/discover/openapi/preview", methods=["POST"])
+def discover_openapi_preview():
+    """Parse OpenAPI spec (file or URL) and return request list without saving."""
+    try:
+        from cli.api_discovery.openapi_parser import parse_openapi
+        if request.files.get("file"):
+            f = request.files["file"]
+            raw = f.read().decode("utf-8")
+            if f.filename.endswith(".yaml") or f.filename.endswith(".yml"):
+                import yaml
+                spec = yaml.safe_load(raw)
+            else:
+                spec = json.loads(raw)
+        else:
+            data = request.get_json(force=True) or {}
+            url = data.get("url", "")
+            if not url:
+                return jsonify({"ok": False, "error": "Provide 'url' or upload a file"}), 400
+            import httpx
+            resp = httpx.get(url, timeout=30, follow_redirects=True)
+            resp.raise_for_status()
+            ct = resp.headers.get("content-type", "")
+            if "json" in ct:
+                spec = resp.json()
+            else:
+                import yaml
+                spec = yaml.safe_load(resp.text)
+        requests_list = parse_openapi(spec)
+        return jsonify({"ok": True, "requests": requests_list})
+    except Exception as e:
+        logger.exception("discover_openapi_preview")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/discover/postman/preview", methods=["POST"])
+def discover_postman_preview():
+    """Parse Postman collection file and return request list without saving."""
+    try:
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "No file uploaded (field: 'file')"}), 400
+        f = request.files["file"]
+        collection_json = json.loads(f.read().decode("utf-8"))
+        from cli.api_discovery.postman_parser import parse_postman
+        requests_list = parse_postman(collection_json)
+        return jsonify({"ok": True, "requests": requests_list})
+    except Exception as e:
+        logger.exception("discover_postman_preview")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/discover/bruno/preview", methods=["POST"])
+def discover_bruno_preview():
+    """Parse .bru files and return request list without saving."""
+    try:
+        files = request.files.getlist("files")
+        if not files:
+            return jsonify({"ok": False, "error": "No files uploaded (field: 'files')"}), 400
+        from cli.api_discovery.bruno_parser import parse_bruno
+        requests_list = []
+        for f in files:
+            parsed = parse_bruno(f.read().decode("utf-8"))
+            for req in parsed:
+                if req.get("name") in ("Imported Request", "", None):
+                    req["name"] = f.filename.replace(".bru", "")
+            requests_list.extend(parsed)
+        return jsonify({"ok": True, "requests": requests_list})
+    except Exception as e:
+        logger.exception("discover_bruno_preview")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 

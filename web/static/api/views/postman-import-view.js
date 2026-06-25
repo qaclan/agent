@@ -1,33 +1,40 @@
+import { showRequestReviewModal } from './request-review-modal.js';
+
 export function showPostmanImport() {
   const body = `
     <div style="margin-bottom:12px;">
       <label class="form-label">Upload Postman Collection v2.1 (.json)</label>
       <input id="postman-file" type="file" accept=".json" class="input-sm">
     </div>
-    <div id="postman-result" style="display:none;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:13px;"></div>`;
+    <p id="postman-status" style="font-size:12px;color:var(--text-muted);margin-top:4px;display:none"></p>`;
 
   window.showModal('Import Postman Collection', body, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
-    { label: 'Import', cls: 'btn-primary', action: _doImport },
+    { label: 'Preview Requests', cls: 'btn-primary', action: _doPreview },
   ]);
 
-  async function _doImport() {
+  async function _doPreview() {
     const fileInput = document.getElementById('postman-file');
     if (!fileInput?.files[0]) { await window._alertDialog('Please select a Postman collection file.'); return; }
 
+    const status = document.getElementById('postman-status');
+    if (status) { status.style.display = ''; status.textContent = 'Parsing…'; }
+
     const formData = new FormData();
     formData.append('file', fileInput.files[0]);
-    const res = await fetch('/api/discover/postman', { method: 'POST', body: formData });
-    const data = await res.json();
-
-    const resultDiv = document.getElementById('postman-result');
-    resultDiv.style.display = '';
-    if (data.ok) {
-      resultDiv.innerHTML = `<strong>Imported ${data.imported} requests.</strong>`;
-      setTimeout(() => window.closeModal(), 1500);
-    } else {
-      resultDiv.innerHTML = `<span style="color:var(--danger)">${data.error}</span>`;
+    let data;
+    try {
+      const res = await fetch('/api/discover/postman/preview', { method: 'POST', body: formData });
+      data = await res.json();
+    } catch (e) {
+      await window._alertDialog('Network error: ' + e.message);
+      return;
     }
+
+    if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
+
+    window.closeModal();
+    showRequestReviewModal(data.requests, fileInput.files[0].name.replace(/\.json$/i, ''));
   }
 }
 
@@ -37,30 +44,34 @@ export function showBrunoImportView() {
       <label class="form-label">Upload .bru files (select multiple)</label>
       <input id="bruno-files" type="file" accept=".bru" multiple class="input-sm">
     </div>
-    <div id="bruno-result" style="display:none;padding:10px;background:var(--bg-secondary);border-radius:6px;font-size:13px;"></div>`;
+    <p id="bruno-status" style="font-size:12px;color:var(--text-muted);margin-top:4px;display:none"></p>`;
 
   window.showModal('Import Bruno Files', body, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
-    { label: 'Import', cls: 'btn-primary', action: _doImport },
+    { label: 'Preview Requests', cls: 'btn-primary', action: _doPreview },
   ]);
 
-  async function _doImport() {
+  async function _doPreview() {
     const fileInput = document.getElementById('bruno-files');
     if (!fileInput?.files.length) { await window._alertDialog('Please select .bru files.'); return; }
 
+    const status = document.getElementById('bruno-status');
+    if (status) { status.style.display = ''; status.textContent = 'Parsing…'; }
+
     const formData = new FormData();
     for (const f of fileInput.files) formData.append('files', f);
-
-    const res = await fetch('/api/discover/bruno', { method: 'POST', body: formData });
-    const data = await res.json();
-
-    const resultDiv = document.getElementById('bruno-result');
-    resultDiv.style.display = '';
-    if (data.ok) {
-      resultDiv.innerHTML = `<strong>Imported ${data.imported} requests.</strong>`;
-      setTimeout(() => window.closeModal(), 1500);
-    } else {
-      resultDiv.innerHTML = `<span style="color:var(--danger)">${data.error}</span>`;
+    let data;
+    try {
+      const res = await fetch('/api/discover/bruno/preview', { method: 'POST', body: formData });
+      data = await res.json();
+    } catch (e) {
+      await window._alertDialog('Network error: ' + e.message);
+      return;
     }
+
+    if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
+
+    window.closeModal();
+    showRequestReviewModal(data.requests, 'Bruno Import');
   }
 }

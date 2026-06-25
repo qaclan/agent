@@ -63,7 +63,7 @@ class DiscoveryService:
         logger.info("import_har: saved %d requests (collection_id=%s)", count, col_id)
         return {"imported": count, "collection_id": col_id}
 
-    def import_openapi(self, project_id: str, spec_or_url) -> dict:
+    def import_openapi(self, project_id: str, spec_or_url, collection_name: str | None = None) -> dict:
         from cli.api_discovery.openapi_parser import parse_openapi
         if isinstance(spec_or_url, str) and spec_or_url.startswith("http"):
             import httpx
@@ -79,6 +79,12 @@ class DiscoveryService:
             spec = spec_or_url
 
         requests = parse_openapi(spec)
+
+        if collection_name:
+            col = _col_repo.create(project_id, collection_name)
+            count = _save_requests(project_id, requests, collection_id=col["id"])
+            logger.info("import_openapi: saved %d requests to collection '%s'", count, collection_name)
+            return {"imported": count, "collections": [{"id": col["id"], "name": collection_name, "count": count}]}
 
         # Group by collection_name (tag)
         by_tag: dict[str, list] = {}
@@ -97,9 +103,15 @@ class DiscoveryService:
         logger.info("import_openapi: saved %d requests across %d collections", total, len(collections_created))
         return {"imported": total, "collections": collections_created}
 
-    def import_postman(self, project_id: str, collection_json: dict) -> dict:
+    def import_postman(self, project_id: str, collection_json: dict, collection_name: str | None = None) -> dict:
         from cli.api_discovery.postman_parser import parse_postman
         requests = parse_postman(collection_json)
+
+        if collection_name:
+            col = _col_repo.create(project_id, collection_name)
+            total = _save_requests(project_id, requests, collection_id=col["id"])
+            logger.info("import_postman: saved %d requests to collection '%s'", total, collection_name)
+            return {"imported": total}
 
         # Group by collection_name (folder)
         by_folder: dict[str, list] = {}
@@ -115,17 +127,20 @@ class DiscoveryService:
         logger.info("import_postman: saved %d requests", total)
         return {"imported": total}
 
-    def import_bruno(self, project_id: str, bru_files: list[dict]) -> dict:
+    def import_bruno(self, project_id: str, bru_files: list[dict], collection_name: str | None = None) -> dict:
         """bru_files: list of {name: str, content: str}"""
         from cli.api_discovery.bruno_parser import parse_bruno
+        col_id = None
+        if collection_name:
+            col = _col_repo.create(project_id, collection_name)
+            col_id = col["id"]
         total = 0
         for f in bru_files:
             requests = parse_bruno(f.get("content", ""))
-            # Use filename (without .bru) as request name if not set
             for req in requests:
                 if req.get("name") in ("Imported Request", "", None):
                     req["name"] = f.get("name", "Request").replace(".bru", "")
-            total += _save_requests(project_id, requests)
+            total += _save_requests(project_id, requests, collection_id=col_id)
 
         logger.info("import_bruno: saved %d requests from %d files", total, len(bru_files))
         return {"imported": total}

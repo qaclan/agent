@@ -531,4 +531,5 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   }
 
   reload();
+  return { reload };
 }
