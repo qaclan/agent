@@ -87,39 +87,39 @@ class RunnerService:
         )
 
         results = []
-        for idx, req in enumerate(requests):
-            result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
-            results.append({
-                "request_id": req["id"],
-                "name": req["name"],
-                "method": req["method"],
-                "url": result.get("url", ""),
-                **result,
-            })
-            run_repo.create_request_result(run_id, req, result, idx)
-
-        passed = sum(1 for r in results if r["status"] == "PASSED")
-        failed = sum(1 for r in results if r["status"] == "FAILED")
-        error_count = sum(1 for r in results if r["status"] == "ERROR")
-        final_status = "PASSED" if (failed + error_count) == 0 else "FAILED"
-        finished_at = datetime.now(timezone.utc).isoformat()
-
-        run_repo.finish_run(
-            run_id=run_id,
-            status=final_status,
-            total=len(requests),
-            passed=passed,
-            failed=failed,
-            error_count=error_count,
-            finished_at=finished_at,
-        )
+        try:
+            for idx, req in enumerate(requests):
+                result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
+                results.append({
+                    "request_id": req["id"],
+                    "name": req["name"],
+                    "method": req["method"],
+                    "url": result.get("url", ""),
+                    **result,
+                })
+                run_repo.create_request_result(run_id, req, result, idx)
+        finally:
+            passed = sum(1 for r in results if r["status"] == "PASSED")
+            failed = sum(1 for r in results if r["status"] == "FAILED")
+            error_count = sum(1 for r in results if r["status"] == "ERROR")
+            final_status = "PASSED" if (failed + error_count) == 0 else "FAILED"
+            finished_at = datetime.now(timezone.utc).isoformat()
+            run_repo.finish_run(
+                run_id=run_id,
+                status=final_status,
+                total=len(results),
+                passed=passed,
+                failed=failed,
+                error_count=error_count,
+                finished_at=finished_at,
+            )
 
         return {
             "run_id": run_id,
             "collection_id": collection_id,
             "collection_name": col["name"],
             "status": final_status,
-            "total": len(requests),
+            "total": len(results),
             "passed": passed,
             "failed": failed,
             "results": results,

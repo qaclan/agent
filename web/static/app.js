@@ -4307,7 +4307,8 @@ async function _renderRegressionRunsTab() {
 async function _renderApiRunsTab() {
   const container = document.getElementById('runs-tab-content')
   container.innerHTML = `<div class="text-muted text-sm" style="padding:8px">Loading...</div>`
-  const res = await api('GET', '/api/api-collection-runs')
+  const res = await api('GET', '/api-collection-runs')
+  if (!res.ok && res.ok !== undefined) { toast(res.error || 'Failed to load API runs', 'error'); return }
   const runs = res.runs || []
   container.innerHTML = `
     <div class="table-wrap">
@@ -4366,7 +4367,7 @@ async function viewRunModal(id, suiteName) {
 }
 
 async function viewApiRunModal(runId) {
-  const res = await api('GET', '/api/api-collection-runs/' + runId)
+  const res = await api('GET', '/api-collection-runs/' + runId)
   if (!res.ok) { toast(res.error || 'Failed to load run', 'error'); return }
   const run = res.run
   const statusCls = run.status === 'PASSED' ? 'badge-success' : 'badge-danger'
