@@ -3,10 +3,31 @@
  * container: DOM element to render into
  * onSelectRequest: (requestId) => void
  */
-export function renderCollectionsView(container, onSelectRequest) {
+export function renderCollectionsView(container, onSelectRequest, onRunStarted, onSelectCollection) {
   container.innerHTML = '<div class="text-muted text-sm" style="padding:10px 14px">Loading...</div>';
 
   let _envNames = [];
+  let _runningByColId = {};
+  let _runningPollTimer = null;
+
+  async function _refreshRunningStatus() {
+    try {
+      const res = await window.api('GET', '/api-collection-runs?status=RUNNING');
+      const runs = res.runs || [];
+      const fresh = {};
+      runs.forEach(r => { if (r.collection_id) fresh[r.collection_id] = r.id; });
+      const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
+      _runningByColId = fresh;
+      if (changed) _updateRunningDots();
+    } catch (_) {}
+  }
+
+  function _updateRunningDots() {
+    document.querySelectorAll('[data-col-dot]').forEach(dot => {
+      const colId = dot.dataset.colDot;
+      dot.style.display = _runningByColId[colId] ? '' : 'none';
+    });
+  }
 
   async function _loadEnvNames() {
     try {
@@ -124,6 +145,13 @@ export function renderCollectionsView(container, onSelectRequest) {
     const collections = res.collections || [];
     container.innerHTML = '';
 
+    if (!document.getElementById('cdot-style')) {
+      const st = document.createElement('style');
+      st.id = 'cdot-style';
+      st.textContent = '@keyframes cdot-pulse{0%,100%{opacity:1}50%{opacity:.3}}';
+      document.head.appendChild(st);
+    }
+
     if (!collections.length) {
       const empty = document.createElement('div');
       empty.className = 'text-muted text-sm';
@@ -147,7 +175,19 @@ export function renderCollectionsView(container, onSelectRequest) {
       header.className = 'api-collection-item';
 
       const leftSide = document.createElement('span');
-      leftSide.innerHTML = `<strong>${_esc(col.name)}</strong> <span class="text-muted text-sm">(${col.request_count})</span>`;
+      leftSide.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;flex:1;min-width:0;';
+      leftSide.innerHTML = `
+        <span data-col-dot="${_esc(col.id)}" style="display:none;width:7px;height:7px;border-radius:50%;
+          background:var(--warning,#f59e0b);flex-shrink:0;animation:cdot-pulse 1s infinite"></span>
+        <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(col.name)}</strong>
+        <span class="text-muted text-sm" style="flex-shrink:0;">(${col.request_count})</span>`;
+      leftSide.onclick = (e) => {
+        e.stopPropagation();
+        if (onSelectCollection) {
+          const runId = _runningByColId[col.id] || null;
+          onSelectCollection(col, runId);
+        }
+      };
       header.appendChild(leftSide);
 
       const rightSide = document.createElement('span');
@@ -210,6 +250,7 @@ export function renderCollectionsView(container, onSelectRequest) {
       }
       header.onclick = (e) => {
         if (e.target === expandBtn || e.target === menuBtn || e.target === envSel) return;
+        if (leftSide.contains(e.target)) return;
         _toggleExpand();
       };
       expandBtn.onclick = (e) => { e.stopPropagation(); _toggleExpand(); };
@@ -442,16 +483,26 @@ export function renderCollectionsView(container, onSelectRequest) {
     newColBtn.textContent = '+ New Collection';
     newColBtn.onclick = _createCollection;
     container.appendChild(newColBtn);
+
+    if (_runningPollTimer) clearInterval(_runningPollTimer);
+    await _refreshRunningStatus();
+    _runningPollTimer = setInterval(_refreshRunningStatus, 3000);
   }
 
   async function _runCollection(colId, colName, envName) {
-    const confirmed = await window._confirmDialog(`Run '${colName}'?`, 'All requests in this collection will be executed in order.', 'Run');
+    const confirmed = await window._confirmDialog(
+      `Run '${colName}'?`,
+      'All requests in this collection will be executed in order.',
+      'Run'
+    );
     if (!confirmed) return;
     const res = await window.api('POST', `/collections/${colId}/run`, { env_name: envName || null });
     if (res.ok === false) {
       await window._alertDialog('Run failed: ' + res.error);
-    } else {
-      window._toast(`Run complete: ${res.passed}/${res.total} passed`);
+      return;
+    }
+    if (onRunStarted && res.run_id) {
+      onRunStarted(res.run_id, colId, colName);
     }
   }
 
