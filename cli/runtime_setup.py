@@ -300,6 +300,115 @@ def add_to_path_windows() -> bool:
     return True
 
 
+def remove_from_path_unix() -> list[Path]:
+    """Remove qaclan-managed PATH lines from all known shell rc files.
+    Returns list of files that were modified."""
+    home = Path.home()
+    candidates = [
+        home / ".bashrc",
+        home / ".bash_profile",
+        home / ".zshrc",
+        home / ".profile",
+        home / ".config" / "fish" / "config.fish",
+    ]
+    modified = []
+    for rc in candidates:
+        if not rc.exists():
+            continue
+        lines = rc.read_text().splitlines(keepends=True)
+        cleaned = [l for l in lines if _PATH_MARKER not in l]
+        if len(cleaned) != len(lines):
+            rc.write_text("".join(cleaned))
+            modified.append(rc)
+    return modified
+
+
+def remove_from_path_windows() -> bool:
+    """Remove ~/.qaclan/bin from Windows user PATH registry entry. Returns True if changed."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    target_norm = os.path.normcase(os.path.normpath(str(BIN_DIR)))
+    key = winreg.OpenKey(
+        winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_ALL_ACCESS
+    )
+    try:
+        try:
+            current, reg_type = winreg.QueryValueEx(key, "Path")
+        except FileNotFoundError:
+            return False
+        entries = [e for e in (current or "").split(";") if e]
+        filtered = [e for e in entries if os.path.normcase(os.path.normpath(e)) != target_norm]
+        if len(filtered) == len(entries):
+            return False
+        winreg.SetValueEx(key, "Path", 0, reg_type or winreg.REG_EXPAND_SZ, ";".join(filtered))
+    finally:
+        winreg.CloseKey(key)
+    try:
+        import ctypes
+        ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x1A, 0, "Environment", 0x0002, 5000, None)
+    except Exception:
+        pass
+    return True
+
+
+def remove_from_shell_history() -> list[Path]:
+    """Remove lines containing 'qaclan' from shell history files.
+    Returns list of files that were modified."""
+    home = Path.home()
+    candidates = [
+        home / ".bash_history",
+        home / ".zsh_history",
+        home / ".local" / "share" / "fish" / "fish_history",
+    ]
+    modified = []
+    for hist in candidates:
+        if not hist.exists():
+            continue
+        try:
+            lines = hist.read_text(errors="replace").splitlines(keepends=True)
+            # zsh history format: ": timestamp:elapsed;command\n  continuation\n"
+            # fish history format: "- cmd: ...\n  when: ...\n"
+            # bash history: plain lines
+            # Strategy: drop any line (and its continuation) containing 'qaclan'
+            cleaned = []
+            skip_next = False
+            for line in lines:
+                if skip_next:
+                    # continuation line in zsh (starts with leading whitespace after the cmd line)
+                    if line.startswith(" ") or line.startswith("\t"):
+                        continue
+                    skip_next = False
+                if "qaclan" in line:
+                    skip_next = True
+                    continue
+                cleaned.append(line)
+            if len(cleaned) != len(lines):
+                hist.write_text("".join(cleaned))
+                modified.append(hist)
+        except Exception:
+            pass
+    return modified
+
+
+def find_system_binary() -> Optional[Path]:
+    """Return path to installed qaclan binary outside ~/.qaclan/, or None."""
+    system_locations = []
+    if sys.platform == "win32":
+        pass  # Windows binary lives inside BIN_DIR which is under ~/.qaclan/
+    else:
+        system_locations = [
+            Path("/usr/local/bin/qaclan"),
+            Path("/usr/bin/qaclan"),
+            Path("/opt/homebrew/bin/qaclan"),
+        ]
+    for p in system_locations:
+        if p.exists():
+            return p
+    return None
+
+
 def _self_binary_path() -> Path:
     """Resolve path to the running qaclan binary.
 
