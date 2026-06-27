@@ -60,7 +60,6 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
     #   2. Isolated runtime venv (`venv_python -m playwright`)
     #   3. System global `playwright` CLI on PATH (cross-platform: pip or npm install)
     #   4. System Python `playwright` package (skipped in frozen binary)
-    #   5. System `npx --no-install playwright` (fail-fast, no hang on missing pkg)
     # Codegen is a single Node tool — `--target python` only changes output template.
     is_frozen = is_frozen_binary()
     cmd_prefix = None
@@ -109,14 +108,6 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
             resolution_source = f"system Python playwright: {driver_executable}"
         except Exception as e:
             logger.info("System Python playwright not usable: %s", e)
-
-    # 5. npx with --no-install (fail-fast — never hangs on stdin prompt)
-    if cmd_prefix is None:
-        npx_path = shutil.which("npx")
-        if npx_path:
-            runtime_setup.emit_deprecation_warning()
-            cmd_prefix = [npx_path, "--no-install", "playwright"]
-            resolution_source = f"system npx (no-install): {npx_path}"
 
     if cmd_prefix is None:
         raise RuntimeError(

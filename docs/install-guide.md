@@ -131,3 +131,94 @@ qaclan setup --runtime-only
 ```
 
 `reset-runtime` wipes only the `runtime/` folder. Everything else under `~/.qaclan/` survives.
+
+---
+
+## 5. Troubleshooting
+
+### "Playwright runtime not found" when recording
+
+When you start a recording, qaclan resolves Playwright in this order:
+
+| # | Source | Path |
+|---|--------|------|
+| 1 | **Isolated runtime node bin** | `~/.qaclan/runtime/node_modules/.bin/playwright` |
+| 2 | **Isolated runtime venv** | `~/.qaclan/runtime/venv/bin/python -m playwright` |
+| 3 | **System global `playwright` on PATH** | detected via `which playwright` |
+| 4 | **System Python playwright package** | via `playwright._impl._driver` (dev mode only, not in binary) |
+
+If all four miss, recording fails with:
+
+```
+Playwright runtime not found. Run: qaclan setup --runtime-only
+```
+
+**Fix:** run setup to provision the isolated runtime:
+
+```sh
+qaclan setup --runtime-only
+```
+
+If the runtime exists but is broken (e.g. corrupted node_modules):
+
+```sh
+qaclan reset-runtime
+qaclan setup --runtime-only
+```
+
+---
+
+### Prerequisites check
+
+Before `qaclan setup --runtime-only` can succeed:
+
+| Requirement | Minimum | Check |
+|-------------|---------|-------|
+| Node.js | 18+ | `node --version` |
+| npm | ships with Node | `npm --version` |
+| Python | 3.9+ | `python3 --version` |
+| python venv | included in Python | `python3 -m venv --help` |
+
+**Windows:** Python may be `py` instead of `python3`. Node.js from [nodejs.org](https://nodejs.org) includes npm.
+
+**Linux (apt):** If `python3 -m venv` fails:
+
+```sh
+sudo apt-get install python3-venv
+```
+
+---
+
+### Windows-specific issues
+
+**Binary blocked by SmartScreen**
+
+Right-click the `.exe` → Properties → check **Unblock**, or in PowerShell:
+
+```powershell
+Unblock-File .\qaclan-windows-amd64.exe
+```
+
+**PATH not updated after setup**
+
+Close and reopen PowerShell (or Windows Terminal). The binary adds itself to your user PATH via registry; running shells don't pick up registry changes until restarted.
+
+**`npm install` fails during setup**
+
+Corporate proxies and antivirus can block npm. Try:
+
+```powershell
+npm config set proxy http://your-proxy:port
+npm config set https-proxy http://your-proxy:port
+qaclan setup --runtime-only --force
+```
+
+---
+
+### Uninstall
+
+```sh
+qaclan uninstall
+```
+
+Removes: binary, `~/.qaclan/` (database, scripts, runtime), PATH export from shell rc files, and qaclan entries from shell history. On Windows: removes `~/.qaclan/bin` from the user PATH registry entry.
