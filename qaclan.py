@@ -60,29 +60,80 @@ qaclan.add_command(logout, "logout")
 @qaclan.command()
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 def uninstall(yes):
-    """Remove all QAClan local data (~/.qaclan/)."""
+    """Fully remove QAClan: binary, PATH entries, and all local data (~/.qaclan/)."""
     import shutil
     from rich.console import Console
     from cli.config import QACLAN_DIR
+    from cli import runtime_setup as rs
 
     console = Console()
 
-    if not os.path.exists(QACLAN_DIR):
-        console.print("[yellow]Nothing to remove — ~/.qaclan/ does not exist.[/yellow]")
+    system_bin = rs.find_system_binary()
+
+    if not os.path.exists(QACLAN_DIR) and not system_bin:
+        console.print("[yellow]Nothing to remove — qaclan is not installed.[/yellow]")
         return
 
     if not yes:
-        console.print(f"[bold red]This will permanently delete all local QAClan data:[/bold red]")
-        console.print(f"  • Database (projects, features, suites, runs)")
-        console.print(f"  • Recorded scripts")
-        console.print(f"  • Config and auth credentials")
-        console.print(f"  • Path: {QACLAN_DIR}")
+        console.print("[bold red]This will permanently remove:[/bold red]")
+        if system_bin:
+            console.print(f"  • Binary: {system_bin}")
+        console.print(f"  • Data directory: {QACLAN_DIR}")
+        console.print(f"    (database, scripts, runtime, config, auth credentials)")
+        if sys.platform != "win32":
+            console.print(f"  • PATH export from shell rc files (.bashrc / .zshrc / etc.)")
+            console.print(f"  • qaclan entries from shell history (.bash_history / .zsh_history / fish)")
+        else:
+            console.print(f"  • ~/.qaclan/bin removed from Windows user PATH")
         if not click.confirm("\nAre you sure?"):
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    shutil.rmtree(QACLAN_DIR)
-    console.print("[green]✓ All QAClan local data removed.[/green]")
+    # Remove system-installed binary (/usr/local/bin/qaclan etc.)
+    if system_bin:
+        try:
+            system_bin.unlink()
+            console.print(f"[green]✓[/green] Removed binary: {system_bin}")
+        except PermissionError:
+            try:
+                subprocess.run(["sudo", "rm", "-f", str(system_bin)], check=True)
+                console.print(f"[green]✓[/green] Removed binary (sudo): {system_bin}")
+            except Exception as e:
+                console.print(f"[yellow]⚠ Could not remove {system_bin}: {e}[/yellow]")
+                console.print(f"  Run manually: sudo rm -f {system_bin}")
+
+    # Remove data dir (~/.qaclan/ — covers ~/.qaclan/bin/ on Windows/direct-setup)
+    if os.path.exists(QACLAN_DIR):
+        shutil.rmtree(QACLAN_DIR)
+        console.print(f"[green]✓[/green] Removed data directory: {QACLAN_DIR}")
+
+    # Remove PATH entries
+    if sys.platform == "win32":
+        try:
+            if rs.remove_from_path_windows():
+                console.print("[green]✓[/green] Removed ~/.qaclan/bin from Windows user PATH")
+            else:
+                console.print("[dim]PATH already clean (nothing to remove).[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]⚠ Could not update Windows PATH: {e}[/yellow]")
+    else:
+        modified = rs.remove_from_path_unix()
+        if modified:
+            for rc in modified:
+                console.print(f"[green]✓[/green] Removed PATH export from {rc}")
+            console.print("  [dim]Open a new terminal for PATH changes to take effect.[/dim]")
+        else:
+            console.print("[dim]No shell rc files needed updating.[/dim]")
+
+    # Scrub shell history (source of autosuggestions)
+    if sys.platform != "win32":
+        hist_modified = rs.remove_from_shell_history()
+        if hist_modified:
+            for hf in hist_modified:
+                console.print(f"[green]✓[/green] Removed qaclan entries from {hf}")
+            console.print("  [dim]Open a new terminal for history changes to take effect.[/dim]")
+
+    console.print("\n[green]✓ qaclan fully uninstalled.[/green]")
 
 
 # Wrap existing commands with auth gate
