@@ -750,6 +750,16 @@ def record_script_route():
         logger.info("POST /api/scripts/record: project=%s, feature=%s, name=%s, url=%s, url_key=%s, language=%s",
                      project_id, feature_id, name, url, resolved_url_key, language)
 
+        from cli import runtime_setup
+        try:
+            get_strategy(language).validate_runtime()
+        except (ValueError, RuntimeError) as e:
+            payload = {"ok": False, "error": str(e)}
+            if not runtime_setup.runtime_initialized():
+                payload["needs_setup"] = True
+                payload["setup_command"] = "qaclan setup --runtime-only"
+            return jsonify(payload), 400
+
         from cli.commands.web.record import record_script
         script_id, dest = record_script(
             project_id, feature_id, name, url,
