@@ -445,6 +445,48 @@ def find_system_binary() -> Optional[Path]:
     return None
 
 
+def windows_schedule_binary_delete() -> Optional[Path]:
+    """Rename the running Windows binary and schedule deletion after process exits.
+
+    Windows locks executables while running; rename works on locked files.
+    After calling this, use shutil.rmtree(QACLAN_DIR, ignore_errors=True) —
+    the deferred cmd cleans up the .old binary and any dirs rmtree left behind.
+    Returns the renamed .old path if scheduled, None if not applicable or failed.
+    """
+    if sys.platform == "win32":
+        from cli.runtime import is_frozen_binary
+        if not is_frozen_binary():
+            return None
+        try:
+            exe = _self_binary_path()
+        except Exception:
+            return None
+        qaclan_dir = Path(QACLAN_DIR)
+        try:
+            exe.relative_to(qaclan_dir)
+        except ValueError:
+            return None  # binary not inside ~/.qaclan/, nothing to do
+        if not exe.exists():
+            return None
+        old = exe.with_suffix(".exe.old")
+        try:
+            exe.rename(old)
+        except OSError:
+            return None
+        subprocess.Popen(
+            (
+                f'cmd /c ping -n 2 127.0.0.1 >nul'
+                f' & del /f /q "{old}"'
+                f' & rmdir /s /q "{old.parent}"'
+                f' & rmdir /s /q "{qaclan_dir}"'
+            ),
+            shell=True,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+        )
+        return old
+    return None
+
+
 def _self_binary_path() -> Path:
     """Resolve path to the running qaclan binary.
 

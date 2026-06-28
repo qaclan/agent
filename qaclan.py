@@ -89,25 +89,7 @@ def uninstall(yes):
             console.print("[dim]Cancelled.[/dim]")
             return
 
-    # Remove system-installed binary (/usr/local/bin/qaclan etc.)
-    if system_bin:
-        try:
-            system_bin.unlink()
-            console.print(f"[green]✓[/green] Removed binary: {system_bin}")
-        except PermissionError:
-            try:
-                subprocess.run(["sudo", "rm", "-f", str(system_bin)], check=True)
-                console.print(f"[green]✓[/green] Removed binary (sudo): {system_bin}")
-            except Exception as e:
-                console.print(f"[yellow]⚠ Could not remove {system_bin}: {e}[/yellow]")
-                console.print(f"  Run manually: sudo rm -f {system_bin}")
-
-    # Remove data dir (~/.qaclan/ — covers ~/.qaclan/bin/ on Windows/direct-setup)
-    if os.path.exists(QACLAN_DIR):
-        shutil.rmtree(QACLAN_DIR)
-        console.print(f"[green]✓[/green] Removed data directory: {QACLAN_DIR}")
-
-    # Remove PATH entries
+    # 1. Remove PATH entries first — succeeds even if binary/data removal fails later
     if sys.platform == "win32":
         try:
             if rs.remove_from_path_windows():
@@ -125,13 +107,43 @@ def uninstall(yes):
         else:
             console.print("[dim]No shell rc files needed updating.[/dim]")
 
-    # Scrub shell history (source of autosuggestions)
+    # 2. Scrub shell history
     if sys.platform != "win32":
         hist_modified = rs.remove_from_shell_history()
         if hist_modified:
             for hf in hist_modified:
                 console.print(f"[green]✓[/green] Removed qaclan entries from {hf}")
             console.print("  [dim]Open a new terminal for history changes to take effect.[/dim]")
+
+    # 3. Remove system-installed binary (/usr/local/bin/qaclan on Linux/macOS)
+    if system_bin:
+        try:
+            system_bin.unlink()
+            console.print(f"[green]✓[/green] Removed binary: {system_bin}")
+        except PermissionError:
+            try:
+                subprocess.run(["sudo", "rm", "-f", str(system_bin)], check=True)
+                console.print(f"[green]✓[/green] Removed binary (sudo): {system_bin}")
+            except Exception as e:
+                console.print(f"[yellow]⚠ Could not remove {system_bin}: {e}[/yellow]")
+                console.print(f"  Run manually: sudo rm -f {system_bin}")
+
+    # 4. Windows: rename running binary + schedule deferred deletion via detached cmd
+    if sys.platform == "win32":
+        old_path = rs.windows_schedule_binary_delete()
+        if old_path:
+            console.print("[green]✓[/green] Binary scheduled for deletion when this terminal closes")
+        elif (rs.BIN_DIR / "qaclan.exe").exists():
+            console.print(f"[yellow]⚠ Could not remove binary — delete manually after closing: {rs.BIN_DIR / 'qaclan.exe'}[/yellow]")
+
+    # 5. Remove data dir (~/.qaclan/). On Windows use ignore_errors — the renamed
+    #    .old binary is still locked; the deferred cmd handles leftover dirs.
+    if os.path.exists(QACLAN_DIR):
+        if sys.platform == "win32":
+            shutil.rmtree(QACLAN_DIR, ignore_errors=True)
+        else:
+            shutil.rmtree(QACLAN_DIR)
+        console.print(f"[green]✓[/green] Removed data directory: {QACLAN_DIR}")
 
     console.print("\n[green]✓ qaclan fully uninstalled.[/green]")
 

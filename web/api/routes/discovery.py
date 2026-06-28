@@ -239,12 +239,13 @@ def record_start():
         har_file = os.path.join(capture_dir, "capture.har")
 
         from web.api.services.discovery_service import DiscoveryService
-        proc = DiscoveryService().launch_recorder(url, har_file)
+        proc, stop_file = DiscoveryService().launch_recorder(url, har_file)
 
         with _sessions_lock:
             _recording_sessions[session_id] = {
                 "status": "recording",
                 "proc": proc,
+                "stop_file": stop_file,
                 "capture_dir": capture_dir,
                 "har_file": har_file,
             }
@@ -272,16 +273,25 @@ def record_stop():
         if not session:
             return jsonify({"ok": False, "error": f"Session {session_id} not found"}), 404
 
+        import sys, os, time
         proc = session.get("proc")
+        stop_file = session.get("stop_file", "")
         if proc:
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
+                if sys.platform == "win32" and stop_file:
+                    # Touch sentinel — harness polls it, calls ctx.close() (flushes HAR), then exits
+                    open(stop_file, "w").close()
+                    proc.wait(timeout=8)
+                else:
+                    proc.terminate()
+                    proc.wait(timeout=5)
             except Exception:
                 proc.kill()
+            finally:
+                if stop_file and os.path.exists(stop_file):
+                    os.unlink(stop_file)
 
-        import time
-        time.sleep(1)  # Give Playwright time to flush HAR
+        time.sleep(0.5)  # Give Playwright time to flush HAR
 
         har_file = session.get("har_file", "")
         requests_list = []
