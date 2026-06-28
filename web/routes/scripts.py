@@ -754,11 +754,9 @@ def record_script_route():
         try:
             get_strategy(language).validate_runtime()
         except (ValueError, RuntimeError) as e:
-            payload = {"ok": False, "error": str(e)}
             if not runtime_setup.runtime_initialized():
-                payload["needs_setup"] = True
-                payload["setup_command"] = "qaclan setup --runtime-only"
-            return jsonify(payload), 400
+                return jsonify(runtime_setup.runtime_needs_setup_payload(str(e))), 400
+            return jsonify({"ok": False, "error": str(e)}), 400
 
         from cli.commands.web.record import record_script
         script_id, dest = record_script(
@@ -869,11 +867,9 @@ def run_script_solo(script_id):
         try:
             get_strategy(language).validate_runtime()
         except (ValueError, RuntimeError) as e:
-            payload = {"ok": False, "error": str(e)}
             if not runtime_setup.runtime_initialized():
-                payload["needs_setup"] = True
-                payload["setup_command"] = "qaclan setup --runtime-only"
-            return jsonify(payload), 400
+                return jsonify(runtime_setup.runtime_needs_setup_payload(str(e))), 400
+            return jsonify({"ok": False, "error": str(e)}), 400
 
         env_vars_dict = {}
         environment_id = None
