@@ -292,11 +292,9 @@ def execute_run():
                 get_strategy(lang).validate_runtime()
             except (ValueError, RuntimeError) as e:
                 logger.error("execute_run: runtime check failed for language %s: %s", lang, e)
-                payload = {"ok": False, "error": str(e)}
                 if not runtime_setup.runtime_initialized():
-                    payload["needs_setup"] = True
-                    payload["setup_command"] = "qaclan setup --runtime-only"
-                return jsonify(payload), 400
+                    return jsonify(runtime_setup.runtime_needs_setup_payload(str(e))), 400
+                return jsonify({"ok": False, "error": str(e)}), 400
 
         # Load env vars for substitution. These are passed to subprocesses via
         # the `env` param only — we never mutate os.environ of the Flask process.
