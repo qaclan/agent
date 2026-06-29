@@ -71,6 +71,42 @@ def runtime_initialized() -> bool:
     )
 
 
+def runtime_needs_setup_payload(error: str) -> dict:
+    """Build a JSON-serialisable error payload for routes when runtime is not ready.
+    Includes needs_setup flag and a specific list of what is missing."""
+    missing = runtime_missing_components()
+    payload: dict = {
+        "ok": False,
+        "error": error,
+        "needs_setup": True,
+        "setup_command": "qaclan setup --runtime-only",
+    }
+    if missing:
+        payload["missing_components"] = missing
+    return payload
+
+
+def runtime_missing_components() -> list[str]:
+    """Return human-readable list of missing runtime components, empty if fully initialized."""
+    missing = []
+    if not PACKAGE_JSON_PATH.exists():
+        missing.append(f"package.json missing at {PACKAGE_JSON_PATH}")
+    if not NODE_MODULES.exists():
+        missing.append(f"Node modules not installed (missing {NODE_MODULES})")
+    elif not (NODE_MODULES / "playwright").exists():
+        missing.append(f"'playwright' npm package missing from {NODE_MODULES}")
+    elif not (NODE_MODULES / "@playwright" / "test").exists():
+        missing.append(f"'@playwright/test' npm package missing from {NODE_MODULES}")
+    if not venv_python().exists():
+        missing.append(f"Python venv missing at {VENV_DIR}")
+    else:
+        site_packages = VENV_DIR / ("Lib" if sys.platform == "win32" else "lib")
+        pw_installed = any(site_packages.glob("*/site-packages/playwright"))
+        if not pw_installed:
+            missing.append(f"'playwright' pip package missing from venv at {VENV_DIR}")
+    return missing
+
+
 # ---- Pre-flight checks ----
 
 def _which_or_raise(name: str, hint: str) -> str:
@@ -406,6 +442,48 @@ def find_system_binary() -> Optional[Path]:
     for p in system_locations:
         if p.exists():
             return p
+    return None
+
+
+def windows_schedule_binary_delete() -> Optional[Path]:
+    """Rename the running Windows binary and schedule deletion after process exits.
+
+    Windows locks executables while running; rename works on locked files.
+    After calling this, use shutil.rmtree(QACLAN_DIR, ignore_errors=True) —
+    the deferred cmd cleans up the .old binary and any dirs rmtree left behind.
+    Returns the renamed .old path if scheduled, None if not applicable or failed.
+    """
+    if sys.platform == "win32":
+        from cli.runtime import is_frozen_binary
+        if not is_frozen_binary():
+            return None
+        try:
+            exe = _self_binary_path()
+        except Exception:
+            return None
+        qaclan_dir = Path(QACLAN_DIR)
+        try:
+            exe.relative_to(qaclan_dir)
+        except ValueError:
+            return None  # binary not inside ~/.qaclan/, nothing to do
+        if not exe.exists():
+            return None
+        old = exe.with_suffix(".exe.old")
+        try:
+            exe.rename(old)
+        except OSError:
+            return None
+        subprocess.Popen(
+            (
+                f'cmd /c ping -n 2 127.0.0.1 >nul'
+                f' & del /f /q "{old}"'
+                f' & rmdir /s /q "{old.parent}"'
+                f' & rmdir /s /q "{qaclan_dir}"'
+            ),
+            shell=True,
+            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+        )
+        return old
     return None
 
 

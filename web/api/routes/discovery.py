@@ -23,6 +23,25 @@ def _project_id():
     return pid
 
 
+def _cleanup_session_dirs(session: dict) -> None:
+    """Delete temp dirs from a recording session in a background thread."""
+    import os, shutil, threading
+
+    def _do() -> None:
+        for key in ("capture_dir", "harness_dir"):
+            d = session.get(key, "")
+            if d and os.path.exists(d):
+                shutil.rmtree(d, ignore_errors=True)
+        stop_file = session.get("stop_file", "")
+        if stop_file and os.path.exists(stop_file):
+            try:
+                os.unlink(stop_file)
+            except OSError:
+                pass
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
 @bp.route("/api/discover/har", methods=["POST"])
 def discover_har():
     """Multipart file upload. Field name: 'file'. Optional form field: collection_name."""
@@ -234,17 +253,30 @@ def record_start():
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
 
-        import tempfile, os
+        import shutil, tempfile, os
+        if not url or not url.startswith(("http://", "https://")):
+            return jsonify({"ok": False, "error": "url must start with http:// or https://"}), 400
+
+        from cli import runtime_setup as rs
+        if not rs.runtime_initialized():
+            return jsonify(rs.runtime_needs_setup_payload("Runtime not initialized — run qaclan setup --runtime-only")), 400
+
         capture_dir = tempfile.mkdtemp(prefix="qaclan_record_")
         har_file = os.path.join(capture_dir, "capture.har")
 
         from web.api.services.discovery_service import DiscoveryService
-        proc = DiscoveryService().launch_recorder(url, har_file)
+        try:
+            proc, stop_file, harness_dir = DiscoveryService().launch_recorder(url, har_file)
+        except Exception:
+            shutil.rmtree(capture_dir, ignore_errors=True)
+            raise
 
         with _sessions_lock:
             _recording_sessions[session_id] = {
                 "status": "recording",
                 "proc": proc,
+                "stop_file": stop_file,
+                "harness_dir": harness_dir,
                 "capture_dir": capture_dir,
                 "har_file": har_file,
             }
@@ -262,8 +294,9 @@ def record_start():
 @bp.route("/api/discover/record/stop", methods=["POST"])
 def record_stop():
     """Stop recording session, parse captured HAR, return request list."""
+    import os, shutil, subprocess, sys
+    session_dirs: list[str] = []
     try:
-        pid = _project_id()
         data = request.get_json(force=True) or {}
         session_id = data.get("session_id", "")
         with _sessions_lock:
@@ -272,24 +305,40 @@ def record_stop():
         if not session:
             return jsonify({"ok": False, "error": f"Session {session_id} not found"}), 404
 
+        session_dirs = [d for d in (session.get("capture_dir"), session.get("harness_dir")) if d]
+
         proc = session.get("proc")
+        stop_file = session.get("stop_file", "")
         if proc:
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
-            except Exception:
+                if sys.platform == "win32" and stop_file:
+                    try:
+                        open(stop_file, "w").close()
+                    except OSError:
+                        proc.terminate()  # sentinel creation failed — fall back to SIGTERM
+                else:
+                    proc.terminate()
+                proc.wait(timeout=8 if sys.platform == "win32" else 5)
+            except subprocess.TimeoutExpired:
                 proc.kill()
-
-        import time
-        time.sleep(1)  # Give Playwright time to flush HAR
+                proc.wait()  # reap zombie — must follow kill()
+            finally:
+                if stop_file and os.path.exists(stop_file):
+                    try:
+                        os.unlink(stop_file)
+                    except OSError:
+                        pass
 
         har_file = session.get("har_file", "")
         requests_list = []
-        if har_file and __import__("os").path.exists(har_file):
-            with open(har_file) as hf:
-                har_json = json.load(hf)
-            from cli.api_discovery.har_parser import parse_har
-            requests_list = parse_har(har_json)
+        if har_file and os.path.exists(har_file):
+            try:
+                with open(har_file) as hf:
+                    har_json = json.load(hf)
+                from cli.api_discovery.har_parser import parse_har
+                requests_list = parse_har(har_json)
+            except Exception as e:
+                logger.warning("record_stop: HAR parse failed (partial capture?): %s", e)
 
         return jsonify({"ok": True, "requests": requests_list, "count": len(requests_list)})
 
@@ -298,6 +347,13 @@ def record_stop():
     except Exception as e:
         logger.exception("record_stop")
         return jsonify({"ok": False, "error": str(e)}), 500
+    finally:
+        for d in session_dirs:
+            if os.path.exists(d):
+                try:
+                    shutil.rmtree(d)
+                except Exception:
+                    pass
 
 
 @bp.route("/api/discover/record/status", methods=["GET"])
@@ -310,4 +366,9 @@ def record_status():
         return jsonify({"ok": False, "error": "Session not found"}), 404
     proc = session.get("proc")
     alive = proc is not None and proc.poll() is None
+    if not alive:
+        with _sessions_lock:
+            popped = _recording_sessions.pop(session_id, None)
+        if popped:
+            _cleanup_session_dirs(popped)
     return jsonify({"ok": True, "status": "recording" if alive else "stopped", "session_id": session_id})
