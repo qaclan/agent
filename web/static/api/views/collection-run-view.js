@@ -9,6 +9,8 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
   let _startedAt = null;
   let _allRequests = [];
   let _destroyed = false;
+  let _activeFilter = null; // 'PASSED' | 'FAILED' | null
+  let _lastRun = null;
 
   function _destroy() {
     _destroyed = true;
@@ -61,6 +63,9 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         .crv-stat-grid{display:flex;align-items:stretch;margin-top:10px;}
         .crv-stat-cell{padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;min-width:0;border-right:1px solid rgba(128,128,128,.2);}
         .crv-stat-cell:last-child{border-right:none;}
+        .crv-stat-cell.crv-filter{cursor:pointer;transition:background .15s,outline .15s;border-radius:4px;}
+        .crv-stat-cell.crv-filter:hover{background:rgba(255,255,255,.05);}
+        .crv-stat-cell.crv-filter.crv-active{background:rgba(255,255,255,.08);outline:2px solid currentColor;outline-offset:-2px;}
         .crv-stat-val{font-size:17px;font-weight:700;line-height:1.2;}
         .crv-stat-lbl{font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;}
         .crv-method{font-family:monospace;font-size:11px;font-weight:700;min-width:52px;}
@@ -86,9 +91,9 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         <div class="crv-stat-grid">
           <div class="crv-stat-cell" style="min-width:90px;"><span id="crv-badge"></span><span class="crv-stat-lbl">Status</span></div>
           <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-prog">—</span><span class="crv-stat-lbl">Progress</span></div>
-          <div class="crv-stat-cell"><span class="crv-stat-val crv-pass" id="crv-passed-c">0</span><span class="crv-stat-lbl">Passed</span></div>
-          <div class="crv-stat-cell"><span class="crv-stat-val crv-fail" id="crv-failed-c">0</span><span class="crv-stat-lbl">Failed</span></div>
-          <div class="crv-stat-cell"><span class="crv-stat-val crv-err" id="crv-errors-c">0</span><span class="crv-stat-lbl">Errors</span></div>
+          <div class="crv-stat-cell crv-filter" id="crv-cell-passed"><span class="crv-stat-val crv-pass" id="crv-passed-c">0</span><span class="crv-stat-lbl">Passed</span></div>
+          <div class="crv-stat-cell crv-filter" id="crv-cell-failed"><span class="crv-stat-val crv-fail" id="crv-failed-c">0</span><span class="crv-stat-lbl">Failed</span></div>
+          <div class="crv-stat-cell crv-filter" id="crv-cell-errors"><span class="crv-stat-val crv-err" id="crv-errors-c">0</span><span class="crv-stat-lbl">Errors</span></div>
           <div class="crv-stat-cell"><span class="crv-stat-val" id="crv-elapsed">00:00</span><span class="crv-stat-lbl">Elapsed</span></div>
         </div>
         <div class="crv-bar"><div class="crv-fill" id="crv-fill" style="width:0%"></div></div>
@@ -106,6 +111,17 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     document.getElementById('crv-report').onclick = () => {
       window.open(`/api/api-collection-runs/${runId}/report?view=1`, '_blank');
     };
+
+    const _setFilter = (f) => {
+      _activeFilter = _activeFilter === f ? null : f;
+      document.getElementById('crv-cell-passed')?.classList.toggle('crv-active', _activeFilter === 'PASSED');
+      document.getElementById('crv-cell-failed')?.classList.toggle('crv-active', _activeFilter === 'FAILED');
+      document.getElementById('crv-cell-errors')?.classList.toggle('crv-active', _activeFilter === 'ERROR');
+      if (_lastRun) _renderRows(_lastRun);
+    };
+    document.getElementById('crv-cell-passed').onclick = () => _setFilter('PASSED');
+    document.getElementById('crv-cell-failed').onclick = () => _setFilter('FAILED');
+    document.getElementById('crv-cell-errors').onclick = () => _setFilter('ERROR');
   }
 
   function _updateHeader(run) {
@@ -163,6 +179,12 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     for (let i = 0; i < total; i++) {
       const spine  = _allRequests[i] || {};
       const result = byIdx[i];
+
+      // Apply filter: skip rows that don't match active filter
+      if (_activeFilter) {
+        if (!result || result.status !== _activeFilter) continue;
+      }
+
       const name   = result ? result.request_name : (spine.name   || `Request ${i + 1}`);
       const method = result ? result.method       : (spine.method || '');
 
@@ -196,31 +218,77 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       if (result) {
         const asserts    = Array.isArray(result.assertion_results) ? result.assertion_results : [];
         const assertHtml = asserts.length
-          ? asserts.map(a => `<div style="color:${a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)'}">
-              ${a.passed ? '✓' : '✗'} ${_esc(a.type)}${a.path ? ' ' + _esc(a.path) : ''}
-              ${a.op ? ' ' + _esc(a.op) : ''}${a.value != null ? ' ' + _esc(String(a.value)) : ''}
-              ${!a.passed && a.actual != null ? ' → actual: ' + _esc(String(a.actual)) : ''}
-            </div>`).join('')
-          : '<div style="color:var(--text-muted,#888);font-style:italic;">No assertions — pass/fail determined by HTTP status code (&lt;400 = passed)</div>';
+          ? asserts.map(a => {
+              let reasonHtml = '';
+              if (!a.passed) {
+                if (a.actual != null) {
+                  reasonHtml = ` <span style="opacity:.7">→ actual: ${_esc(String(a.actual))}</span>`;
+                } else if (a.error) {
+                  reasonHtml = ` <span style="opacity:.7">→ eval error: ${_esc(a.error)}</span>`;
+                } else if (a.type === 'json_path') {
+                  reasonHtml = ` <span style="opacity:.7">→ path not found or response not JSON</span>`;
+                }
+              }
+              return `<div style="color:${a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)'}">
+                ${a.passed ? '✓' : '✗'} ${_esc(a.type)}${a.path ? ' ' + _esc(a.path) : ''}${a.key ? ' ' + _esc(a.key) : ''}
+                ${a.op ? _esc(a.op) : ''}${a.value != null ? ' ' + _esc(String(a.value)) : ''}${reasonHtml}
+              </div>`;
+            }).join('')
+          : `<div style="color:var(--text-muted,#888);font-style:italic;">No assertions — ${
+              result.status === 'FAILED' && result.status_code != null
+                ? `HTTP ${_esc(String(result.status_code))} — request failed`
+                : 'pass/fail determined by HTTP status code (&lt;400 = passed)'
+            }</div>`;
         const rawBody = result.response_body || '';
         let prettyBody = rawBody;
+        let parsedBody = null;
         if (rawBody) {
-          try { prettyBody = JSON.stringify(JSON.parse(rawBody), null, 2); } catch (_) {}
+          try { parsedBody = JSON.parse(rawBody); prettyBody = JSON.stringify(parsedBody, null, 2); } catch (_) {}
         }
         const preview = prettyBody.length > 2000 ? prettyBody.slice(0, 2000) + '\n… (truncated)' : prettyBody;
         const errHtml = result.error_message
-          ? `<div style="color:var(--danger,#ef4444);margin-bottom:6px">Error: ${_esc(result.error_message)}</div>` : '';
+          ? `<div style="color:var(--danger,#ef4444);margin-bottom:6px">⚠ ${_esc(result.error_message)}</div>` : '';
+        let reasonHtml = '';
+        if (result.status !== 'PASSED') {
+          if (parsedBody && typeof parsedBody === 'object') {
+            const pick = parsedBody.error ?? parsedBody.message ?? parsedBody.detail
+              ?? parsedBody.msg ?? parsedBody.reason ?? parsedBody.errorMessage
+              ?? parsedBody.description
+              ?? (Array.isArray(parsedBody.errors) ? (typeof parsedBody.errors[0] === 'string' ? parsedBody.errors[0] : JSON.stringify(parsedBody.errors[0])) : undefined);
+            if (pick != null) {
+              reasonHtml = `<div style="color:var(--danger,#ef4444);margin-bottom:8px;padding:6px 8px;background:rgba(239,68,68,.08);border-left:3px solid var(--danger,#ef4444);border-radius:2px;font-size:11px;word-break:break-word">${_esc(String(pick))}</div>`;
+            }
+          } else if (rawBody && !parsedBody) {
+            // Non-JSON body (plain text, XML, etc.) — show first 300 chars unless it looks like HTML
+            const isHtml = /^\s*<(!DOCTYPE|html)/i.test(rawBody);
+            if (!isHtml) {
+              const snippet = rawBody.length > 300 ? rawBody.slice(0, 300) + '…' : rawBody;
+              reasonHtml = `<div style="color:var(--danger,#ef4444);margin-bottom:8px;padding:6px 8px;background:rgba(239,68,68,.08);border-left:3px solid var(--danger,#ef4444);border-radius:2px;font-size:11px;word-break:break-word;white-space:pre-wrap">${_esc(snippet)}</div>`;
+            }
+          }
+        }
+        const bodySection = rawBody
+          ? `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Response body</div>
+             <pre class="crv-body">${_esc(preview)}</pre>`
+          : result.status !== 'PASSED'
+            ? `<div style="color:var(--text-muted,#888);font-style:italic;margin-top:8px;font-size:11px">No response body received</div>`
+            : '';
         html += `<div class="crv-detail" id="crv-det-${i}">
-          ${errHtml}
+          ${errHtml}${reasonHtml}
           <div style="font-weight:600;color:var(--text-secondary,#444);margin-bottom:4px">Assertions</div>
           ${assertHtml}
-          ${rawBody ? `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Response body</div>
-          <pre class="crv-body">${_esc(preview)}</pre>` : ''}
+          ${bodySection}
         </div>`;
       }
     }
 
+    const openIds = new Set(
+      [...rowsEl.querySelectorAll('.crv-detail.open')].map(el => el.id)
+    );
+
     rowsEl.innerHTML = html;
+
+    openIds.forEach(id => document.getElementById(id)?.classList.add('open'));
 
     rowsEl.querySelectorAll('.crv-row[data-i]').forEach(row => {
       const i   = parseInt(row.dataset.i, 10);
@@ -236,6 +304,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       if (!res.ok || !res.run) return;
       const run = res.run;
       if (!_startedAt) { _startedAt = run.started_at; _startElapsed(); }
+      _lastRun = run;
       _updateHeader(run);
       _renderRows(run);
       if (run.status !== 'RUNNING') {
