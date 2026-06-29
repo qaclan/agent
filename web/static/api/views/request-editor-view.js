@@ -115,6 +115,14 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
   headersTable.setRows(r.headers || []);
 
+  const authBanner = document.createElement('div');
+  authBanner.style.display = 'none';
+  const headersWrapper = document.createElement('div');
+  headersWrapper.appendChild(authBanner);
+  headersWrapper.appendChild(headersTable.el);
+
+  let _collectionAuth = null;
+
   // ── Path Variables ──
   const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars });
   const pathVarsSection = document.createElement('div');
@@ -515,10 +523,150 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
   }
 
-  authTypeSelect.onchange = () => _renderAuthFields(authTypeSelect.value);
+  authTypeSelect.onchange = () => { _renderAuthFields(authTypeSelect.value); _updateAuthBanner(); };
   _renderAuthFields(authTypeSelect.value);
   authSection.appendChild(authTypeSelect);
   authSection.appendChild(authFieldsDiv);
+  authFieldsDiv.addEventListener('input', _updateAuthBanner);
+
+  function _updateAuthBanner() {
+    const type = authTypeSelect.value;
+    let cfg = {};
+    try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
+
+    // Remove previous computed row + reset conflicting user rows
+    const tbody = headersTable.el.querySelector('tbody');
+    tbody.querySelector('tr.kv-computed-row')?.remove();
+    tbody.querySelectorAll('tr.kv-row').forEach(tr => {
+      tr.style.opacity = '';
+      tr.querySelector('.kv-override-warn')?.remove();
+    });
+    authBanner.innerHTML = '';
+    authBanner.style.display = 'none';
+
+    if (type === 'none') return;
+
+    // Resolve locked header name + value
+    let lockedName = null, lockedValue = null, sourceLabel = null, sourceClick = null;
+
+    if (type === 'bearer') {
+      lockedName = 'Authorization';
+      lockedValue = 'Bearer ' + (cfg.token || '{{ACCESS_TOKEN}}');
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'basic') {
+      lockedName = 'Authorization';
+      lockedValue = 'Basic …';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'api_key') {
+      lockedName = cfg.key_name || null;
+      lockedValue = cfg.key_value || '{{API_KEY}}';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'oauth2') {
+      lockedName = 'Authorization';
+      lockedValue = 'Bearer … (via token URL)';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'inherit') {
+      if (!_collectionAuth) {
+        // Still fetching — show minimal notice only
+        authBanner.style.cssText = 'margin-bottom:6px;padding:4px 8px;font-size:11px;color:var(--text-muted);border-radius:4px;background:var(--surface-2,rgba(0,0,0,.04));border:1px solid var(--border-default);';
+        authBanner.textContent = '🔒 Auth inherited from collection';
+        authBanner.style.display = '';
+        return;
+      }
+      const colType = _collectionAuth.auth_type || 'none';
+      if (colType === 'none') return; // collection has no auth — nothing to lock
+      let colCfg = {};
+      try { colCfg = JSON.parse(_collectionAuth.auth_config || '{}'); } catch(e) { colCfg = {}; }
+      sourceLabel = 'Collection auth';
+      if (colType === 'bearer') {
+        lockedName = 'Authorization';
+        lockedValue = 'Bearer ' + (colCfg.token || '{{ACCESS_TOKEN}}');
+      } else if (colType === 'basic') {
+        lockedName = 'Authorization';
+        lockedValue = 'Basic …';
+      } else if (colType === 'api_key') {
+        lockedName = colCfg.key_name || null;
+        lockedValue = colCfg.key_value || '{{API_KEY}}';
+      } else if (colType === 'oauth2') {
+        lockedName = 'Authorization';
+        lockedValue = 'Bearer … (via token URL)';
+      }
+    }
+
+    if (!lockedName) return;
+
+    // Inject computed read-only row at top of tbody (5 cols: lock | key | value | badge | empty)
+    const computedTr = document.createElement('tr');
+    computedTr.className = 'kv-computed-row';
+    computedTr.title = type === 'inherit'
+      ? 'Injected from collection auth — not editable here'
+      : 'Injected by Auth tab — edit in Auth tab, not here';
+
+    const tdLock = document.createElement('td');
+    tdLock.style.cssText = 'text-align:center;font-size:11px;opacity:.55;';
+    tdLock.textContent = '🔒';
+    computedTr.appendChild(tdLock);
+
+    const tdKey = document.createElement('td');
+    const keyInp = document.createElement('input');
+    keyInp.type = 'text'; keyInp.className = 'kv-key input-sm';
+    keyInp.value = lockedName; keyInp.readOnly = true; keyInp.tabIndex = -1;
+    keyInp.style.cssText = 'opacity:.55;cursor:default;pointer-events:none;';
+    tdKey.appendChild(keyInp);
+    computedTr.appendChild(tdKey);
+
+    const tdVal = document.createElement('td');
+    const valInp = document.createElement('input');
+    valInp.type = 'text'; valInp.className = 'kv-value input-sm';
+    valInp.value = lockedValue; valInp.readOnly = true; valInp.tabIndex = -1;
+    valInp.style.cssText = 'opacity:.55;cursor:default;pointer-events:none;color:var(--text-muted);';
+    tdVal.appendChild(valInp);
+    computedTr.appendChild(tdVal);
+
+    const tdBadge = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.style.cssText = 'font-size:10px;color:var(--text-muted);background:var(--surface-3,rgba(0,0,0,.08));border-radius:3px;padding:1px 5px;white-space:nowrap;' + (sourceClick ? 'cursor:pointer;' : '');
+    badge.textContent = sourceLabel;
+    if (sourceClick) { badge.title = 'Click to switch to Auth tab'; badge.onclick = sourceClick; }
+    tdBadge.appendChild(badge);
+    computedTr.appendChild(tdBadge);
+
+    computedTr.appendChild(document.createElement('td')); // delete col placeholder
+    tbody.prepend(computedTr);
+
+    // Mark conflicting enabled user rows (strikethrough + warning)
+    tbody.querySelectorAll('tr.kv-row').forEach(tr => {
+      const keyEl = tr.querySelector('.kv-key');
+      const cbEl = tr.querySelector('.kv-enabled');
+      if (!keyEl) return;
+      const isEnabled = cbEl ? cbEl.checked : true;
+      if (isEnabled && keyEl.value.trim().toLowerCase() === lockedName.toLowerCase()) {
+        tr.style.opacity = '.45';
+        const valTd = tr.querySelector('.kv-value')?.closest('td');
+        if (valTd) {
+          const warn = document.createElement('div');
+          warn.className = 'kv-override-warn';
+          warn.style.cssText = 'font-size:10px;color:var(--warning,#d97706);margin-top:2px;';
+          warn.textContent = '⚠ Overridden by ' + (type === 'inherit' ? 'collection auth' : 'Auth tab');
+          valTd.appendChild(warn);
+        }
+      }
+    });
+  }
+  _updateAuthBanner();
+
+  // Fetch collection auth in background for inherit resolution
+  if (_effectiveCollectionId) {
+    window.api('GET', `/collections/${_effectiveCollectionId}`).then(res => {
+      const col = res && (res.collection || res);
+      _collectionAuth = { auth_type: col.auth_type || 'none', auth_config: col.auth_config || '{}' };
+      _updateAuthBanner();
+    }).catch(() => { _collectionAuth = { auth_type: 'none', auth_config: '{}' }; });
+  }
 
   // ── Script sections ──
   function makeScriptSection(lang, code, hint) {
@@ -853,7 +1001,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const sectionMap = {
     'Params':      paramsWrapper,
-    'Headers':     headersTable.el,
+    'Headers':     headersWrapper,
     'Body':        bodySection,
     'Auth':        authSection,
     'Pre-Script':  preScriptSection,
@@ -874,6 +1022,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       activeSection = name;
       sectionContent.innerHTML = '';
       sectionContent.appendChild(sectionMap[name]);
+      if (name === 'Headers') _updateAuthBanner();
     };
     tabBar.appendChild(tab);
   });

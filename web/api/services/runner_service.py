@@ -107,10 +107,12 @@ class RunnerService:
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
         from web.api.repositories.collection_run_repo import CollectionRunRepo
+        from web.api.repositories.collection_vars_repo import CollectionVarsRepo
         from cli.api_runner import run_api_request
         from datetime import datetime, timezone
 
         run_repo = CollectionRunRepo()
+        vars_repo = CollectionVarsRepo()
         results: list = []
         final_status = "ERROR"
 
@@ -122,7 +124,13 @@ class RunnerService:
 
             requests = RequestRepo().list(project_id, collection_id=collection_id)
             env_vars = load_env_vars(project_id, env_name)
-            state: dict = {"qaclan_vars": dict(seed_vars)} if seed_vars else {}
+
+            # Seed state from persisted collection vars (same as single-request run)
+            cv_seed = vars_repo.as_seed_dict(collection_id)
+            state: dict = {"qaclan_vars": dict(cv_seed)} if cv_seed else {}
+            # Explicitly passed seed_vars override persisted values
+            if seed_vars:
+                state.setdefault("qaclan_vars", {}).update(seed_vars)
 
             for idx, req in enumerate(requests):
                 if run_repo.is_stop_requested(run_id):
@@ -133,6 +141,10 @@ class RunnerService:
                 result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
                 results.append(result)
                 run_repo.create_request_result(run_id, req, result, idx)
+                # Persist extracted/script vars so subsequent requests and future runs see them
+                if result.get("state_updates"):
+                    for key, value in result["state_updates"].items():
+                        vars_repo.upsert(collection_id, key, str(value))
             else:
                 passed = sum(1 for r in results if r.get("status") == "PASSED")
                 failed_c = sum(1 for r in results if r.get("status") == "FAILED")

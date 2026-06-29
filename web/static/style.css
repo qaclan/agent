@@ -1463,6 +1463,21 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   transition: background .1s, border-color .1s;
 }
 .api-request-item:hover { background: var(--bg-panel); }
+.api-request-item .remove-from-col-btn {
+  display: none;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 0 2px;
+  line-height: 1;
+  font-size: 14px;
+  border-radius: 3px;
+}
+.api-request-item .remove-from-col-btn:hover { color: var(--error, #e05555); background: var(--bg-hover, rgba(255,255,255,.06)); }
+.api-request-item:hover .remove-from-col-btn { display: flex; align-items: center; }
 .api-request-item.active {
   background: var(--accent-subtle);
   border-left-color: var(--accent);
