@@ -438,7 +438,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         if body_type == "raw" and body_raw:
             content = resolve_vars(body_raw, env_vars, state).encode()
-            if "Content-Type" not in headers:
+            if not any(k.lower() == "content-type" for k in headers):
                 headers["Content-Type"] = "application/json"
         elif body_type == "form" and body_raw:
             try:
@@ -454,37 +454,48 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                     "query": resolve_vars(gql.get("query", ""), env_vars, state),
                     "variables": gql.get("variables", {}),
                 }).encode()
+                for _k in list(headers.keys()):
+                    if _k.lower() == "content-type":
+                        del headers[_k]
                 headers["Content-Type"] = "application/json"
             except (ValueError, TypeError):
                 content = body_raw.encode() if body_raw else None
 
         # 5. Execute HTTP request
         method = req.get("method", "GET").upper()
-        timeout_ms = req.get("timeout_ms", 30000)
+        timeout_ms = int(req.get("timeout_ms") or 30000)
         follow_redirects = bool(req.get("follow_redirects", 1))
 
-        http_client = httpx.Client(
+        status_code = None
+        response_headers = {}
+        response_body = ''
+        _body_err = None
+
+        with httpx.Client(
             follow_redirects=follow_redirects,
             timeout=timeout_ms / 1000.0,
-        )
-
-        with http_client:
-            response = http_client.request(
-                method=method,
-                url=url,
+        ) as http_client:
+            with http_client.stream(
+                method, url,
                 headers=headers,
                 params=params or None,
                 content=content,
                 data=data,
                 files=files,
-            )
+            ) as response:
+                status_code = response.status_code
+                response_headers = dict(response.headers)
+                try:
+                    response.read()
+                except Exception as _be:
+                    _body_err = str(_be)
+                try:
+                    response_body = response.text
+                except Exception:
+                    response_body = ''
 
         duration_ms = int((time.time() - start_time) * 1000)
         finished_at = datetime.now(timezone.utc).isoformat()
-
-        status_code = response.status_code
-        response_body = response.text
-        response_headers = dict(response.headers)
 
         # Store response for next request's pre-extractor
         state["_last_response"] = response_body
@@ -527,7 +538,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         if assertion_results:
             all_passed = all(r["passed"] for r in assertion_results)
         else:
-            all_passed = status_code < 400
+            all_passed = status_code is not None and status_code < 400
         status = "PASSED" if all_passed else "FAILED"
 
         logger.info("run_api_request: %s %s → %d (%dms) %s",
@@ -541,7 +552,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "response_headers": response_headers,
             "duration_ms": duration_ms,
             "assertion_results": assertion_results,
-            "error_message": None,
+            "error_message": _body_err,
             "state_updates": state_updates,
             "started_at": started_at,
             "finished_at": finished_at,

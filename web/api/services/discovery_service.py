@@ -146,25 +146,48 @@ class DiscoveryService:
         return {"imported": total}
 
     # ------------------------------------------------------------------ recording
-    def launch_recorder(self, url: str, har_path: str) -> "subprocess.Popen":
-        """Non-blocking. Launch Playwright browser to record HAR. Stop via proc.terminate()."""
+    def launch_recorder(self, url: str, har_path: str):
+        """Non-blocking. Launch Playwright browser to record HAR.
+        Returns (proc, stop_file_path). On Windows, write any content to stop_file
+        to trigger graceful shutdown (ctx.close() flushes HAR before process exits).
+        On Unix, send SIGTERM to proc instead."""
+        import os, tempfile, uuid
+        stop_file = os.path.join(tempfile.gettempdir(), f"qaclan_stop_{uuid.uuid4().hex}.flag")
         harness = (
-            "import asyncio, os, signal\n"
+            "import asyncio, os, signal, sys, traceback\n"
             "from playwright.async_api import async_playwright\n"
             "async def main():\n"
-            "    stop = asyncio.Event()\n"
-            "    loop = asyncio.get_event_loop()\n"
-            "    loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
-            "    loop.add_signal_handler(signal.SIGINT, stop.set)\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
+            # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
+            "        if sys.platform != 'win32':\n"
+            "            stop = asyncio.Event()\n"
+            "            loop = asyncio.get_running_loop()\n"
+            "            loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
+            "            loop.add_signal_handler(signal.SIGINT, stop.set)\n"
+            "            browser.on('disconnected', lambda _: stop.set())\n"
             "        await (await ctx.new_page()).goto(os.environ['QACLAN_START_URL'])\n"
-            "        await stop.wait()\n"
-            "        await ctx.close()\n"
-            "asyncio.run(main())\n"
+            "        if sys.platform != 'win32':\n"
+            "            await stop.wait()\n"
+            "        else:\n"
+            "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
+            "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
+            "                await asyncio.sleep(0.3)\n"
+            "        try:\n"
+            "            await ctx.close()\n"
+            "        except Exception:\n"
+            "            pass\n"
+            "try:\n"
+            "    asyncio.run(main())\n"
+            "except Exception:\n"
+            "    traceback.print_exc()\n"
+            "    sys.exit(1)\n"
         )
-        return self._spawn_harness(url, har_path, harness, blocking=False)
+        result = self._spawn_harness(url, har_path, harness, blocking=False, stop_file=stop_file)
+        assert result is not None
+        proc, harness_dir = result
+        return proc, stop_file, harness_dir
 
     def record_sync(self, url: str, har_path: str) -> None:
         """Blocking. Returns when user closes browser. HAR flushed via ctx.close()."""
@@ -182,8 +205,8 @@ class DiscoveryService:
         )
         self._spawn_harness(url, har_path, harness, blocking=True)
 
-    def _spawn_harness(self, url: str, har_path: str, harness_src: str, blocking: bool):
-        import os, subprocess, tempfile
+    def _spawn_harness(self, url: str, har_path: str, harness_src: str, blocking: bool, stop_file: str = ""):
+        import os, subprocess, sys, tempfile
         from cli import runtime_setup
         d = tempfile.mkdtemp(prefix="qaclan_record_")
         f = os.path.join(d, "record.py")
@@ -193,12 +216,23 @@ class DiscoveryService:
         env = dict(os.environ)
         env["QACLAN_HAR_PATH"] = har_path
         env["QACLAN_START_URL"] = url
+        if stop_file:
+            env["QACLAN_STOP_FILE"] = stop_file
         bp = runtime_setup.browsers_path_if_present()
         if bp:
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(bp)
-        cmd = [str(venv_py) if venv_py.exists() else "python3", f]
+        cmd = [str(venv_py) if venv_py.exists() else sys.executable, f]
         if blocking:
-            subprocess.run(cmd, cwd=d, env=env)
+            import shutil
+            try:
+                result = subprocess.run(cmd, cwd=d, env=env)
+                if result.returncode != 0:
+                    logger.warning("record_sync harness exited non-zero: %d", result.returncode)
+            finally:
+                shutil.rmtree(d, ignore_errors=True)
         else:
-            return subprocess.Popen(cmd, cwd=d, env=env,
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            log_path = os.path.join(d, "record.log")
+            with open(log_path, "w") as lf:
+                proc = subprocess.Popen(cmd, cwd=d, env=env, stdout=lf, stderr=lf)
+            logger.info("record harness launched pid=%d log=%s", proc.pid, log_path)
+            return proc, d

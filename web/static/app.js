@@ -4370,34 +4370,8 @@ async function viewApiRunModal(runId) {
   const res = await api('GET', '/api-collection-runs/' + runId)
   if (!res.ok) { toast(res.error || 'Failed to load run', 'error'); return }
   const run = res.run
-  const statusCls = run.status === 'PASSED' ? 'badge-success' : 'badge-danger'
+
   const methodColors = {GET:'#0969da',POST:'#1a7f37',PUT:'#e16f24',PATCH:'#9a6700',DELETE:'#cf222e',HEAD:'#6e40c9'}
-
-  const rows = (run.request_results || []).map((rr, i) => {
-    const assertions = rr.assertion_results || []
-    const passedA = assertions.filter(a => a.passed).length
-    const sc = rr.status === 'PASSED' ? 'badge-success' : 'badge-danger'
-    const mc = methodColors[(rr.method || 'GET').toUpperCase()] || '#57606a'
-    const code = rr.status_code
-    const codeColor = code == null ? '' : code >= 200 && code < 300 ? 'var(--success,#22c55e)'
-      : code >= 300 && code < 400 ? 'var(--info,#60a5fa)'
-      : code >= 400               ? 'var(--danger,#ef4444)'
-      :                              ''
-    const dur = rr.duration_ms
-    const durColor = dur == null ? '' : dur < 300 ? 'var(--success,#22c55e)'
-      : dur < 1000 ? 'var(--warning,#f59e0b)'
-      :               'var(--danger,#ef4444)'
-    return `<tr>
-      <td class="text-sm text-muted">${i + 1}</td>
-      <td><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
-      <td style="font-size:13px">${escHtml(rr.request_name || '')}</td>
-      <td><span class="badge ${sc}" style="font-size:11px">${rr.status || 'ERROR'}</span></td>
-      <td><span style="font-family:monospace;font-size:12px;font-weight:700;${codeColor ? 'color:' + codeColor : ''}">${code != null ? code : '—'}</span></td>
-      <td><span style="font-size:12px;font-weight:600;${durColor ? 'color:' + durColor : ''}">${dur != null ? dur + 'ms' : '—'}</span></td>
-      <td class="text-sm text-muted">${passedA}/${assertions.length}</td>
-    </tr>`
-  }).join('')
-
   const statusColor = run.status === 'PASSED' ? 'var(--success,#22c55e)'
     : run.status === 'FAILED'  ? 'var(--danger,#ef4444)'
     : run.status === 'STOPPED' ? 'var(--text-muted,#888)'
@@ -4410,54 +4384,232 @@ async function viewApiRunModal(runId) {
     elapsed = String(Math.floor(secs / 60)).padStart(2, '0') + ':' + String(secs % 60).padStart(2, '0')
   }
 
-  const cellStyle = 'padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;border-right:1px solid rgba(128,128,128,.2);'
-  const valStyle  = 'font-size:16px;font-weight:700;line-height:1.2;'
-  const lblStyle  = 'font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;'
-
-  const bodyHTML = `
-    <div style="display:flex;align-items:stretch;margin-bottom:16px;">
-      <div style="${cellStyle}min-width:90px;border-right:1px solid rgba(128,128,128,.2);">
-        <span style="${valStyle}color:${statusColor};">${escHtml(run.status)}</span>
-        <span style="${lblStyle}">Status</span>
-      </div>
-      <div style="${cellStyle}">
-        <span style="${valStyle}">${run.passed != null ? run.passed + '/' + run.total : '—'}</span>
-        <span style="${lblStyle}">Progress</span>
-      </div>
-      <div style="${cellStyle}">
-        <span style="${valStyle}color:var(--success,#22c55e);">${run.passed ?? 0}</span>
-        <span style="${lblStyle}">Passed</span>
-      </div>
-      <div style="${cellStyle}">
-        <span style="${valStyle}color:var(--danger,#ef4444);">${run.failed ?? 0}</span>
-        <span style="${lblStyle}">Failed</span>
-      </div>
-      <div style="${cellStyle}">
-        <span style="${valStyle}color:var(--warning,#f59e0b);">${run.error_count ?? 0}</span>
-        <span style="${lblStyle}">Errors</span>
-      </div>
-      <div style="padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;">
-        <span style="${valStyle}">${elapsed}</span>
-        <span style="${lblStyle}">Elapsed</span>
-      </div>
-    </div>
-    <div class="table-wrap" style="max-height:380px;overflow-y:auto">
-      <table>
-        <thead><tr>
-          <th>#</th><th>Method</th><th>Name</th><th>Status</th><th>Code</th><th>Duration</th><th>Assertions</th>
-        </tr></thead>
-        <tbody>${rows || '<tr><td colspan="7" class="text-muted text-sm">No requests</td></tr>'}</tbody>
-      </table>
-    </div>`
-
   showModal(
     escHtml(run.collection_name) + ' · API Run',
-    bodyHTML,
+    '<div id="arm-body"></div>',
     [
       { label: 'Download Report', cls: 'btn-ghost', action: () => downloadApiReport(run.id) },
       { label: 'Close', cls: 'btn-ghost', action: closeModal },
-    ]
+    ],
+    '', 'lg'
   )
+
+  const body = document.getElementById('arm-body')
+  if (!body) return
+
+  let _filter = null  // 'PASSED' | 'FAILED' | 'ERROR' | null
+
+  // ── Stat grid ──
+  const grid = document.createElement('div')
+  grid.style.cssText = 'display:flex;align-items:stretch;margin-bottom:14px;border:1px solid var(--border-default,rgba(128,128,128,.25));border-radius:6px;overflow:hidden;'
+
+  function _makeStatCell(val, label, color, filterKey) {
+    const cell = document.createElement('div')
+    cell.style.cssText = 'padding:10px 0;display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;border-right:1px solid rgba(128,128,128,.2);min-width:0;' + (filterKey ? 'cursor:pointer;transition:background .15s;' : '')
+    if (filterKey) { cell.dataset.filterKey = filterKey; cell.dataset.filterColor = color; }
+    const valEl = document.createElement('span')
+    valEl.style.cssText = 'font-size:16px;font-weight:700;line-height:1.2;' + (color ? 'color:' + color + ';' : '')
+    valEl.textContent = val
+    const lblEl = document.createElement('span')
+    lblEl.style.cssText = 'font-size:9px;color:var(--text-muted,#888);text-transform:uppercase;letter-spacing:.06em;margin-top:3px;'
+    lblEl.textContent = label
+    cell.appendChild(valEl); cell.appendChild(lblEl)
+    if (filterKey) {
+      cell.onclick = () => {
+        _filter = _filter === filterKey ? null : filterKey
+        grid.querySelectorAll('[data-filter-key]').forEach(c => {
+          const active = c.dataset.filterKey === _filter
+          c.style.background = active ? 'rgba(255,255,255,.07)' : ''
+          c.style.outline = active ? ('2px solid ' + c.dataset.filterColor) : 'none'
+          c.style.outlineOffset = '-2px'
+        })
+        _renderRows()
+      }
+      cell.onmouseenter = () => { if (cell.dataset.filterKey !== _filter) cell.style.background = 'rgba(255,255,255,.04)' }
+      cell.onmouseleave = () => { if (cell.dataset.filterKey !== _filter) cell.style.background = '' }
+    }
+    return cell
+  }
+
+  grid.appendChild(_makeStatCell(escHtml(run.status), 'Status', statusColor, null))
+  grid.appendChild(_makeStatCell(`${(run.request_results||[]).length}/${run.total||0}`, 'Progress', '', null))
+  grid.appendChild(_makeStatCell(run.passed ?? 0, 'Passed', 'var(--success,#22c55e)', 'PASSED'))
+  grid.appendChild(_makeStatCell(run.failed ?? 0, 'Failed', 'var(--danger,#ef4444)', 'FAILED'))
+  grid.appendChild(_makeStatCell(run.error_count ?? 0, 'Errors', 'var(--warning,#f59e0b)', 'ERROR'))
+  const elapsedCell = _makeStatCell(elapsed, 'Elapsed', '', null)
+  elapsedCell.style.borderRight = 'none'
+  grid.appendChild(elapsedCell)
+  body.appendChild(grid)
+
+  // ── Rows table ──
+  const tableWrap = document.createElement('div')
+  tableWrap.style.cssText = 'height:440px;overflow-y:auto;border:1px solid var(--border-default,rgba(128,128,128,.25));border-radius:6px;'
+  body.appendChild(tableWrap)
+
+  function _codeSpan(code) {
+    if (code == null) return '—'
+    const color = code >= 200 && code < 300 ? 'var(--success,#22c55e)'
+      : code >= 300 && code < 400 ? 'var(--info,#60a5fa)'
+      : code >= 400               ? 'var(--danger,#ef4444)' : ''
+    return `<span style="font-family:monospace;font-size:12px;font-weight:700;${color ? 'color:' + color : ''}">${code}</span>`
+  }
+
+  function _durSpan(ms) {
+    if (ms == null) return '—'
+    const color = ms < 300 ? 'var(--success,#22c55e)' : ms < 1000 ? 'var(--warning,#f59e0b)' : 'var(--danger,#ef4444)'
+    return `<span style="font-size:12px;font-weight:600;color:${color}">${ms}ms</span>`
+  }
+
+  function _renderRows() {
+    tableWrap.innerHTML = ''
+    const results = (run.request_results || []).filter(rr => !_filter || rr.status === _filter)
+
+    const table = document.createElement('table')
+    table.style.cssText = 'width:100%;border-collapse:collapse;'
+    table.innerHTML = `<thead><tr style="position:sticky;top:0;z-index:1;background:var(--bg-panel,#1a1a2e);">
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:36px;">#</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:72px;">Method</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;">Name</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:80px;">Status</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:64px;">Code</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:80px;">Duration</th>
+      <th style="padding:8px 10px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted,#888);text-align:left;width:80px;">Assertions</th>
+      <th style="width:18px;"></th>
+    </tr></thead>`
+    const tbody = document.createElement('tbody')
+
+    if (!results.length) {
+      const empty = document.createElement('tr')
+      empty.innerHTML = `<td colspan="8" style="padding:20px;text-align:center;color:var(--text-muted,#888);font-size:13px;">${_filter ? 'No ' + _filter.toLowerCase() + ' requests' : 'No requests'}</td>`
+      tbody.appendChild(empty)
+    }
+
+    results.forEach((rr, i) => {
+      const assertions = rr.assertion_results || []
+      const passedA = assertions.filter(a => a.passed).length
+      const mc = methodColors[(rr.method || 'GET').toUpperCase()] || '#57606a'
+      const sc = rr.status === 'PASSED' ? 'var(--success,#22c55e)' : rr.status === 'FAILED' ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)'
+      const rowIdx = run.request_results.indexOf(rr)
+
+      // Main row
+      const tr = document.createElement('tr')
+      tr.style.cssText = 'cursor:pointer;border-bottom:1px solid var(--border-subtle,rgba(255,255,255,.06));transition:background .1s;'
+      tr.onmouseenter = () => { tr.style.background = 'var(--bg-hover,rgba(255,255,255,.03))' }
+      tr.onmouseleave = () => { tr.style.background = '' }
+      tr.innerHTML = `
+        <td style="padding:9px 10px;font-size:12px;color:var(--text-muted,#888);">${rowIdx + 1}</td>
+        <td style="padding:9px 10px;"><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
+        <td style="padding:9px 10px;font-size:13px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(rr.request_name || '')}</td>
+        <td style="padding:9px 10px;"><span style="font-size:11px;font-weight:700;color:${sc}">${rr.status || 'ERROR'}</span></td>
+        <td style="padding:9px 10px;">${_codeSpan(rr.status_code)}</td>
+        <td style="padding:9px 10px;">${_durSpan(rr.duration_ms)}</td>
+        <td style="padding:9px 10px;font-size:12px;color:var(--text-muted,#888);">${passedA}/${assertions.length}</td>
+        <td style="padding:9px 10px;font-size:10px;color:var(--text-muted,#888);" class="arm-chev">▼</td>`
+
+      // Detail row
+      const detTr = document.createElement('tr')
+      detTr.style.display = 'none'
+      const detTd = document.createElement('td')
+      detTd.colSpan = 8
+      detTd.style.cssText = 'padding:0;background:var(--bg-inset,rgba(0,0,0,.2));border-bottom:1px solid var(--border-subtle,rgba(255,255,255,.07));'
+
+      // Build detail content
+      const detDiv = document.createElement('div')
+      detDiv.style.cssText = 'padding:12px 16px;font-size:11px;'
+
+      // Error message
+      if (rr.error_message) {
+        const errDiv = document.createElement('div')
+        errDiv.style.cssText = 'color:var(--danger,#ef4444);margin-bottom:8px;padding:6px 8px;background:rgba(239,68,68,.08);border-left:3px solid var(--danger,#ef4444);border-radius:2px;'
+        errDiv.textContent = '⚠ ' + rr.error_message
+        detDiv.appendChild(errDiv)
+      }
+
+      // Reason from JSON body
+      if (rr.status !== 'PASSED' && rr.response_body) {
+        try {
+          const parsed = JSON.parse(rr.response_body)
+          if (parsed && typeof parsed === 'object') {
+            const pick = parsed.error ?? parsed.message ?? parsed.detail ?? parsed.msg
+              ?? parsed.reason ?? parsed.errorMessage ?? parsed.description
+              ?? (Array.isArray(parsed.errors) ? (typeof parsed.errors[0] === 'string' ? parsed.errors[0] : JSON.stringify(parsed.errors[0])) : undefined)
+            if (pick != null) {
+              const reasonDiv = document.createElement('div')
+              reasonDiv.style.cssText = 'color:var(--danger,#ef4444);margin-bottom:8px;padding:6px 8px;background:rgba(239,68,68,.08);border-left:3px solid var(--danger,#ef4444);border-radius:2px;word-break:break-word;'
+              reasonDiv.textContent = String(pick)
+              detDiv.appendChild(reasonDiv)
+            }
+          }
+        } catch(_) {}
+      }
+
+      // Assertions
+      const assertLbl = document.createElement('div')
+      assertLbl.style.cssText = 'font-weight:600;color:var(--text-secondary,#444);margin-bottom:4px;'
+      assertLbl.textContent = 'Assertions'
+      detDiv.appendChild(assertLbl)
+
+      if (!assertions.length) {
+        const noAssert = document.createElement('div')
+        noAssert.style.cssText = 'color:var(--text-muted,#888);font-style:italic;margin-bottom:8px;'
+        noAssert.textContent = rr.status === 'FAILED' && rr.status_code != null
+          ? `No assertions — HTTP ${rr.status_code} — request failed`
+          : 'No assertions — pass/fail determined by HTTP status code (<400 = passed)'
+        detDiv.appendChild(noAssert)
+      } else {
+        assertions.forEach(a => {
+          const aDiv = document.createElement('div')
+          aDiv.style.cssText = 'color:' + (a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)') + ';margin-bottom:2px;'
+          let text = (a.passed ? '✓ ' : '✗ ') + (a.type || '')
+          if (a.path) text += ' ' + a.path
+          if (a.key) text += ' ' + a.key
+          if (a.op) text += ' ' + a.op
+          if (a.value != null) text += ' ' + String(a.value)
+          if (!a.passed && a.actual != null) text += ' → actual: ' + String(a.actual)
+          else if (!a.passed && a.error) text += ' → eval error: ' + a.error
+          aDiv.textContent = text
+          detDiv.appendChild(aDiv)
+        })
+      }
+
+      // Response body
+      if (rr.response_body) {
+        const bodyLbl = document.createElement('div')
+        bodyLbl.style.cssText = 'font-weight:600;color:var(--text-secondary,#444);margin-top:10px;margin-bottom:4px;'
+        bodyLbl.textContent = 'Response body'
+        detDiv.appendChild(bodyLbl)
+        let prettyBody = rr.response_body
+        try { prettyBody = JSON.stringify(JSON.parse(rr.response_body), null, 2) } catch(_) {}
+        const pre = document.createElement('pre')
+        pre.style.cssText = 'margin:0;padding:8px;background:var(--bg-code,rgba(0,0,0,.25));border-radius:4px;font-size:10px;white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;'
+        pre.textContent = prettyBody.length > 2000 ? prettyBody.slice(0, 2000) + '\n… (truncated)' : prettyBody
+        detDiv.appendChild(pre)
+      } else if (rr.status !== 'PASSED') {
+        const noBody = document.createElement('div')
+        noBody.style.cssText = 'color:var(--text-muted,#888);font-style:italic;margin-top:8px;font-size:11px;'
+        noBody.textContent = 'No response body received'
+        detDiv.appendChild(noBody)
+      }
+
+      detTd.appendChild(detDiv)
+      detTr.appendChild(detTd)
+
+      let open = false
+      tr.onclick = () => {
+        open = !open
+        detTr.style.display = open ? '' : 'none'
+        tr.querySelector('.arm-chev').textContent = open ? '▲' : '▼'
+      }
+
+      tbody.appendChild(tr)
+      tbody.appendChild(detTr)
+    })
+
+    table.appendChild(tbody)
+    tableWrap.appendChild(table)
+  }
+
+  _renderRows()
 }
 
 // ── Environments Page ───────────────────────────────────────────
