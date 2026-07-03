@@ -94,6 +94,48 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlInput.value = r.url || '';
   urlBar.appendChild(urlInput);
 
+  urlInput.addEventListener('paste', async (e) => {
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (!/^\s*curl(\.exe)?\s/i.test(text)) return; // not a curl command — let normal paste happen
+
+    e.preventDefault();
+
+    const hasExistingData = urlInput.value.trim() || paramsTable.getRows().length
+      || headersTable.getRows().length || bodyTextarea.value.trim();
+    if (hasExistingData) {
+      const ok = await window._confirmDialog(
+        'Replace current request fields with parsed curl?',
+        'This will overwrite the URL, params, headers, and body currently in this editor.'
+      );
+      if (!ok) return;
+    }
+
+    const res = await window.api('POST', '/discover/curl/preview', { curl: text });
+    if (!res.ok) { window._toast('Could not parse curl: ' + res.error); return; }
+
+    const parsed = res.requests[0];
+    methodSelect.value = parsed.method;
+    _applyMethodColor();
+    urlInput.value = parsed.url;
+    paramsTable.setRows(parsed.params || []);
+    headersTable.setRows(parsed.headers || []);
+
+    if (parsed.auth_type && parsed.auth_type !== 'none') {
+      authTypeSelect.value = parsed.auth_type;
+      _authConfigCache = JSON.stringify(parsed.auth_config || {});
+      _renderAuthFields(authTypeSelect.value);
+      _updateAuthBanner();
+    }
+
+    if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
+    if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    bodyTextarea.value = parsed.body || '';
+    _setBodyType(parsed.body_type || 'none');
+
+    _syncPathVars();
+    window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
+  });
+
   const sendBtn = document.createElement('button');
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
