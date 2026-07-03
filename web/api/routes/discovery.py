@@ -226,6 +226,24 @@ def discover_bruno_preview():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/discover/curl/preview", methods=["POST"])
+def discover_curl_preview():
+    """Parse one or more pasted curl commands and return request list without saving."""
+    try:
+        data = request.get_json(force=True) or {}
+        curl_text = data.get("curl", "")
+        if not curl_text.strip():
+            return jsonify({"ok": False, "error": "No curl command provided"}), 400
+        from cli.api_discovery.curl_parser import parse_curl
+        requests_list = parse_curl(curl_text)
+        if not requests_list:
+            return jsonify({"ok": False, "error": "Could not parse any curl command from the input"}), 400
+        return jsonify({"ok": True, "requests": requests_list})
+    except Exception as e:
+        logger.exception("discover_curl_preview")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/discover/record/start", methods=["POST"])
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
