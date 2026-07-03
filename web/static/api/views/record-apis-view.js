@@ -18,6 +18,7 @@ export function showRecordApis() {
 
   let _sessionId = null;
   let _pollTimer = null;
+  let _startUrl = '';
 
   window.showModal('Record APIs', bodyHTML, [
     { label: 'Cancel', cls: 'btn-ghost', action: () => { _cleanup(); window.closeModal(); } },
@@ -46,6 +47,7 @@ export function showRecordApis() {
   }
 
   async function _startRecording(url) {
+    _startUrl = url;
     const modalBody = document.querySelector('.modal-body');
     if (modalBody) {
       modalBody.innerHTML = `
@@ -55,8 +57,7 @@ export function showRecordApis() {
         </p>
         <p style="font-size:12px;color:var(--text-muted);margin-top:4px">
           URL: <code>${_esc(url)}</code>
-        </p>
-        <p id="record-count" style="font-size:13px;margin-top:8px">Captured: <strong>0</strong> requests</p>`;
+        </p>`;
     }
     const stopBtn = document.querySelector('.modal-footer .btn-primary');
     if (stopBtn) {
@@ -81,10 +82,9 @@ export function showRecordApis() {
     const res = await window.api('GET', `/discover/record/status?session_id=${_sessionId}`);
     if (!res.ok) return;
     if (res.status === 'stopped') {
-      clearInterval(_pollTimer);
-      _pollTimer = null;
-      const badge = document.querySelector('.record-status-badge');
-      if (badge) { badge.className = 'record-status-badge stopped'; badge.textContent = '● Stopped (browser closed)'; }
+      // Browser window was closed by the user — finish the recording the
+      // same way the Stop Recording button would, no extra click needed.
+      _stopRecording();
     }
   }
 
@@ -101,7 +101,7 @@ export function showRecordApis() {
       await window._alertDialog('No API requests captured. Make sure you interacted with the app and XHR/Fetch calls were made.');
       return;
     }
-    showRequestReviewModal(res.requests, 'Recorded APIs');
+    showRequestReviewModal(res.requests, 'Recorded APIs', _startUrl);
   }
 
   function _cleanup() {

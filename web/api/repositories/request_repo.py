@@ -131,3 +131,9 @@ class RequestRepo:
         cur = conn.execute("DELETE FROM api_requests WHERE id = ?", (id,))
         conn.commit()
         return cur.rowcount > 0
+
+    def delete_by_collection(self, collection_id: str) -> int:
+        conn = get_conn()
+        cur = conn.execute("DELETE FROM api_requests WHERE collection_id = ?", (collection_id,))
+        conn.commit()
+        return cur.rowcount

@@ -23,25 +23,6 @@ def _project_id():
     return pid
 
 
-def _cleanup_session_dirs(session: dict) -> None:
-    """Delete temp dirs from a recording session in a background thread."""
-    import os, shutil, threading
-
-    def _do() -> None:
-        for key in ("capture_dir", "harness_dir"):
-            d = session.get(key, "")
-            if d and os.path.exists(d):
-                shutil.rmtree(d, ignore_errors=True)
-        stop_file = session.get("stop_file", "")
-        if stop_file and os.path.exists(stop_file):
-            try:
-                os.unlink(stop_file)
-            except OSError:
-                pass
-
-    threading.Thread(target=_do, daemon=True).start()
-
-
 @bp.route("/api/discover/har", methods=["POST"])
 def discover_har():
     """Multipart file upload. Field name: 'file'. Optional form field: collection_name."""
@@ -358,7 +339,9 @@ def record_stop():
 
 @bp.route("/api/discover/record/status", methods=["GET"])
 def record_status():
-    """Poll recording session status and current capture count."""
+    """Poll recording session status. Read-only — does not tear down the
+    session even once the browser process has exited, since /record/stop
+    still needs capture_dir/har_file intact to parse the HAR afterward."""
     session_id = request.args.get("session_id", "")
     with _sessions_lock:
         session = _recording_sessions.get(session_id)
@@ -366,9 +349,4 @@ def record_status():
         return jsonify({"ok": False, "error": "Session not found"}), 404
     proc = session.get("proc")
     alive = proc is not None and proc.poll() is None
-    if not alive:
-        with _sessions_lock:
-            popped = _recording_sessions.pop(session_id, None)
-        if popped:
-            _cleanup_session_dirs(popped)
     return jsonify({"ok": True, "status": "recording" if alive else "stopped", "session_id": session_id})
