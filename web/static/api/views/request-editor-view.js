@@ -4,6 +4,7 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
+import { buildCurlCommand } from '../curl-builder.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -93,10 +94,67 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlInput.value = r.url || '';
   urlBar.appendChild(urlInput);
 
+  urlInput.addEventListener('paste', async (e) => {
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (!/^\s*curl(\.exe)?\s/i.test(text)) return; // not a curl command — let normal paste happen
+
+    e.preventDefault();
+
+    const hasExistingData = urlInput.value.trim() || paramsTable.getRows().length
+      || headersTable.getRows().length || bodyTextarea.value.trim();
+    if (hasExistingData) {
+      const ok = await window._confirmDialog(
+        'Replace current request fields with parsed curl?',
+        'This will overwrite the URL, params, headers, and body currently in this editor.'
+      );
+      if (!ok) return;
+    }
+
+    const res = await window.api('POST', '/discover/curl/preview', { curl: text });
+    if (!res.ok) { window._toast('Could not parse curl: ' + res.error); return; }
+
+    const parsed = res.requests[0];
+    methodSelect.value = parsed.method;
+    _applyMethodColor();
+    urlInput.value = parsed.url;
+    paramsTable.setRows(parsed.params || []);
+    headersTable.setRows(parsed.headers || []);
+
+    if (parsed.auth_type && parsed.auth_type !== 'none') {
+      authTypeSelect.value = parsed.auth_type;
+      _authConfigCache = JSON.stringify(parsed.auth_config || {});
+      _renderAuthFields(authTypeSelect.value);
+      _updateAuthBanner();
+    }
+
+    if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
+    if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    bodyTextarea.value = parsed.body || '';
+    _setBodyType(parsed.body_type || 'none');
+
+    _syncPathVars();
+    window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
+  });
+
   const sendBtn = document.createElement('button');
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  const copyCurlBtn = document.createElement('button');
+  copyCurlBtn.type = 'button';
+  copyCurlBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlBtn.textContent = 'Copy as cURL';
+  copyCurlBtn.title = 'Copy this request as a curl command (secrets masked)';
+  urlBar.appendChild(copyCurlBtn);
+
+  const copyCurlUnmaskedBtn = document.createElement('button');
+  copyCurlUnmaskedBtn.type = 'button';
+  copyCurlUnmaskedBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlUnmaskedBtn.textContent = '🔓';
+  copyCurlUnmaskedBtn.title = 'Copy as curl with real secret values (unmasked) — be careful where you paste this';
+  urlBar.appendChild(copyCurlUnmaskedBtn);
+
   editor.appendChild(urlBar);
 
   // ── Tab bar ──
@@ -672,6 +730,48 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     });
   }
   _updateAuthBanner();
+
+  async function _resolveEffectiveAuth() {
+    let type = authTypeSelect.value;
+    let cfg = {};
+    try { cfg = JSON.parse(_authConfigCache); } catch (e) { cfg = {}; }
+
+    if (type !== 'inherit') return { type, config: cfg };
+
+    if (!_collectionAuth && _effectiveCollectionId) {
+      const res = await window.api('GET', `/collections/${_effectiveCollectionId}`);
+      const col = res && (res.collection || res);
+      _collectionAuth = { auth_type: col?.auth_type || 'none', auth_config: col?.auth_config || '{}' };
+    }
+    const colType = _collectionAuth?.auth_type || 'none';
+    let colCfg = {};
+    try { colCfg = JSON.parse(_collectionAuth?.auth_config || '{}'); } catch (e) { colCfg = {}; }
+    return { type: colType, config: colCfg };
+  }
+
+  async function _copyAsCurl(reveal) {
+    const effectiveAuth = await _resolveEffectiveAuth();
+    const curl = buildCurlCommand({
+      method: methodSelect.value,
+      url: urlInput.value.trim(),
+      params: paramsTable.getRows(),
+      headers: headersTable.getRows(),
+      bodyType: activeBodyType,
+      body: bodyTextarea.value,
+      formRows: formBodyTable.getRows(),
+      authType: effectiveAuth.type,
+      authConfig: effectiveAuth.config,
+    }, { reveal });
+    try {
+      await navigator.clipboard.writeText(curl);
+      window._toast(reveal ? 'Copied as cURL (unmasked)' : 'Copied as cURL');
+    } catch (e) {
+      window._toast("Couldn't copy — check clipboard permissions");
+    }
+  }
+
+  copyCurlBtn.onclick = () => _copyAsCurl(false);
+  copyCurlUnmaskedBtn.onclick = () => _copyAsCurl(true);
 
   // Fetch collection auth in background for inherit resolution
   if (_effectiveCollectionId) {
