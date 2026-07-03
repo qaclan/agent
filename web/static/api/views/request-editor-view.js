@@ -4,6 +4,7 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
+import { buildCurlCommand } from '../curl-builder.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -97,6 +98,21 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  const copyCurlBtn = document.createElement('button');
+  copyCurlBtn.type = 'button';
+  copyCurlBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlBtn.textContent = 'Copy as cURL';
+  copyCurlBtn.title = 'Copy this request as a curl command (secrets masked)';
+  urlBar.appendChild(copyCurlBtn);
+
+  const copyCurlUnmaskedBtn = document.createElement('button');
+  copyCurlUnmaskedBtn.type = 'button';
+  copyCurlUnmaskedBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlUnmaskedBtn.textContent = '🔓';
+  copyCurlUnmaskedBtn.title = 'Copy as curl with real secret values (unmasked) — be careful where you paste this';
+  urlBar.appendChild(copyCurlUnmaskedBtn);
+
   editor.appendChild(urlBar);
 
   // ── Tab bar ──
@@ -672,6 +688,48 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     });
   }
   _updateAuthBanner();
+
+  async function _resolveEffectiveAuth() {
+    let type = authTypeSelect.value;
+    let cfg = {};
+    try { cfg = JSON.parse(_authConfigCache); } catch (e) { cfg = {}; }
+
+    if (type !== 'inherit') return { type, config: cfg };
+
+    if (!_collectionAuth && _effectiveCollectionId) {
+      const res = await window.api('GET', `/collections/${_effectiveCollectionId}`);
+      const col = res && (res.collection || res);
+      _collectionAuth = { auth_type: col?.auth_type || 'none', auth_config: col?.auth_config || '{}' };
+    }
+    const colType = _collectionAuth?.auth_type || 'none';
+    let colCfg = {};
+    try { colCfg = JSON.parse(_collectionAuth?.auth_config || '{}'); } catch (e) { colCfg = {}; }
+    return { type: colType, config: colCfg };
+  }
+
+  async function _copyAsCurl(reveal) {
+    const effectiveAuth = await _resolveEffectiveAuth();
+    const curl = buildCurlCommand({
+      method: methodSelect.value,
+      url: urlInput.value.trim(),
+      params: paramsTable.getRows(),
+      headers: headersTable.getRows(),
+      bodyType: activeBodyType,
+      body: bodyTextarea.value,
+      formRows: formBodyTable.getRows(),
+      authType: effectiveAuth.type,
+      authConfig: effectiveAuth.config,
+    }, { reveal });
+    try {
+      await navigator.clipboard.writeText(curl);
+      window._toast(reveal ? 'Copied as cURL (unmasked)' : 'Copied as cURL');
+    } catch (e) {
+      window._toast("Couldn't copy — check clipboard permissions");
+    }
+  }
+
+  copyCurlBtn.onclick = () => _copyAsCurl(false);
+  copyCurlUnmaskedBtn.onclick = () => _copyAsCurl(true);
 
   // Fetch collection auth in background for inherit resolution
   if (_effectiveCollectionId) {
