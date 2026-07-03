@@ -83,29 +83,69 @@ function _detailHTML(req) {
     </div>`;
 }
 
-export function showRequestReviewModal(requests, defaultCollectionName) {
+export function showRequestReviewModal(requests, defaultCollectionName, startUrl) {
   if (!requests?.length) {
     window._alertDialog('No requests found in this file.');
     return;
   }
 
+  const COMPOUND_SUFFIXES = new Set([
+    'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk',
+    'co.in', 'com.au', 'net.au', 'org.au',
+    'com.bd', 'net.bd', 'org.bd', 'gov.bd', 'edu.bd',
+    'co.jp', 'co.nz', 'co.za', 'com.br', 'com.sg', 'com.mx',
+  ]);
+
+  function _rootDomain(hostname) {
+    const labels = String(hostname || '').split('.').filter(Boolean);
+    if (labels.length <= 2) return hostname || '';
+    const lastTwo = labels.slice(-2).join('.');
+    const n = COMPOUND_SUFFIXES.has(lastTwo) ? 3 : 2;
+    return labels.slice(-n).join('.');
+  }
+
+  let startHostname = '';
+  try { startHostname = new URL(startUrl || '').hostname; } catch {}
+  const startRootDomain = _rootDomain(startHostname);
+
+  function _hostname(url) {
+    try { return new URL(url).hostname; } catch { return ''; }
+  }
+
   const indexedRequests = requests.map((r, i) => ({ ...r, _idx: i }));
+  const thirdPartyCount = startRootDomain
+    ? indexedRequests.filter(r => _rootDomain(_hostname(r.url)) !== startRootDomain).length
+    : 0;
+  let hidingThirdParty = false;
+
+  function _visible() {
+    if (!hidingThirdParty || !startRootDomain) return indexedRequests;
+    return indexedRequests.filter(r => _rootDomain(_hostname(r.url)) === startRootDomain);
+  }
 
   function _renderList(listEl) {
     // Build rows as DOM nodes so we can attach handlers directly
     listEl.innerHTML = '';
-    indexedRequests.forEach(r => {
+    _visible().forEach(r => {
       const wrapper = document.createElement('div');
       wrapper.style.borderBottom = '1px solid var(--border)';
+
+      const methodPrefix = new RegExp(`^${r.method}\\s+`, 'i');
+      const displayName = (r.name || '').replace(methodPrefix, '') || r.url.replace(/\?.*/, '');
+      const hostname = _hostname(r.url);
+      const origin = (() => { try { return new URL(r.url).origin; } catch { return hostname; } })();
+      const isThirdParty = startRootDomain && _rootDomain(hostname) !== startRootDomain;
 
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;';
       row.innerHTML = `
         <input type="checkbox" id="rev-req-${r._idx}" checked style="flex-shrink:0;">
         <label for="rev-req-${r._idx}" style="flex:1;cursor:pointer;min-width:0;overflow:hidden;">
-          <span class="method-badge method-${_esc(r.method)}" style="font-size:10px;padding:1px 5px;">${_esc(r.method)}</span>
-          <span style="margin-left:4px;">${_esc(r.name || r.url.replace(/\?.*/, ''))}</span>
-          ${r.name ? `<span style="color:var(--text-muted);margin-left:4px;font-size:10px;">${_esc(r.url.replace(/\?.*/, ''))}</span>` : ''}
+          <div style="display:flex;align-items:center;gap:6px;">
+            <span class="method-badge method-${_esc(r.method)}" style="font-size:10px;padding:1px 5px;flex-shrink:0;">${_esc(r.method)}</span>
+            <span style="flex:1;min-width:0;font-weight:600;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(displayName)}</span>
+            <span title="${_esc(r.url)}" style="flex-shrink:0;font-size:10px;font-family:var(--font-mono,monospace);color:var(--text-muted);background:var(--bg-base);border:1px solid var(--border);border-radius:3px;padding:1px 5px;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;${isThirdParty ? 'color:var(--accent);border-color:var(--accent-subtle);' : ''}">${_esc(origin)}</span>
+          </div>
         </label>
         <button type="button" class="btn-ghost" style="font-size:10px;padding:2px 7px;flex-shrink:0;">Details ▾</button>`;
 
@@ -133,9 +173,16 @@ export function showRequestReviewModal(requests, defaultCollectionName) {
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
       ${requests.length} request${requests.length !== 1 ? 's' : ''} found. Select which to save:
     </p>
-    <div style="display:flex;gap:8px;margin-bottom:6px;">
-      <button type="button" class="btn-ghost" id="rev-all" style="font-size:11px;padding:2px 8px;">All</button>
-      <button type="button" class="btn-ghost" id="rev-none" style="font-size:11px;padding:2px 8px;">None</button>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;flex-wrap:wrap;gap:6px;">
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="btn-ghost" id="rev-all" style="font-size:11px;padding:2px 8px;">All</button>
+        <button type="button" class="btn-ghost" id="rev-none" style="font-size:11px;padding:2px 8px;">None</button>
+      </div>
+      ${thirdPartyCount > 0 ? `
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer;color:var(--text-muted);">
+        <input type="checkbox" id="rev-hide-3p" ${hidingThirdParty ? 'checked' : ''}>
+        Hide third-party (${thirdPartyCount})
+      </label>` : ''}
     </div>
     <div id="rev-list" style="max-height:480px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:12px;"></div>
     <div style="margin-bottom:10px;">
@@ -178,5 +225,9 @@ export function showRequestReviewModal(requests, defaultCollectionName) {
       document.querySelectorAll('[id^="rev-req-"]').forEach(c => c.checked = true));
     document.getElementById('rev-none')?.addEventListener('click', () =>
       document.querySelectorAll('[id^="rev-req-"]').forEach(c => c.checked = false));
+    document.getElementById('rev-hide-3p')?.addEventListener('change', e => {
+      hidingThirdParty = e.target.checked;
+      if (listEl) _renderList(listEl);
+    });
   });
 }

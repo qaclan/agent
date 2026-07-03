@@ -170,7 +170,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Body section ──
   const bodySection = document.createElement('div');
-  const BODY_TYPES = ['none', 'raw', 'form', 'graphql'];
+  const BODY_TYPES = ['none', 'raw', 'form', 'multipart', 'graphql'];
+  const BODY_TYPE_LABELS = { form: 'x-www-form-urlencoded', multipart: 'form-data/multipart' };
   let activeBodyType = r.body_type || 'none';
 
   const bodyTypeGroup = document.createElement('div');
@@ -181,7 +182,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'req-body-type-btn';
-    btn.textContent = t;
+    btn.textContent = BODY_TYPE_LABELS[t] || t;
     btn.dataset.type = t;
     btn.onclick = () => _setBodyType(t);
     bodyTypeGroup.appendChild(btn);
@@ -362,17 +363,27 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
   }
 
-  // Form body
-  let _formBodyRows = [];
+  // Form / multipart bodies share the same key-value table widget, but each
+  // type keeps its own row set — otherwise switching tabs would show one
+  // type's fields under the other's tab.
+  let _formRows = [];
+  let _multipartRows = [];
   try {
     const parsed = JSON.parse(r.body || '[]');
-    _formBodyRows = Array.isArray(parsed) ? parsed : [];
-  } catch(e) { _formBodyRows = []; }
+    if (Array.isArray(parsed)) {
+      if (r.body_type === 'multipart') _multipartRows = parsed;
+      else if (r.body_type === 'form') _formRows = parsed;
+    }
+  } catch(e) { /* leave both empty */ }
   const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
-  formBodyTable.setRows(_formBodyRows);
+  formBodyTable.setRows(activeBodyType === 'multipart' ? _multipartRows : _formRows);
   formBodyTable.el.style.display = 'none';
 
   function _setBodyType(type) {
+    const prevType = activeBodyType;
+    if (prevType === 'form') _formRows = formBodyTable.getRows();
+    else if (prevType === 'multipart') _multipartRows = formBodyTable.getRows();
+
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.type === type);
@@ -389,7 +400,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmActive = false;
     }
 
-    formBodyTable.el.style.display = type === 'form' ? '' : 'none';
+    if (type === 'form' || type === 'multipart') {
+      formBodyTable.setRows(type === 'multipart' ? _multipartRows : _formRows);
+    }
+    formBodyTable.el.style.display = (type === 'form' || type === 'multipart') ? '' : 'none';
     bodyVarBtn.style.display = isText ? '' : 'none';
     formatBtn.style.display = isText ? '' : 'none';
     minifyBtn.style.display = isText ? '' : 'none';
@@ -1063,7 +1077,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: activeBodyType === 'form'
+      body: (activeBodyType === 'form' || activeBodyType === 'multipart')
         ? JSON.stringify(formBodyTable.getRows())
         : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
       auth_type: authTypeSelect.value,

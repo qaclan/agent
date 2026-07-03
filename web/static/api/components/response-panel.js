@@ -186,6 +186,12 @@ export function createResponsePanel(opts = {}) {
       contentArea.appendChild(errDiv);
       return;
     }
+    if (r.status_code && r.error_message && r.response_body) {
+      const warnDiv = document.createElement('div');
+      warnDiv.className = 'response-error-message';
+      warnDiv.textContent = `Response truncated: ${r.error_message}`;
+      contentArea.appendChild(warnDiv);
+    }
     const pre = document.createElement('pre');
     pre.className = 'response-body-pre';
     let text = r.response_body || '';

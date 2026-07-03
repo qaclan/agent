@@ -17,6 +17,18 @@ _SENSITIVE_KEY_RE = re.compile(
 )
 _VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
 _PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
+_CHARSET_RE = re.compile(r"charset=([\w-]+)", re.IGNORECASE)
+
+
+def _detect_charset(response_headers: dict) -> str:
+    """Best-effort charset from Content-Type header, falling back to utf-8."""
+    for key, value in response_headers.items():
+        if key.lower() == "content-type":
+            match = _CHARSET_RE.search(value)
+            if match:
+                return match.group(1)
+            break
+    return "utf-8"
 
 
 def _substitute_path_params(url: str, path_params: list, env_vars: dict, state: dict) -> str:
@@ -447,6 +459,25 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                         for item in form_items if item.get("enabled", True)}
             except (ValueError, TypeError):
                 data = {}
+        elif body_type == "multipart" and body_raw:
+            try:
+                form_items = json.loads(body_raw)
+                files = {}
+                for item in form_items:
+                    if not item.get("enabled", True):
+                        continue
+                    value = resolve_vars(item.get("value", ""), env_vars, state)
+                    filename = item.get("filename")
+                    # httpx: (filename, content) forces multipart encoding even for
+                    # plain text fields; filename=None omits the filename attribute.
+                    files[item["key"]] = (filename, value.encode())
+            except (ValueError, TypeError):
+                files = {}
+            # A captured/stale Content-Type carries the original boundary, which
+            # won't match the boundary httpx generates for the re-encoded body.
+            for _k in list(headers.keys()):
+                if _k.lower() == "content-type":
+                    del headers[_k]
         elif body_type == "graphql" and body_raw:
             try:
                 gql = json.loads(body_raw)
@@ -460,6 +491,14 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 headers["Content-Type"] = "application/json"
             except (ValueError, TypeError):
                 content = body_raw.encode() if body_raw else None
+
+        # Framing headers (Content-Length, Transfer-Encoding) must be computed by
+        # httpx from the actual body — a stale value carried over from an import
+        # or an edited body causes h11 LocalProtocolError ("Too much/little data
+        # for declared Content-Length") since httpx trusts an explicit header.
+        for _k in list(headers.keys()):
+            if _k.lower() in ("content-length", "transfer-encoding"):
+                del headers[_k]
 
         # 5. Execute HTTP request
         method = req.get("method", "GET").upper()
@@ -485,14 +524,18 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             ) as response:
                 status_code = response.status_code
                 response_headers = dict(response.headers)
+                body_chunks = []
                 try:
-                    response.read()
+                    for chunk in response.iter_bytes():
+                        body_chunks.append(chunk)
                 except Exception as _be:
                     _body_err = str(_be)
-                try:
-                    response_body = response.text
-                except Exception:
-                    response_body = ''
+                raw_body = b"".join(body_chunks)
+                if raw_body:
+                    try:
+                        response_body = raw_body.decode(_detect_charset(response_headers), errors="replace")
+                    except LookupError:
+                        response_body = raw_body.decode("utf-8", errors="replace")
 
         duration_ms = int((time.time() - start_time) * 1000)
         finished_at = datetime.now(timezone.utc).isoformat()

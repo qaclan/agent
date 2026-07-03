@@ -89,6 +89,41 @@ def _redact_sensitive(key: str, value: str) -> str:
     return value
 
 
+def _parse_multipart_text(mime: str, text: str) -> list[dict]:
+    """Manually split a raw multipart/form-data body into fields.
+
+    Needed because Playwright's HAR recorder always leaves postData.params
+    empty for multipart requests (only urlencoded bodies get params filled
+    in) — the raw text is the only place the field data survives.
+    """
+    m = re.search(r'boundary=("?)([^;"]+)\1', mime)
+    if not m or not text:
+        return []
+    delimiter = "--" + m.group(2)
+    fields = []
+    for chunk in text.split(delimiter):
+        chunk = chunk.strip("\r\n")
+        if not chunk or chunk == "--":
+            continue
+        if "\r\n\r\n" in chunk:
+            header_blob, value = chunk.split("\r\n\r\n", 1)
+        elif "\n\n" in chunk:
+            header_blob, value = chunk.split("\n\n", 1)
+        else:
+            continue
+        name_m = re.search(r'name="([^"]*)"', header_blob)
+        if not name_m:
+            continue
+        name = name_m.group(1)
+        value = value.rstrip("\r\n")
+        field = {"key": name, "value": _redact_sensitive(name, value), "enabled": True}
+        filename_m = re.search(r'filename="([^"]*)"', header_blob)
+        if filename_m:
+            field["filename"] = filename_m.group(1)
+        fields.append(field)
+    return fields
+
+
 def parse_har(har_json: dict) -> list[dict]:
     """Parse HAR JSON → list of api_request dicts."""
     entries = har_json.get("log", {}).get("entries", [])
@@ -116,7 +151,10 @@ def parse_har(har_json: dict) -> list[dict]:
             params.append({"key": k, "value": v, "enabled": True})
 
         # Headers — skip pseudo-headers and common browser headers
-        skip_headers = {"accept-encoding", "connection", "host", ":method", ":path", ":scheme", ":authority"}
+        skip_headers = {
+            "accept-encoding", "connection", "host", ":method", ":path", ":scheme", ":authority",
+            "content-length", "transfer-encoding",
+        }
         headers = []
         for h in req.get("headers", []):
             name = h.get("name", "")
@@ -135,6 +173,15 @@ def parse_har(har_json: dict) -> list[dict]:
             if "json" in mime:
                 body_type = "raw"
                 body = text
+            elif "multipart" in mime:
+                body_type = "multipart"
+                params_list = [
+                    {"key": p.get("name", ""), "value": _redact_sensitive(p.get("name", ""), p.get("value", "")), "enabled": True}
+                    for p in post_data.get("params", [])
+                ]
+                if not params_list:
+                    params_list = _parse_multipart_text(mime, text)
+                body = json.dumps(params_list)
             elif "form" in mime:
                 body_type = "form"
                 params_list = []

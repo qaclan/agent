@@ -37,4 +37,5 @@ class CollectionService:
         existing = _col_repo.get(id, project_id)
         if existing is None:
             raise LookupError(f"Collection {id} not found")
+        _req_repo.delete_by_collection(id)
         return _col_repo.delete(id)
