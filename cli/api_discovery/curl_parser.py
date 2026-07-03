@@ -20,14 +20,16 @@ _IGNORED_FLAGS_NO_ARG = {
 
 def _split_commands(text: str) -> list[str]:
     """Join backslash/caret line continuations, then split into individual
-    curl invocations on newlines/&&/;."""
+    curl invocations on newlines only. Deliberately does NOT split on bare
+    ';'/'&&' — those characters routinely appear inside quoted header
+    values (e.g. 'Cookie: a=1; b=2') and a naive split there would corrupt
+    a single command instead of separating multiple ones."""
     joined = _CONTINUATION_RE.sub(" ", text.replace("\r\n", "\n"))
-    segments = re.split(r"\n|&&|;", joined)
     commands = []
-    for seg in segments:
-        seg = _LEADING_PROMPT_RE.sub("", seg.strip()).strip()
-        if re.match(r"^curl(\.exe)?\b", seg, re.IGNORECASE):
-            commands.append(seg)
+    for line in joined.split("\n"):
+        line = _LEADING_PROMPT_RE.sub("", line.strip()).strip()
+        if re.match(r"^curl(\.exe)?\b", line, re.IGNORECASE):
+            commands.append(line)
     return commands
 
 
