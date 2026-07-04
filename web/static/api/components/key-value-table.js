@@ -1,5 +1,6 @@
 import { createVarPicker } from './var-picker.js';
 import { createInlineVarDrop } from './inline-var-drop.js';
+import { applyVarStyle } from './var-style.js';
 
 /**
  * createKeyValueTable(options) → { el, getRows, setRows }
@@ -8,6 +9,8 @@ import { createInlineVarDrop } from './inline-var-drop.js';
  *   readOnly?: bool
  *   varPickerEnabled?: bool
  *   getVars?: async () => [{key, value, is_secret?, group?}]
+ *   fileFieldsEnabled?: bool — adds a per-row "attach file" control; rows with
+ *     an attached file report {filename, content_type, is_file: true, value: base64}
  */
 export function createKeyValueTable(options = {}) {
   const {
@@ -15,7 +18,24 @@ export function createKeyValueTable(options = {}) {
     readOnly = false,
     varPickerEnabled = false,
     getVars = async () => [],
+    fileFieldsEnabled = false,
+    getKnownVarNames = null,
   } = options;
+
+  function _fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function _formatSize(n) {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  }
 
   const _picker = varPickerEnabled ? createVarPicker({ getVars }) : null;
   const _inlineDrop = varPickerEnabled ? createInlineVarDrop(getVars) : null;
@@ -30,6 +50,7 @@ export function createKeyValueTable(options = {}) {
     <th>Key</th>
     <th>Value</th>
     ${varPickerEnabled && !readOnly ? '<th style="width:30px"></th>' : ''}
+    ${fileFieldsEnabled && !readOnly ? '<th style="width:32px"></th>' : ''}
     ${readOnly ? '' : '<th style="width:32px"></th>'}
   </tr></thead>`;
   const tbody = document.createElement('tbody');
@@ -50,6 +71,24 @@ export function createKeyValueTable(options = {}) {
 
   function _applyVarStyle(inp) {
     inp.classList.toggle('kv-value--var-ref', _isVarRef(inp.value));
+  }
+
+  function _styleValueInput(inp) {
+    if (getKnownVarNames) applyVarStyle(inp, getKnownVarNames());
+    else _applyVarStyle(inp);
+  }
+
+  function _setFileState(tr, valInput, meta) {
+    tr._fileMeta = meta; // null, or {filename, content_type, base64, size}
+    if (meta) {
+      valInput.value = meta.size != null ? `📎 ${meta.filename} (${_formatSize(meta.size)})` : `📎 ${meta.filename}`;
+      valInput.readOnly = true;
+      valInput.classList.add('kv-value--file');
+    } else {
+      valInput.readOnly = readOnly;
+      valInput.classList.remove('kv-value--file');
+      if (valInput.value.startsWith('📎 ')) valInput.value = '';
+    }
   }
 
   function _addRow(data = {}) {
@@ -83,12 +122,12 @@ export function createKeyValueTable(options = {}) {
     valInput.placeholder = placeholder.value;
     valInput.value = data.value || '';
     valInput.readOnly = readOnly;
-    _applyVarStyle(valInput);
+    _styleValueInput(valInput);
     valTd.appendChild(valInput);
     tr.appendChild(valTd);
 
     if (!readOnly) {
-      valInput.addEventListener('input', () => _applyVarStyle(valInput));
+      valInput.addEventListener('input', () => _styleValueInput(valInput));
       if (varPickerEnabled) _inlineDrop.watchInput(valInput);
     }
 
@@ -110,6 +149,60 @@ export function createKeyValueTable(options = {}) {
       tr.appendChild(pickerTd);
     }
 
+    if (fileFieldsEnabled && !readOnly) {
+      const fileTd = document.createElement('td');
+      const fileInput = document.createElement('input');
+      fileInput.type = 'file';
+      fileInput.style.display = 'none';
+
+      const fileBtn = document.createElement('button');
+      fileBtn.type = 'button';
+      fileBtn.className = 'btn btn-xs btn-ghost';
+      fileBtn.style.cssText = 'background:none;border:1px solid var(--border-default);border-radius:4px;padding:1px 5px;cursor:pointer;font-size:11px;color:var(--text-muted);line-height:1.4;';
+
+      function _refreshFileBtn() {
+        const attached = !!tr._fileMeta;
+        fileBtn.textContent = attached ? '✕' : '📎';
+        fileBtn.title = attached ? 'Remove attached file' : 'Attach file';
+      }
+
+      fileBtn.onclick = () => {
+        if (tr._fileMeta) {
+          _setFileState(tr, valInput, null);
+          _refreshFileBtn();
+        } else {
+          fileInput.click();
+        }
+      };
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        fileInput.value = '';
+        if (!file) return;
+        const base64 = await _fileToBase64(file);
+        _setFileState(tr, valInput, {
+          filename: file.name,
+          content_type: file.type || 'application/octet-stream',
+          base64,
+          size: file.size,
+        });
+        _refreshFileBtn();
+      });
+
+      if (data.is_file && data.filename) {
+        _setFileState(tr, valInput, {
+          filename: data.filename,
+          content_type: data.content_type,
+          base64: data.value || '',
+          size: null,
+        });
+      }
+      _refreshFileBtn();
+
+      fileTd.appendChild(fileBtn);
+      fileTd.appendChild(fileInput);
+      tr.appendChild(fileTd);
+    }
+
     if (!readOnly) {
       const delTd = document.createElement('td');
       const delBtn = document.createElement('button');
@@ -129,10 +222,22 @@ export function createKeyValueTable(options = {}) {
     const rows = [];
     tbody.querySelectorAll('tr.kv-row').forEach(tr => {
       const key = tr.querySelector('.kv-key')?.value?.trim() || '';
-      const value = tr.querySelector('.kv-value')?.value || '';
       const enabledCb = tr.querySelector('.kv-enabled');
       const enabled = enabledCb ? enabledCb.checked : true;
-      if (key) rows.push({ key, value, enabled });
+      if (!key) return;
+      if (fileFieldsEnabled && tr._fileMeta) {
+        const row = {
+          key, enabled,
+          value: tr._fileMeta.base64 || '',
+          filename: tr._fileMeta.filename,
+          is_file: true,
+        };
+        if (tr._fileMeta.content_type) row.content_type = tr._fileMeta.content_type;
+        rows.push(row);
+      } else {
+        const value = tr.querySelector('.kv-value')?.value || '';
+        rows.push({ key, value, enabled });
+      }
     });
     return rows;
   }
@@ -142,5 +247,9 @@ export function createKeyValueTable(options = {}) {
     rows.forEach(r => _addRow(r));
   }
 
-  return { el: wrapper, getRows, setRows };
+  function restyleAll() {
+    tbody.querySelectorAll('.kv-value').forEach(_styleValueInput);
+  }
+
+  return { el: wrapper, getRows, setRows, restyleAll };
 }
