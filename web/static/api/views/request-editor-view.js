@@ -5,6 +5,7 @@ import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
+import { applyVarStyle } from '../components/var-style.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -45,6 +46,18 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       } catch(e) { /* no collection vars */ }
     }
     return results;
+  }
+
+  let _knownVarNames = null;
+  let _authFieldInputs = [];
+
+  async function _refreshKnownVarNames() {
+    const vars = await getAllVars();
+    _knownVarNames = new Set(vars.map(v => v.key));
+    paramsTable.restyleAll();
+    headersTable.restyleAll();
+    pathVarsTable.restyleAll();
+    _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
   }
 
   container.innerHTML = '';
@@ -167,10 +180,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(sectionContent);
 
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
+  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   paramsTable.setRows(r.params || []);
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   headersTable.setRows(r.headers || []);
 
   const authBanner = document.createElement('div');
@@ -182,7 +195,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _collectionAuth = null;
 
   // ── Path Variables ──
-  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars });
+  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   const pathVarsSection = document.createElement('div');
   {
     const hdr = document.createElement('div');
@@ -209,7 +222,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const _storedPathParams = r.path_params || [];
 
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(/\{([^}]+)\}/g)].map(m => m[1]);
+    const matches = [...urlInput.value.matchAll(/\{(?!\{)([^{}]+)\}(?!\})/g)].map(m => m[1]);
     const keys = [...new Set(matches)];
     if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
     pathVarsSection.style.display = '';
@@ -434,13 +447,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
   } catch(e) { /* leave both empty */ }
   const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
-  formBodyTable.setRows(activeBodyType === 'multipart' ? _multipartRows : _formRows);
+  const multipartBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true });
+  formBodyTable.setRows(_formRows);
+  multipartBodyTable.setRows(_multipartRows);
   formBodyTable.el.style.display = 'none';
+  multipartBodyTable.el.style.display = 'none';
 
   function _setBodyType(type) {
     const prevType = activeBodyType;
     if (prevType === 'form') _formRows = formBodyTable.getRows();
-    else if (prevType === 'multipart') _multipartRows = formBodyTable.getRows();
+    else if (prevType === 'multipart') _multipartRows = multipartBodyTable.getRows();
 
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
@@ -458,10 +474,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmActive = false;
     }
 
-    if (type === 'form' || type === 'multipart') {
-      formBodyTable.setRows(type === 'multipart' ? _multipartRows : _formRows);
-    }
-    formBodyTable.el.style.display = (type === 'form' || type === 'multipart') ? '' : 'none';
+    if (type === 'form') formBodyTable.setRows(_formRows);
+    else if (type === 'multipart') multipartBodyTable.setRows(_multipartRows);
+    formBodyTable.el.style.display = type === 'form' ? '' : 'none';
+    multipartBodyTable.el.style.display = type === 'multipart' ? '' : 'none';
     bodyVarBtn.style.display = isText ? '' : 'none';
     formatBtn.style.display = isText ? '' : 'none';
     minifyBtn.style.display = isText ? '' : 'none';
@@ -485,6 +501,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(bodyFallback);
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
+  bodySection.appendChild(multipartBodyTable.el);
 
   // ── Auth section ──
   const authSection = document.createElement('div');
@@ -526,8 +543,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     inp.className = 'input-sm';
     inp.placeholder = placeholder;
     inp.value = getValue() || '';
-    inp.oninput = () => setValue(inp.value);
+    inp.oninput = () => { setValue(inp.value); applyVarStyle(inp, _knownVarNames); };
+    applyVarStyle(inp, _knownVarNames);
     _authInlineDrop.watchInput(inp);
+    _authFieldInputs.push(inp);
     wrap.appendChild(lbl);
     wrap.appendChild(inp);
     return wrap;
@@ -536,6 +555,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   function _renderAuthFields(type) {
     _authInlineDrop.close();
     authFieldsDiv.innerHTML = '';
+    _authFieldInputs = [];
     let cfg = {};
     try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
 
@@ -597,6 +617,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   authTypeSelect.onchange = () => { _renderAuthFields(authTypeSelect.value); _updateAuthBanner(); };
   _renderAuthFields(authTypeSelect.value);
+  _refreshKnownVarNames();
   authSection.appendChild(authTypeSelect);
   authSection.appendChild(authFieldsDiv);
   authFieldsDiv.addEventListener('input', _updateAuthBanner);
@@ -758,7 +779,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       bodyType: activeBodyType,
       body: bodyTextarea.value,
-      formRows: formBodyTable.getRows(),
+      formRows: activeBodyType === 'multipart' ? multipartBodyTable.getRows() : formBodyTable.getRows(),
       authType: effectiveAuth.type,
       authConfig: effectiveAuth.config,
     }, { reveal });
@@ -783,6 +804,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   // ── Script sections ──
+  const _scriptInlineDrop = createInlineVarDrop(getAllVars);
   function makeScriptSection(lang, code, hint) {
     const div = document.createElement('div');
 
@@ -820,6 +842,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     langSelect.onchange = () => { textarea.placeholder = _ph(langSelect.value); };
     textarea.value = code || '';
     div.appendChild(textarea);
+    _scriptInlineDrop.watchInput(textarea);
 
     div._getLang = () => langSelect.value;
     div._getCode = () => textarea.value;
@@ -1177,8 +1200,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: (activeBodyType === 'form' || activeBodyType === 'multipart')
-        ? JSON.stringify(formBodyTable.getRows())
+      body: activeBodyType === 'form' ? JSON.stringify(formBodyTable.getRows())
+        : activeBodyType === 'multipart' ? JSON.stringify(multipartBodyTable.getRows())
         : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
       auth_type: authTypeSelect.value,
       auth_config: parsedAuth,
