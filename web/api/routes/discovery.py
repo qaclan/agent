@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from flask import Blueprint, request, jsonify
 from cli.config import get_active_project_id
@@ -15,6 +16,7 @@ _svc = DiscoveryService()
 # In-memory store for recording sessions: {session_id: {"status": "recording"|"stopped", "requests": [], "proc": proc}}
 _recording_sessions: dict = {}
 _sessions_lock = threading.Lock()
+_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours — long enough a legit in-progress recording is never mistaken for abandoned
 
 
 def _project_id():
@@ -285,10 +287,42 @@ def _cleanup_session_dirs(session: dict) -> None:
                 pass
 
 
+def _reap_stale_sessions() -> None:
+    """Pop any session older than _SESSION_TTL_SECONDS out of _recording_sessions.
+    The scan+pop is synchronous and lock-protected but does no I/O, so it never
+    adds meaningful latency to the record_start/record_status call that triggers
+    it — even with many stale entries. The slow part (killing the recorder
+    process, removing its directories) runs on a throwaway thread so the
+    triggering request is never blocked on it. Exists because a client that
+    abandons a recording (closed tab, dropped connection) without ever calling
+    /record/stop would otherwise leak its capture_dir/harness_dir forever —
+    /record/status is deliberately read-only and never tears sessions down."""
+    now = time.time()
+    stale = []
+    with _sessions_lock:
+        for session_id in list(_recording_sessions.keys()):
+            session = _recording_sessions[session_id]
+            if now - session.get("created_at", now) > _SESSION_TTL_SECONDS:
+                stale.append(_recording_sessions.pop(session_id))
+
+    if not stale:
+        return
+
+    logger.info("_reap_stale_sessions: reaping %d abandoned recording session(s)", len(stale))
+
+    def _teardown_batch():
+        for session in stale:
+            _terminate_recorder(session)
+            _cleanup_session_dirs(session)
+
+    threading.Thread(target=_teardown_batch, daemon=True).start()
+
+
 @bp.route("/api/discover/record/start", methods=["POST"])
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
     try:
+        _reap_stale_sessions()
         session_id = str(uuid.uuid4())
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
@@ -319,6 +353,7 @@ def record_start():
                 "harness_dir": harness_dir,
                 "capture_dir": capture_dir,
                 "har_file": har_file,
+                "created_at": time.time(),
             }
 
         logger.info("record_start: session %s launched (pid %d)", session_id, proc.pid)
@@ -380,7 +415,11 @@ def record_stop():
 def record_status():
     """Poll recording session status. Read-only — does not tear down the
     session even once the browser process has exited, since /record/stop
-    still needs capture_dir/har_file intact to parse the HAR afterward."""
+    still needs capture_dir/har_file intact to parse the HAR afterward.
+    (Stale/abandoned sessions past the TTL are reaped as a side effect of
+    this call, via _reap_stale_sessions — that's a different case from a
+    live session's process having exited.)"""
+    _reap_stale_sessions()
     session_id = request.args.get("session_id", "")
     with _sessions_lock:
         session = _recording_sessions.get(session_id)
