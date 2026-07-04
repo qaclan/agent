@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 import threading
 import uuid
 from flask import Blueprint, request, jsonify
@@ -244,6 +245,46 @@ def discover_curl_preview():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _terminate_recorder(session: dict) -> None:
+    """Stop the recorder browser process if still running. Safe to call on
+    an already-dead proc. Must run before reading its HAR file so the
+    capture is fully flushed (ctx.close() in the harness writes the HAR)."""
+    import subprocess, sys
+    proc = session.get("proc")
+    stop_file = session.get("stop_file", "")
+    if not proc:
+        return
+    try:
+        if sys.platform == "win32" and stop_file:
+            try:
+                open(stop_file, "w").close()
+            except OSError:
+                proc.terminate()  # sentinel creation failed — fall back to SIGTERM
+        else:
+            proc.terminate()
+        proc.wait(timeout=8 if sys.platform == "win32" else 5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()  # reap zombie — must follow kill()
+    finally:
+        if stop_file and os.path.exists(stop_file):
+            try:
+                os.unlink(stop_file)
+            except OSError:
+                pass
+
+
+def _cleanup_session_dirs(session: dict) -> None:
+    """Remove a session's capture/harness temp directories, if present."""
+    import shutil
+    for d in (session.get("capture_dir"), session.get("harness_dir")):
+        if d and os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+            except Exception:
+                pass
+
+
 @bp.route("/api/discover/record/start", methods=["POST"])
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
@@ -293,8 +334,7 @@ def record_start():
 @bp.route("/api/discover/record/stop", methods=["POST"])
 def record_stop():
     """Stop recording session, parse captured HAR, return request list."""
-    import os, shutil, subprocess, sys
-    session_dirs: list[str] = []
+    session = None
     try:
         data = request.get_json(force=True) or {}
         session_id = data.get("session_id", "")
@@ -304,29 +344,7 @@ def record_stop():
         if not session:
             return jsonify({"ok": False, "error": f"Session {session_id} not found"}), 404
 
-        session_dirs = [d for d in (session.get("capture_dir"), session.get("harness_dir")) if d]
-
-        proc = session.get("proc")
-        stop_file = session.get("stop_file", "")
-        if proc:
-            try:
-                if sys.platform == "win32" and stop_file:
-                    try:
-                        open(stop_file, "w").close()
-                    except OSError:
-                        proc.terminate()  # sentinel creation failed — fall back to SIGTERM
-                else:
-                    proc.terminate()
-                proc.wait(timeout=8 if sys.platform == "win32" else 5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()  # reap zombie — must follow kill()
-            finally:
-                if stop_file and os.path.exists(stop_file):
-                    try:
-                        os.unlink(stop_file)
-                    except OSError:
-                        pass
+        _terminate_recorder(session)
 
         har_file = session.get("har_file", "")
         requests_list = []
@@ -334,7 +352,14 @@ def record_stop():
             try:
                 with open(har_file) as hf:
                     har_json = json.load(hf)
-                from cli.api_discovery.har_parser import parse_har
+                from cli.api_discovery.har_parser import parse_har, merge_multipart_postdata
+                sidecar_file = har_file + ".multipart.json"
+                if os.path.exists(sidecar_file):
+                    try:
+                        with open(sidecar_file) as sf:
+                            merge_multipart_postdata(har_json, json.load(sf))
+                    except Exception as e:
+                        logger.warning("record_stop: multipart sidecar merge failed: %s", e)
                 requests_list = parse_har(har_json)
             except Exception as e:
                 logger.warning("record_stop: HAR parse failed (partial capture?): %s", e)
@@ -347,12 +372,8 @@ def record_stop():
         logger.exception("record_stop")
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        for d in session_dirs:
-            if os.path.exists(d):
-                try:
-                    shutil.rmtree(d)
-                except Exception:
-                    pass
+        if session:
+            _cleanup_session_dirs(session)
 
 
 @bp.route("/api/discover/record/status", methods=["GET"])
