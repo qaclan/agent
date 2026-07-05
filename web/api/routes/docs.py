@@ -82,6 +82,18 @@ def delete_doc(entry_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/docs", methods=["DELETE"])
+def delete_all_docs():
+    try:
+        deleted = _repo.delete_all(_project_id())
+        return jsonify({"ok": True, "deleted": deleted})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("delete_all_docs")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/docs/export/openapi", methods=["GET"])
 def export_openapi():
     try:

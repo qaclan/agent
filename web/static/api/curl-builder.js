@@ -86,8 +86,16 @@ export function buildCurlCommand(reqState, opts = {}) {
     (reqState.formRows || []).filter(r => r.enabled !== false && r.key).forEach(r =>
       lines.push(`--data-urlencode ${_shQuote(`${r.key}=${r.value ?? ''}`)}`));
   } else if (bodyType === 'multipart') {
-    (reqState.formRows || []).filter(r => r.enabled !== false && r.key).forEach(r =>
-      lines.push(`-F ${_shQuote(`${r.key}=${r.value ?? ''}`)}`));
+    (reqState.formRows || []).filter(r => r.enabled !== false && r.key).forEach(r => {
+      if (r.is_file) {
+        // No local filesystem path to reference — emit a placeholder the
+        // user swaps for a real path, matching the originally captured name/type.
+        const typePart = r.content_type ? `;type=${r.content_type}` : '';
+        lines.push(`-F ${_shQuote(`${r.key}=@/path/to/${r.filename || 'file'}${typePart}`)}`);
+      } else {
+        lines.push(`-F ${_shQuote(`${r.key}=${r.value ?? ''}`)}`);
+      }
+    });
   }
 
   const curlCommand = lines.join(' \\\n  ');

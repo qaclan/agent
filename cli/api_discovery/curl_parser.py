@@ -1,14 +1,50 @@
 from __future__ import annotations
+import base64
 import json
 import logging
+import os
 import re
 import shlex
 from urllib.parse import urlsplit, urlunsplit, parse_qsl
+
+from cli.api_discovery.har_parser import parse_multipart_text
 
 logger = logging.getLogger("qaclan.curl_parser")
 
 _CONTINUATION_RE = re.compile(r"[\\^]\s*\r?\n")
 _LEADING_PROMPT_RE = re.compile(r"^[\$>]\s*")
+# Bash ANSI-C quoting: $'...\r\n...'. shlex has no notion of this — left alone,
+# the literal '$' stays and escapes like \r\n never become real bytes. Browsers'
+# "Copy as cURL" commonly emits --data-raw $'...' for multipart bodies, so this
+# must be expanded to a plain-quoted token before shlex.split ever sees it.
+_ANSI_C_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'")
+_ANSI_C_ESCAPES = {
+    "n": "\n", "r": "\r", "t": "\t", "\\": "\\", "'": "'", '"': '"',
+    "a": "\a", "b": "\b", "f": "\f", "v": "\v", "0": "\0",
+}
+
+
+def _decode_ansi_c(s: str) -> str:
+    out = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) and s[i + 1] in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[s[i + 1]])
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _expand_ansi_c_quotes(command: str) -> str:
+    def repl(m):
+        decoded = _decode_ansi_c(m.group(1))
+        # Re-quote as a normal single-quoted token; embedded literal quotes use
+        # the standard '\'' shell idiom so shlex still parses it as one token.
+        return "'" + decoded.replace("'", "'\\''") + "'"
+    return _ANSI_C_RE.sub(repl, command)
 
 _DATA_FLAGS = {"-d", "--data", "--data-raw", "--data-binary", "--data-ascii", "--data-urlencode"}
 _IGNORED_FLAGS_NO_ARG = {
@@ -34,7 +70,7 @@ def _split_commands(text: str) -> list[str]:
 
 
 def _parse_one(command: str) -> dict | None:
-    tokens = shlex.split(command, posix=True)
+    tokens = shlex.split(_expand_ansi_c_quotes(command), posix=True)
     tokens = tokens[1:]  # drop leading 'curl'/'curl.exe'
 
     method = None
@@ -64,7 +100,38 @@ def _parse_one(command: str) -> dict | None:
             i += 1
             is_multipart = True
             key, _, val = tokens[i].partition("=")
-            form_rows.append({"key": key.strip(), "value": val.strip(), "enabled": True})
+            row = {"key": key.strip(), "enabled": True}
+            if val.startswith("@"):
+                # curl file-upload syntax: field=@/path/to/file;filename=x;type=y
+                # A shell-quoted arg like 'file=@"/a b/c.pdf"' keeps its inner
+                # double quotes literal once shlex strips the outer single
+                # quotes, so those must be peeled off by hand here.
+                file_ref, _, extra = val[1:].partition(";")
+                if len(file_ref) >= 2 and file_ref[0] == file_ref[-1] and file_ref[0] in "\"'":
+                    file_ref = file_ref[1:-1]
+                filename_override = None
+                type_override = None
+                for part in extra.split(";"):
+                    if part.startswith("filename="):
+                        filename_override = part[len("filename="):].strip()
+                    elif part.startswith("type="):
+                        type_override = part[len("type="):].strip()
+                row["filename"] = filename_override or os.path.basename(file_ref)
+                row["is_file"] = True
+                if type_override:
+                    row["content_type"] = type_override
+                try:
+                    with open(file_ref, "rb") as f:
+                        row["value"] = base64.b64encode(f.read()).decode("ascii")
+                except OSError:
+                    row["value"] = ""
+                    logger.warning(
+                        "curl_parser: could not read form file %r referenced by --form; "
+                        "imported field will have no content", file_ref,
+                    )
+            else:
+                row["value"] = val.strip()
+            form_rows.append(row)
         elif t in ("-u", "--user"):
             i += 1
             user = tokens[i]
@@ -99,6 +166,20 @@ def _parse_one(command: str) -> dict | None:
         username, _, password = user.partition(":")
         auth_type = "basic"
         auth_config = {"username": username, "password": password}
+
+    # Chrome/DevTools "Copy as cURL" emits multipart bodies as --data-raw with
+    # the literal MIME text (boundaries + headers) instead of -F flags. Detect
+    # that via the Content-Type header and decode it the same way HAR bodies are.
+    if not is_multipart and raw_data_parts:
+        content_type_header = next(
+            (h["value"] for h in headers if h["key"].lower() == "content-type"), ""
+        )
+        if "multipart/form-data" in content_type_header.lower():
+            parsed_fields = parse_multipart_text(content_type_header, "".join(raw_data_parts))
+            if parsed_fields:
+                is_multipart = True
+                form_rows = parsed_fields
+                raw_data_parts = []
 
     body_type = None
     body = None

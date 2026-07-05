@@ -89,12 +89,13 @@ def _redact_sensitive(key: str, value: str) -> str:
     return value
 
 
-def _parse_multipart_text(mime: str, text: str) -> list[dict]:
+def parse_multipart_text(mime: str, text: str) -> list[dict]:
     """Manually split a raw multipart/form-data body into fields.
 
     Needed because Playwright's HAR recorder always leaves postData.params
     empty for multipart requests (only urlencoded bodies get params filled
-    in) — the raw text is the only place the field data survives.
+    in) — the raw text is the only place the field data survives. Also
+    reused by curl_parser for --data-raw multipart bodies (no -F flags).
     """
     m = re.search(r'boundary=("?)([^;"]+)\1', mime)
     if not m or not text:
@@ -102,8 +103,20 @@ def _parse_multipart_text(mime: str, text: str) -> list[dict]:
     delimiter = "--" + m.group(2)
     fields = []
     for chunk in text.split(delimiter):
-        chunk = chunk.strip("\r\n")
-        if not chunk or chunk == "--":
+        # Strip exactly one leading newline (right after the boundary marker
+        # line) and one trailing newline (mandatory framing before the next
+        # boundary, present even when the part body is empty — e.g. a file
+        # field with no captured bytes). A blanket strip("\r\n") would eat the
+        # header/body blank-line separator too and drop empty-bodied parts.
+        if chunk.startswith("\r\n"):
+            chunk = chunk[2:]
+        elif chunk.startswith("\n"):
+            chunk = chunk[1:]
+        if chunk.endswith("\r\n"):
+            chunk = chunk[:-2]
+        elif chunk.endswith("\n"):
+            chunk = chunk[:-1]
+        if not chunk or chunk.startswith("--"):
             continue
         if "\r\n\r\n" in chunk:
             header_blob, value = chunk.split("\r\n\r\n", 1)
@@ -116,12 +129,54 @@ def _parse_multipart_text(mime: str, text: str) -> list[dict]:
             continue
         name = name_m.group(1)
         value = value.rstrip("\r\n")
-        field = {"key": name, "value": _redact_sensitive(name, value), "enabled": True}
         filename_m = re.search(r'filename="([^"]*)"', header_blob)
         if filename_m:
-            field["filename"] = filename_m.group(1)
+            # File-part content is stored base64-encoded so it round-trips
+            # identically whether it came from a capture (this path) or a
+            # real file attached later in the request editor — the runner
+            # decodes base64 for any field marked is_file.
+            encoded = base64.b64encode(value.encode("utf-8", errors="surrogateescape")).decode("ascii")
+            field = {"key": name, "value": encoded, "enabled": True, "filename": filename_m.group(1), "is_file": True}
+            ct_m = re.search(r'Content-Type:\s*([^\r\n]+)', header_blob, re.IGNORECASE)
+            if ct_m:
+                field["content_type"] = ct_m.group(1).strip()
+        else:
+            field = {"key": name, "value": _redact_sensitive(name, value), "enabled": True}
         fields.append(field)
     return fields
+
+
+def merge_multipart_postdata(har_json: dict, sidecar_entries: list[dict]) -> None:
+    """Patch HAR entries in place with postData captured out-of-band via CDP
+    Network.getRequestPostData.
+
+    Playwright's HAR export never populates postData for multipart/form-data
+    request bodies — Chrome's Network.requestWillBeSent omits it for
+    multipart requests, and Playwright's HAR writer doesn't fall back to the
+    CDP Network.getRequestPostData command that can actually fetch it. Our
+    recording harness captures that separately into `sidecar_entries`; this
+    matches each one back to its HAR entry by (method, url), in the order
+    both occurred, since HAR carries no CDP requestId to correlate on.
+    """
+    if not sidecar_entries:
+        return
+    queues: dict = {}
+    for item in sidecar_entries:
+        if item.get("postData") is None:
+            continue
+        key = (item.get("method"), item.get("url"))
+        queues.setdefault(key, []).append(item)
+
+    for entry in har_json.get("log", {}).get("entries", []):
+        req = entry.get("request", {})
+        existing = req.get("postData") or {}
+        if existing.get("text"):
+            continue
+        queue = queues.get((req.get("method"), req.get("url")))
+        if not queue:
+            continue
+        item = queue.pop(0)
+        req["postData"] = {"mimeType": item.get("mimeType", ""), "text": item.get("postData", ""), "params": []}
 
 
 def parse_har(har_json: dict) -> list[dict]:
@@ -175,12 +230,21 @@ def parse_har(har_json: dict) -> list[dict]:
                 body = text
             elif "multipart" in mime:
                 body_type = "multipart"
-                params_list = [
-                    {"key": p.get("name", ""), "value": _redact_sensitive(p.get("name", ""), p.get("value", "")), "enabled": True}
-                    for p in post_data.get("params", [])
-                ]
+                params_list = []
+                for p in post_data.get("params", []):
+                    name = p.get("name", "")
+                    file_name = p.get("fileName")
+                    if file_name:
+                        raw_value = p.get("value", "")
+                        encoded = base64.b64encode(raw_value.encode("utf-8", errors="surrogateescape")).decode("ascii")
+                        field = {"key": name, "value": encoded, "enabled": True, "filename": file_name, "is_file": True}
+                        if p.get("contentType"):
+                            field["content_type"] = p.get("contentType")
+                    else:
+                        field = {"key": name, "value": _redact_sensitive(name, p.get("value", "")), "enabled": True}
+                    params_list.append(field)
                 if not params_list:
-                    params_list = _parse_multipart_text(mime, text)
+                    params_list = parse_multipart_text(mime, text)
                 body = json.dumps(params_list)
             elif "form" in mime:
                 body_type = "form"
