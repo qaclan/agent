@@ -493,7 +493,7 @@ export function renderDocsView(container) {
       empty.innerHTML = '<p style="font-size:13px;color:var(--text-muted);margin:0 0 6px;">No endpoints documented yet.</p><p style="font-size:12px;color:var(--text-disabled);margin:0;">Record APIs with "Include in Documentation" checked.</p>';
       listScroll.appendChild(empty);
       listPanel.appendChild(listScroll);
-      _addExportFooter();
+      _addExportFooter(0);
       return;
     }
 
@@ -540,9 +540,27 @@ export function renderDocsView(container) {
         pathEl.style.cssText = 'font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;transition:color .1s;';
         pathEl.textContent = entry.path_pattern;
         pathEl.title = entry.path_pattern;
-        item.appendChild(badge); item.appendChild(pathEl);
-        item.onmouseenter = () => { if (item !== _activeItem) item.style.background = 'var(--bg-elevated)'; };
-        item.onmouseleave = () => { if (item !== _activeItem) item.style.background = ''; };
+        const delIcon = document.createElement('span');
+        delIcon.textContent = '✕';
+        delIcon.title = 'Delete endpoint';
+        delIcon.style.cssText = 'flex-shrink:0;font-size:11px;color:var(--text-disabled);padding:2px 4px;border-radius:4px;visibility:hidden;';
+        item.appendChild(badge); item.appendChild(pathEl); item.appendChild(delIcon);
+        item.onmouseenter = () => { if (item !== _activeItem) item.style.background = 'var(--bg-elevated)'; delIcon.style.visibility = ''; };
+        item.onmouseleave = () => { if (item !== _activeItem) item.style.background = ''; delIcon.style.visibility = 'hidden'; };
+        delIcon.onmouseenter = (e) => { e.stopPropagation(); delIcon.style.color = 'var(--danger)'; };
+        delIcon.onmouseleave = (e) => { e.stopPropagation(); delIcon.style.color = 'var(--text-disabled)'; };
+        delIcon.onclick = async (e) => {
+          e.stopPropagation();
+          const confirmed = await window._confirmDialog(
+            'Remove this endpoint?',
+            `${entry.method} ${entry.path_pattern} will be removed from API documentation. Recordings are kept.`
+          );
+          if (!confirmed) return;
+          const r = await window.api('DELETE', `/docs/${entry.id}`);
+          if (r.ok === false) { await window._alertDialog('Error: ' + r.error); return; }
+          if (_activeItem === item) _showEmptyState(detailPanel);
+          _load();
+        };
         item.onclick = () => _activateItem(item, entry);
         groupEl.appendChild(item);
       }
@@ -550,12 +568,12 @@ export function renderDocsView(container) {
     }
 
     listPanel.appendChild(listScroll);
-    _addExportFooter();
+    _addExportFooter(entries.length);
   }
 
-  function _addExportFooter() {
+  function _addExportFooter(count) {
     const footer = document.createElement('div');
-    footer.style.cssText = 'flex-shrink:0;border-top:1px solid var(--border-default);padding:10px 12px;';
+    footer.style.cssText = 'flex-shrink:0;border-top:1px solid var(--border-default);padding:10px 12px;display:flex;flex-direction:column;gap:6px;';
     const btn = document.createElement('a');
     btn.href = '/api/docs/export/openapi';
     btn.download = 'openapi.yaml';
@@ -563,6 +581,24 @@ export function renderDocsView(container) {
     btn.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:6px;width:100%;box-sizing:border-box;text-decoration:none;';
     btn.innerHTML = '&#8659; Export OpenAPI YAML';
     footer.appendChild(btn);
+
+    if (count > 0) {
+      const delAllBtn = _mkBtn('Delete All', 'btn btn-sm btn-ghost');
+      delAllBtn.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:6px;width:100%;box-sizing:border-box;color:var(--danger);';
+      delAllBtn.onclick = async () => {
+        const confirmed = await window._confirmDialog(
+          'Delete all API docs?',
+          `All ${count} documented endpoint${count !== 1 ? 's' : ''} will be permanently removed. Recordings are kept.`
+        );
+        if (!confirmed) return;
+        const r = await window.api('DELETE', '/docs');
+        if (r.ok === false) { await window._alertDialog('Error: ' + r.error); return; }
+        _showEmptyState(detailPanel);
+        _load();
+      };
+      footer.appendChild(delAllBtn);
+    }
+
     listPanel.appendChild(footer);
   }
 

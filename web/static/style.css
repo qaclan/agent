@@ -1724,6 +1724,21 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   border-color: var(--primary, #5C6BC0) !important;
   font-family: var(--font-mono);
 }
+.kv-value--var-ok {
+  background: var(--success-bg) !important;
+  border-color: var(--success-border) !important;
+  font-family: var(--font-mono);
+}
+.kv-value--var-missing {
+  background: var(--danger-bg) !important;
+  border-color: var(--danger-border) !important;
+  font-family: var(--font-mono);
+}
+.kv-value--file {
+  background: color-mix(in srgb, var(--text-muted, #888) 10%, transparent) !important;
+  font-style: italic;
+  color: var(--text-muted);
+}
 
 /* Response panel */
 .response-panel {

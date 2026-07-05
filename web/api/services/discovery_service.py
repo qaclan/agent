@@ -9,6 +9,47 @@ logger = logging.getLogger("qaclan.discovery_service")
 _col_repo = CollectionRepo()
 _req_repo = RequestRepo()
 
+# Embedded (as literal source, not imported) in the generated recording
+# harnesses below. Playwright's own HAR export never captures postData for
+# multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it,
+# and Playwright's HAR writer doesn't fall back to the CDP command that can
+# actually fetch it (Network.getRequestPostData). This installs that fallback
+# via a raw CDP session and stashes results in a sidecar file next to the HAR,
+# merged back in by cli.api_discovery.har_parser.merge_multipart_postdata.
+_MULTIPART_CDP_CAPTURE_SRC = (
+    "async def _install_multipart_capture(ctx, page):\n"
+    "    cdp = await ctx.new_cdp_session(page)\n"
+    "    await cdp.send('Network.enable')\n"
+    "    captured = []\n"
+    "    def on_request(event):\n"
+    "        req = event.get('request', {})\n"
+    "        ct = ''\n"
+    "        for k, v in (req.get('headers') or {}).items():\n"
+    "            if k.lower() == 'content-type':\n"
+    "                ct = v\n"
+    "                break\n"
+    "        if req.get('hasPostData') and 'multipart/form-data' in ct.lower():\n"
+    "            request_id = event.get('requestId')\n"
+    "            async def fetch_body():\n"
+    "                try:\n"
+    "                    res = await cdp.send('Network.getRequestPostData', {'requestId': request_id})\n"
+    "                    captured.append({'url': req.get('url'), 'method': req.get('method'), 'postData': res.get('postData'), 'mimeType': ct})\n"
+    "                except Exception:\n"
+    "                    pass\n"
+    "            asyncio.create_task(fetch_body())\n"
+    "    cdp.on('Network.requestWillBeSent', on_request)\n"
+    "    return captured\n"
+    "\n"
+    "def _write_multipart_sidecar(captured):\n"
+    "    if not captured:\n"
+    "        return\n"
+    "    try:\n"
+    "        with open(os.environ['QACLAN_HAR_PATH'] + '.multipart.json', 'w') as sf:\n"
+    "            json.dump(captured, sf)\n"
+    "    except Exception:\n"
+    "        pass\n"
+)
+
 
 def _save_requests(project_id: str, requests: list[dict], collection_id: str | None = None) -> int:
     """Save a list of parsed request dicts to the DB. Returns count saved."""
@@ -154,12 +195,15 @@ class DiscoveryService:
         import os, tempfile, uuid
         stop_file = os.path.join(tempfile.gettempdir(), f"qaclan_stop_{uuid.uuid4().hex}.flag")
         harness = (
-            "import asyncio, os, signal, sys, traceback\n"
+            "import asyncio, json, os, signal, sys, traceback\n"
             "from playwright.async_api import async_playwright\n"
+            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
+            "        page = await ctx.new_page()\n"
+            "        captured = await _install_multipart_capture(ctx, page)\n"
             # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
             "        if sys.platform != 'win32':\n"
             "            stop = asyncio.Event()\n"
@@ -167,17 +211,19 @@ class DiscoveryService:
             "            loop.add_signal_handler(signal.SIGTERM, stop.set)\n"
             "            loop.add_signal_handler(signal.SIGINT, stop.set)\n"
             "            browser.on('disconnected', lambda _: stop.set())\n"
-            "        await (await ctx.new_page()).goto(os.environ['QACLAN_START_URL'])\n"
+            "        await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        if sys.platform != 'win32':\n"
             "            await stop.wait()\n"
             "        else:\n"
             "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
             "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
             "                await asyncio.sleep(0.3)\n"
+            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        try:\n"
             "            await ctx.close()\n"
             "        except Exception:\n"
             "            pass\n"
+            "        _write_multipart_sidecar(captured)\n"
             "try:\n"
             "    asyncio.run(main())\n"
             "except Exception:\n"
@@ -192,15 +238,20 @@ class DiscoveryService:
     def record_sync(self, url: str, har_path: str) -> None:
         """Blocking. Returns when user closes browser. HAR flushed via ctx.close()."""
         harness = (
-            "import asyncio, os\n"
+            "import asyncio, json, os\n"
             "from playwright.async_api import async_playwright\n"
+            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
-            "        await (await ctx.new_page()).goto(os.environ['QACLAN_START_URL'])\n"
+            "        page = await ctx.new_page()\n"
+            "        captured = await _install_multipart_capture(ctx, page)\n"
+            "        await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        await browser.wait_for_event('disconnected')\n"
+            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        await ctx.close()\n"
+            "        _write_multipart_sidecar(captured)\n"
             "asyncio.run(main())\n"
         )
         self._spawn_harness(url, har_path, harness, blocking=True)
@@ -232,7 +283,12 @@ class DiscoveryService:
                 shutil.rmtree(d, ignore_errors=True)
         else:
             log_path = os.path.join(d, "record.log")
-            with open(log_path, "w") as lf:
-                proc = subprocess.Popen(cmd, cwd=d, env=env, stdout=lf, stderr=lf)
+            try:
+                with open(log_path, "w") as lf:
+                    proc = subprocess.Popen(cmd, cwd=d, env=env, stdout=lf, stderr=lf)
+            except Exception:
+                import shutil
+                shutil.rmtree(d, ignore_errors=True)
+                raise
             logger.info("record harness launched pid=%d log=%s", proc.pid, log_path)
             return proc, d

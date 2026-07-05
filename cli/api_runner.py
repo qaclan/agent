@@ -16,7 +16,7 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(password|secret|token|authorization|api.?key|auth)", re.IGNORECASE
 )
 _VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
-_PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
+_PATH_PARAM_RE = re.compile(r"\{(?!\{)([^{}]+)\}(?!\})")
 _CHARSET_RE = re.compile(r"charset=([\w-]+)", re.IGNORECASE)
 
 
@@ -466,11 +466,23 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 for item in form_items:
                     if not item.get("enabled", True):
                         continue
-                    value = resolve_vars(item.get("value", ""), env_vars, state)
                     filename = item.get("filename")
-                    # httpx: (filename, content) forces multipart encoding even for
-                    # plain text fields; filename=None omits the filename attribute.
-                    files[item["key"]] = (filename, value.encode())
+                    content_type = item.get("content_type")
+                    if item.get("is_file") and item.get("value"):
+                        # File fields carry their actual bytes base64-encoded
+                        # (attached via the editor's file picker, or imported
+                        # from a source that captured real content).
+                        try:
+                            content = base64.b64decode(item["value"])
+                        except (ValueError, TypeError):
+                            content = b""
+                    else:
+                        value = resolve_vars(item.get("value", ""), env_vars, state)
+                        content = value.encode()
+                    # httpx: (filename, content, content_type) forces multipart
+                    # encoding even for plain text fields; filename=None omits
+                    # the filename attribute; content_type=None lets httpx guess.
+                    files[item["key"]] = (filename, content, content_type)
             except (ValueError, TypeError):
                 files = {}
             # A captured/stale Content-Type carries the original boundary, which

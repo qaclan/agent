@@ -1,7 +1,9 @@
 from __future__ import annotations
 import json
 import logging
+import os
 import threading
+import time
 import uuid
 from flask import Blueprint, request, jsonify
 from cli.config import get_active_project_id
@@ -14,6 +16,7 @@ _svc = DiscoveryService()
 # In-memory store for recording sessions: {session_id: {"status": "recording"|"stopped", "requests": [], "proc": proc}}
 _recording_sessions: dict = {}
 _sessions_lock = threading.Lock()
+_SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 hours — long enough a legit in-progress recording is never mistaken for abandoned
 
 
 def _project_id():
@@ -244,10 +247,82 @@ def discover_curl_preview():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _terminate_recorder(session: dict) -> None:
+    """Stop the recorder browser process if still running. Safe to call on
+    an already-dead proc. Must run before reading its HAR file so the
+    capture is fully flushed (ctx.close() in the harness writes the HAR)."""
+    import subprocess, sys
+    proc = session.get("proc")
+    stop_file = session.get("stop_file", "")
+    if not proc:
+        return
+    try:
+        if sys.platform == "win32" and stop_file:
+            try:
+                open(stop_file, "w").close()
+            except OSError:
+                proc.terminate()  # sentinel creation failed — fall back to SIGTERM
+        else:
+            proc.terminate()
+        proc.wait(timeout=8 if sys.platform == "win32" else 5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()  # reap zombie — must follow kill()
+    finally:
+        if stop_file and os.path.exists(stop_file):
+            try:
+                os.unlink(stop_file)
+            except OSError:
+                pass
+
+
+def _cleanup_session_dirs(session: dict) -> None:
+    """Remove a session's capture/harness temp directories, if present."""
+    import shutil
+    for d in (session.get("capture_dir"), session.get("harness_dir")):
+        if d and os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+            except Exception:
+                pass
+
+
+def _reap_stale_sessions() -> None:
+    """Pop any session older than _SESSION_TTL_SECONDS out of _recording_sessions.
+    The scan+pop is synchronous and lock-protected but does no I/O, so it never
+    adds meaningful latency to the record_start/record_status call that triggers
+    it — even with many stale entries. The slow part (killing the recorder
+    process, removing its directories) runs on a throwaway thread so the
+    triggering request is never blocked on it. Exists because a client that
+    abandons a recording (closed tab, dropped connection) without ever calling
+    /record/stop would otherwise leak its capture_dir/harness_dir forever —
+    /record/status is deliberately read-only and never tears sessions down."""
+    now = time.time()
+    stale = []
+    with _sessions_lock:
+        for session_id in list(_recording_sessions.keys()):
+            session = _recording_sessions[session_id]
+            if now - session.get("created_at", now) > _SESSION_TTL_SECONDS:
+                stale.append(_recording_sessions.pop(session_id))
+
+    if not stale:
+        return
+
+    logger.info("_reap_stale_sessions: reaping %d abandoned recording session(s)", len(stale))
+
+    def _teardown_batch():
+        for session in stale:
+            _terminate_recorder(session)
+            _cleanup_session_dirs(session)
+
+    threading.Thread(target=_teardown_batch, daemon=True).start()
+
+
 @bp.route("/api/discover/record/start", methods=["POST"])
 def record_start():
     """Launch a Playwright browser in record mode, capture XHR traffic."""
     try:
+        _reap_stale_sessions()
         session_id = str(uuid.uuid4())
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
@@ -278,6 +353,7 @@ def record_start():
                 "harness_dir": harness_dir,
                 "capture_dir": capture_dir,
                 "har_file": har_file,
+                "created_at": time.time(),
             }
 
         logger.info("record_start: session %s launched (pid %d)", session_id, proc.pid)
@@ -293,8 +369,7 @@ def record_start():
 @bp.route("/api/discover/record/stop", methods=["POST"])
 def record_stop():
     """Stop recording session, parse captured HAR, return request list."""
-    import os, shutil, subprocess, sys
-    session_dirs: list[str] = []
+    session = None
     try:
         data = request.get_json(force=True) or {}
         session_id = data.get("session_id", "")
@@ -304,29 +379,7 @@ def record_stop():
         if not session:
             return jsonify({"ok": False, "error": f"Session {session_id} not found"}), 404
 
-        session_dirs = [d for d in (session.get("capture_dir"), session.get("harness_dir")) if d]
-
-        proc = session.get("proc")
-        stop_file = session.get("stop_file", "")
-        if proc:
-            try:
-                if sys.platform == "win32" and stop_file:
-                    try:
-                        open(stop_file, "w").close()
-                    except OSError:
-                        proc.terminate()  # sentinel creation failed — fall back to SIGTERM
-                else:
-                    proc.terminate()
-                proc.wait(timeout=8 if sys.platform == "win32" else 5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()  # reap zombie — must follow kill()
-            finally:
-                if stop_file and os.path.exists(stop_file):
-                    try:
-                        os.unlink(stop_file)
-                    except OSError:
-                        pass
+        _terminate_recorder(session)
 
         har_file = session.get("har_file", "")
         requests_list = []
@@ -334,7 +387,14 @@ def record_stop():
             try:
                 with open(har_file) as hf:
                     har_json = json.load(hf)
-                from cli.api_discovery.har_parser import parse_har
+                from cli.api_discovery.har_parser import parse_har, merge_multipart_postdata
+                sidecar_file = har_file + ".multipart.json"
+                if os.path.exists(sidecar_file):
+                    try:
+                        with open(sidecar_file) as sf:
+                            merge_multipart_postdata(har_json, json.load(sf))
+                    except Exception as e:
+                        logger.warning("record_stop: multipart sidecar merge failed: %s", e)
                 requests_list = parse_har(har_json)
             except Exception as e:
                 logger.warning("record_stop: HAR parse failed (partial capture?): %s", e)
@@ -347,19 +407,19 @@ def record_stop():
         logger.exception("record_stop")
         return jsonify({"ok": False, "error": str(e)}), 500
     finally:
-        for d in session_dirs:
-            if os.path.exists(d):
-                try:
-                    shutil.rmtree(d)
-                except Exception:
-                    pass
+        if session:
+            _cleanup_session_dirs(session)
 
 
 @bp.route("/api/discover/record/status", methods=["GET"])
 def record_status():
     """Poll recording session status. Read-only — does not tear down the
     session even once the browser process has exited, since /record/stop
-    still needs capture_dir/har_file intact to parse the HAR afterward."""
+    still needs capture_dir/har_file intact to parse the HAR afterward.
+    (Stale/abandoned sessions past the TTL are reaped as a side effect of
+    this call, via _reap_stale_sessions — that's a different case from a
+    live session's process having exited.)"""
+    _reap_stale_sessions()
     session_id = request.args.get("session_id", "")
     with _sessions_lock:
         session = _recording_sessions.get(session_id)

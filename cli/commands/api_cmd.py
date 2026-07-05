@@ -257,6 +257,12 @@ def api_record(url):
         with open(har_file) as f:
             har_json = json.load(f)
 
+        sidecar_file = har_file + ".multipart.json"
+        if os.path.exists(sidecar_file):
+            from cli.api_discovery.har_parser import merge_multipart_postdata
+            with open(sidecar_file) as sf:
+                merge_multipart_postdata(har_json, json.load(sf))
+
         requests = parse_har(har_json)
         if not requests:
             console.print("[yellow]No API requests captured.[/yellow]")
