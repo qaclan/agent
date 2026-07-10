@@ -528,6 +528,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       value: val,
       isDark,
       onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+      getVarsList: () => _allVarsList,
     });
     if (!_cmEditor) {
       // CM unavailable — show fallback textarea instead
