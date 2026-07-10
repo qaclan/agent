@@ -65,7 +65,7 @@ text color is per-token and finer-grained.
 
 - Whole-field bg/border tint (`kv-value--var-ok`/`--var-missing`): **unchanged**, still applied by existing `var-style.js` logic, still only on headers/params/path-vars/auth (not URL bar).
 - New: the `{{name}}` substring itself renders in green (`var-tok--ok`) or red (`var-tok--missing`) text, replacing the current uniform (transparent-ish/default) text color for that substring only. Non-token text keeps the normal input text color.
-- Colors reuse the same `--success-border`/`--danger-border` custom properties as text color (already used as border colors elsewhere in `style.css`; no new color values invented).
+- Colors reuse the existing solid `--success` (`#10b981`) / `--danger` (`#ef4444`) custom properties as text color — the same ones `response-status-ok`/`response-status-err` and `record-status-badge` already use for readable colored text (`style.css`). NOT `--success-border`/`--danger-border` — those are low-alpha (10-28%) values meant for subtle backgrounds/borders and would be nearly invisible as text color. No new color values invented.
 
 ## Tooltip
 
