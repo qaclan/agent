@@ -213,6 +213,111 @@ existing popup surfaces (`var-picker.js`/`inline-var-drop.js` popups) —
 dark-on-light or light-on-dark background per theme, small padding,
 monospace value line, subtle shadow, `z-index` above other floating UI.
 
+## Scope amendment: Body, Pre/Post Scripts, Assertions
+
+The sections above (headers/params/path-vars/auth/URL bar) were the
+original scope. Adding three more sections from the request-details view
+(`request-editor-view.js`, sections switched ~line 175), none of which
+have any `{{var}}` exists/missing awareness today (confirmed by code
+search — inline-drop autocomplete exists on body/scripts, but no
+`applyVarStyle` anywhere near them; assertions have zero var-awareness of
+any kind, no imports from `var-style.js`/`inline-var-drop.js`/
+`var-picker.js`).
+
+These three are not structurally uniform, so each gets the technique that
+fits its actual DOM shape:
+
+### Assertions — `assertion-builder.js` (plain `<input>`s, easiest)
+
+`extraInput` (path/header-key, `assertion-builder.js:51-56`) and `valInput`
+(expected value, `:64-69`) are plain text inputs — same shape as auth
+fields. Both get `attachTokenOverlay(inp, getKnownVarNames)` (per-token
+text color + tooltip) directly; `valInput` additionally keeps the option
+of the whole-field bg tint via `applyVarStyle`, for parity with
+headers/params (mixed content is common in expected-value assertions).
+`createAssertionBuilder()` (called with no args today at
+`request-editor-view.js:325`) gains a `getKnownVarNames` option, threaded
+through the same way `key-value-table.js` already does it.
+
+### Pre-request / Post-response scripts — plain `<textarea>` (multi-line overlay)
+
+Both script panes are plain `<textarea>` (`request-editor-view.js:921-930`,
+built once in `makeScriptSection()` and reused by `makePreScriptSection`/
+`makePostScriptSection`). `attachTokenOverlay` is extended to support
+`<textarea>` as well as `<input>`: the overlay div switches to
+`white-space: pre-wrap` (matching textarea's line-wrapping instead of an
+input's single line), and scroll sync additionally tracks `scrollTop` (not
+just `scrollLeft`) since textareas scroll vertically. Token
+extraction/coloring logic (`tokenSpansIn`, span rendering, mousemove
+hit-testing) is unchanged — only the CSS/scroll-sync branch differs by
+element type. No CM6 migration for scripts in this pass — they stay plain
+textareas; this is the same technique already designed for inputs, just
+generalized to handle wrapped multi-line text.
+
+### Body — CM6 (primary path) + `bodyFallback` textarea (rare path)
+
+The raw/JSON body editor is CM6-based (`createJsonEditor`,
+`json-editor.js`) except when `window.CM6` fails to load, in which case
+`bodyFallback` (a plain `<textarea>`, `request-editor-view.js:387-390`)
+is shown instead. Both paths get highlighting, via two different
+mechanisms:
+
+- **`bodyFallback` (rare path):** same multi-line `attachTokenOverlay`
+  technique as the script textareas above — no new infrastructure.
+- **CM6-active (common path, real fix for the user's complaint):** the
+  vendored `web/static/vendor/codemirror/cm6.js` bundle currently only
+  exposes `EditorState, EditorView, Compartment, basicSetup, oneDark,
+  indentUnit, python, javascript, json, jsonParseLinter, linter,
+  lintGutter` on `window.CM6` (confirmed via `REBUILD.md` and the bundle's
+  own end-of-file export list) — no `Decoration`, `ViewPlugin`,
+  `StateEffect`, `RangeSetBuilder`, or `hoverTooltip`, which are the CM6
+  primitives required to color arbitrary text spans and show hover
+  tooltips inside a real CM6 editor. `REBUILD.md` already documents a
+  ready-made "entry.js with scaffolding" that adds exactly
+  `Decoration`/`ViewPlugin`/`ViewUpdate`/`RangeSetBuilder`/`Compartment` —
+  this spec additionally needs `hoverTooltip` added to that same import
+  list and `window.CM6` export object (one more line in the documented
+  process, not a new mechanism).
+
+  Once available, `json-editor.js` gets a new `ViewPlugin` that:
+  1. Scans the current document text for `{{name}}` tokens
+     (`tokenSpansIn`, reused from `var-style.js` — CM6's doc is plain text
+     under the hood, same regex applies) on every doc change
+     (`ViewUpdate.docChanged`).
+  2. Builds a `Decoration` set marking each token span with a CSS class
+     (`var-tok--ok`/`var-tok--missing`, same classes as the input overlay
+     — one shared CSS rule set, no duplication) via `Decoration.mark`.
+  3. Registers a `hoverTooltip` extension that, given a hovered position,
+     checks whether it falls inside a token's range and if so returns the
+     same tooltip content (name/value/group or "not defined") as the
+     shared tooltip used elsewhere — reusing the *content-building* logic
+     from `var-token-overlay.js` (extracted into a small shared function)
+     even though the *rendering* mechanism differs (CM6's own tooltip DOM
+     vs. the hand-rolled floating div used for plain inputs).
+  4. Is passed `getKnownVarNames` the same way `createJsonEditor` already
+     receives `onChange` — a new option on `createJsonEditor({...,
+     getKnownVarNames})`, re-evaluated on the async known-vars refresh via
+     a small `forceRedecorate` call (CM6's decoration `ViewPlugin` needs an
+     explicit dispatch to recompute when its *inputs* change without a doc
+     edit — same "refresh after async load" shape as `restyleAll()`
+     elsewhere).
+
+  **Graceful degradation:** `json-editor.js` feature-detects
+  `window.CM6.Decoration` before registering this extension; if the vendor
+  bundle hasn't been rebuilt yet (e.g. a dev environment that skipped the
+  rebuild step), the CM6 editor still works exactly as it does today,
+  just without token coloring — never a hard failure, matching the
+  existing `createJsonEditor` → `null` graceful-fallback pattern already
+  in this codebase.
+
+**Vendor bundle rebuild is in scope for this plan** (per your choice):
+one task follows `REBUILD.md`'s documented process (throwaway dir, pin
+`@codemirror/*@6` + `esbuild`, add `hoverTooltip` to the scaffolded
+`entry.js`, run `esbuild --bundle --format=iife --minify`, commit the
+regenerated `cm6.js`) — a one-time, repo-blessed process (the scaffold in
+`REBUILD.md` strongly suggests this was already anticipated), requiring
+npm registry access during implementation.
+
 ## Known limitations (accepted, not building)
 
 - Native text selection/copy on an overlaid input still functions
@@ -232,3 +337,18 @@ monospace value line, subtle shadow, `z-index` above other floating UI.
   at the moment of `mousemove`; a token that scrolled out of the input's
   visible viewport (long values) won't be hoverable until scrolled back
   into view — acceptable, matches how the visible text itself works.
+- Script/body textareas reuse the same per-keystroke, no-debounce overlay
+  rebuild; textarea values (script bodies) can be much longer than a
+  header/param value, so this is a slightly bigger re-render per keystroke
+  than the single-line case — acceptable at expected script sizes, not
+  optimized further in this pass.
+- The CM6-active body editor's hover tooltip uses CM6's own `hoverTooltip`
+  DOM/positioning (not the hand-rolled floating div used everywhere else),
+  so it will look visually distinct (CM6's default tooltip chrome) unless
+  explicitly restyled to match — restyling to match is a nice-to-have, not
+  required for correctness, and left to implementation-time judgment.
+- If the CM6 vendor bundle rebuild can't complete during implementation
+  (e.g. no npm registry access in the build environment), the plan's CM6
+  decoration task is blocked but everything else (inputs, textareas,
+  `bodyFallback`) ships independently — the feature-detection guard means
+  this is a soft dependency, not an all-or-nothing gate.
