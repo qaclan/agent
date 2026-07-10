@@ -11,6 +11,9 @@ import { applyVarStyle } from './var-style.js';
  *   getVars?: async () => [{key, value, is_secret?, group?}]
  *   fileFieldsEnabled?: bool — adds a per-row "attach file" control; rows with
  *     an attached file report {filename, content_type, is_file: true, value: base64}
+ *   onChange?: () => void — fired after a user-driven row mutation (key/value
+ *     edit, enable toggle, add, delete). NOT fired by setRows() — callers use
+ *     setRows() to reflect external state without re-triggering their own sync.
  */
 export function createKeyValueTable(options = {}) {
   const {
@@ -20,6 +23,7 @@ export function createKeyValueTable(options = {}) {
     getVars = async () => [],
     fileFieldsEnabled = false,
     getKnownVarNames = null,
+    onChange = null,
   } = options;
 
   function _fileToBase64(file) {
@@ -63,7 +67,7 @@ export function createKeyValueTable(options = {}) {
     addBtn.className = 'btn btn-xs btn-ghost';
     addBtn.style.marginTop = '6px';
     addBtn.textContent = '+ Add Row';
-    addBtn.onclick = () => _addRow({});
+    addBtn.onclick = () => { _addRow({}); if (onChange) onChange(); };
     wrapper.appendChild(addBtn);
   }
 
@@ -101,6 +105,7 @@ export function createKeyValueTable(options = {}) {
       cb.type = 'checkbox';
       cb.checked = data.enabled !== false;
       cb.className = 'kv-enabled';
+      if (onChange) cb.addEventListener('change', onChange);
       enabledTd.appendChild(cb);
     }
     tr.appendChild(enabledTd);
@@ -112,6 +117,7 @@ export function createKeyValueTable(options = {}) {
     keyInput.placeholder = placeholder.key;
     keyInput.value = data.key || '';
     keyInput.readOnly = readOnly;
+    if (!readOnly && onChange) keyInput.addEventListener('input', onChange);
     keyTd.appendChild(keyInput);
     tr.appendChild(keyTd);
 
@@ -128,6 +134,7 @@ export function createKeyValueTable(options = {}) {
 
     if (!readOnly) {
       valInput.addEventListener('input', () => _styleValueInput(valInput));
+      if (onChange) valInput.addEventListener('input', onChange);
       if (varPickerEnabled) _inlineDrop.watchInput(valInput);
     }
 
@@ -209,7 +216,7 @@ export function createKeyValueTable(options = {}) {
       delBtn.type = 'button';
       delBtn.className = 'btn btn-xs btn-ghost btn-icon-danger';
       delBtn.textContent = '×';
-      delBtn.onclick = () => tr.remove();
+      delBtn.onclick = () => { tr.remove(); if (onChange) onChange(); };
       delTd.appendChild(delBtn);
       tr.appendChild(delTd);
     }

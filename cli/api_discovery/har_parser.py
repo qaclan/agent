@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import re
+from urllib.parse import parse_qsl
 
 logger = logging.getLogger("qaclan.har_parser")
 
@@ -253,6 +254,14 @@ def parse_har(har_json: dict) -> list[dict]:
                     k = p.get("name", "")
                     v = _redact_sensitive(k, p.get("value", ""))
                     params_list.append({"key": k, "value": v, "enabled": True})
+                if not params_list and text:
+                    # Playwright's HAR recorder leaves postData.params empty for
+                    # urlencoded bodies too (not just multipart) — fall back to
+                    # decoding the raw text, same as the multipart branch above.
+                    params_list = [
+                        {"key": k, "value": _redact_sensitive(k, v), "enabled": True}
+                        for k, v in parse_qsl(text, keep_blank_values=True)
+                    ]
                 body = json.dumps(params_list)
             else:
                 body_type = "raw"

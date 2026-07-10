@@ -146,6 +146,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _setBodyType(parsed.body_type || 'none');
 
     _syncPathVars();
+    _syncUrlFromQueryParams();
     window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
   });
 
@@ -179,9 +180,62 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(tabBar);
   editor.appendChild(sectionContent);
 
+  // ── URL helpers: split into path / query / hash, shared by param + path-var sync ──
+  function _splitUrl(raw) {
+    const hashIdx = raw.indexOf('#');
+    const hash = hashIdx >= 0 ? raw.slice(hashIdx) : '';
+    const beforeHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+    const qIdx = beforeHash.indexOf('?');
+    const query = qIdx >= 0 ? beforeHash.slice(qIdx) : '';
+    const path = qIdx >= 0 ? beforeHash.slice(0, qIdx) : beforeHash;
+    return { path, query, hash };
+  }
+
+  function _stripQuery(raw) {
+    const { path, hash } = _splitUrl(raw);
+    return path + hash;
+  }
+
+  // Query string in the URL bar is a display convenience, not a wire value —
+  // the resolved request is built server-side from the params table. Only
+  // escape the chars that are structurally significant to our own & / =
+  // splitting, so {{VAR}} tokens stay readable instead of percent-encoded.
+  function _decodeQueryPart(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
+  function _encodeQueryPart(s) { return String(s).replace(/[&=#%]/g, c => encodeURIComponent(c)); }
+
+  function _parseQueryString(qs) {
+    if (!qs) return [];
+    return qs.split('&').filter(Boolean).map(pair => {
+      const eq = pair.indexOf('=');
+      const rawKey = eq >= 0 ? pair.slice(0, eq) : pair;
+      const rawVal = eq >= 0 ? pair.slice(eq + 1) : '';
+      return { key: _decodeQueryPart(rawKey), value: _decodeQueryPart(rawVal), enabled: true };
+    });
+  }
+
+  function _buildQueryString(rows) {
+    return rows.filter(r => r.key && r.enabled !== false)
+      .map(r => `${_encodeQueryPart(r.key)}=${_encodeQueryPart(r.value || '')}`)
+      .join('&');
+  }
+
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const paramsTable = createKeyValueTable({
+    placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    onChange: () => _syncUrlFromQueryParams(),
+  });
   paramsTable.setRows(r.params || []);
+
+  function _syncQueryParamsFromUrl() {
+    const { query } = _splitUrl(urlInput.value);
+    paramsTable.setRows(_parseQueryString(query.startsWith('?') ? query.slice(1) : query));
+  }
+
+  function _syncUrlFromQueryParams() {
+    const { path, hash } = _splitUrl(urlInput.value);
+    const qs = _buildQueryString(paramsTable.getRows());
+    urlInput.value = path + (qs ? '?' + qs : '') + hash;
+  }
 
   const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   headersTable.setRows(r.headers || []);
@@ -195,7 +249,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _collectionAuth = null;
 
   // ── Path Variables ──
-  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const pathVarsTable = createKeyValueTable({
+    placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    onChange: () => _syncUrlFromPathVars(),
+  });
   const pathVarsSection = document.createElement('div');
   {
     const hdr = document.createElement('div');
@@ -203,12 +260,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     hdr.textContent = 'Path Variables';
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = 'Values for {param} segments in the URL. Supports {{VAR}} syntax.';
+    hint.textContent = 'Synced with {param} segments in the URL — renaming/adding/removing a row updates the URL too. Values support {{VAR}} syntax.';
     pathVarsSection.appendChild(hdr);
     pathVarsSection.appendChild(hint);
     pathVarsSection.appendChild(pathVarsTable.el);
   }
-  pathVarsSection.style.display = 'none';
 
   const queryParamsHdr = document.createElement('div');
   queryParamsHdr.style.cssText = 'font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:12px 0 4px;';
@@ -221,11 +277,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const _storedPathParams = r.path_params || [];
 
+  // Matches single-brace {param} segments, excluding any brace that's part of
+  // a {{VAR}} token (even a malformed one missing its closing brace) — the
+  // lookbehind rejects an opening `{` immediately preceded by another `{`.
+  const PATH_VAR_RE = /(?<!\{)\{(?!\{)([^{}]+)\}(?!\})/g;
+  let _lastPathKeys = [];
+
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(/\{(?!\{)([^{}]+)\}(?!\})/g)].map(m => m[1]);
+    const matches = [...urlInput.value.matchAll(PATH_VAR_RE)].map(m => m[1]);
     const keys = [...new Set(matches)];
-    if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
-    pathVarsSection.style.display = '';
+    _lastPathKeys = keys;
     const current = {};
     pathVarsTable.getRows().forEach(row => { current[row.key] = row.value; });
     const stored = {};
@@ -233,8 +294,33 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     pathVarsTable.setRows(keys.map(key => ({ key, value: current[key] ?? stored[key] ?? '', enabled: true })));
   }
 
-  urlInput.addEventListener('input', _syncPathVars);
+  function _syncUrlFromPathVars() {
+    const newKeys = pathVarsTable.getRows().filter(row => row.key).map(row => row.key);
+    const { path, query, hash } = _splitUrl(urlInput.value);
+    let newPath = path;
+
+    if (newKeys.length === _lastPathKeys.length) {
+      _lastPathKeys.forEach((oldKey, i) => {
+        const newKey = newKeys[i];
+        if (newKey && newKey !== oldKey) newPath = newPath.replace(`{${oldKey}}`, `{${newKey}}`);
+      });
+    } else if (newKeys.length < _lastPathKeys.length) {
+      _lastPathKeys.filter(oldKey => !newKeys.includes(oldKey)).forEach(oldKey => {
+        newPath = newPath.includes(`/{${oldKey}}`) ? newPath.replace(`/{${oldKey}}`, '') : newPath.replace(`{${oldKey}}`, '');
+      });
+    } else {
+      newKeys.filter(key => !_lastPathKeys.includes(key)).forEach(key => {
+        if (!newPath.includes(`{${key}}`)) newPath += (newPath.endsWith('/') ? '' : '/') + `{${key}}`;
+      });
+    }
+
+    if (newPath !== path) urlInput.value = newPath + query + hash;
+    _lastPathKeys = [...new Set([...newPath.matchAll(PATH_VAR_RE)].map(m => m[1]))];
+  }
+
+  urlInput.addEventListener('input', () => { _syncPathVars(); _syncQueryParamsFromUrl(); });
   _syncPathVars();
+  _syncUrlFromQueryParams(); // reflect params loaded from the saved request in the URL bar
 
   const assertionBuilder = createAssertionBuilder();
   assertionBuilder.setAssertions(r.assertions || []);
@@ -774,7 +860,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const effectiveAuth = await _resolveEffectiveAuth();
     const curl = buildCurlCommand({
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       bodyType: activeBodyType,
@@ -1195,7 +1281,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const payload = {
       name: nameInput.value.trim() || 'Unnamed Request',
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),

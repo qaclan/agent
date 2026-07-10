@@ -20,7 +20,7 @@ function _kvTable(data) {
   data = _parseJson(data);
   if (!data) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   const entries = Array.isArray(data)
-    ? data.map(h => [h.name ?? h.key ?? '', h.value ?? ''])
+    ? data.map(h => [h.name ?? h.key ?? '', h.is_file ? `📎 ${h.filename || 'file'}` : (h.value ?? '')])
     : Object.entries(data);
   if (!entries.length) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   return `<div style="font-size:12px;">
@@ -54,9 +54,11 @@ function _detailHTML(req) {
   const headersSection = _section('Headers', _kvTable(req.headers));
   const paramsSection  = _section('Query Params', _kvTable(req.params));
 
-  const bodyContent = req.body
-    ? `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`
-    : '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
+  const bodyContent = !req.body
+    ? '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>'
+    : (req.body_type === 'form' || req.body_type === 'multipart')
+      ? _kvTable(req.body)
+      : `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`;
   const bodySection = _section('Request Body', bodyContent);
 
   const assertionsSection = assertions.length ? _section('Assertions',
