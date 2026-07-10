@@ -1,6 +1,7 @@
 import { createVarPicker } from './var-picker.js';
 import { createInlineVarDrop } from './inline-var-drop.js';
 import { applyVarStyle } from './var-style.js';
+import { attachTokenOverlay } from './var-token-overlay.js';
 
 /**
  * createKeyValueTable(options) → { el, getRows, setRows }
@@ -23,6 +24,7 @@ export function createKeyValueTable(options = {}) {
     getVars = async () => [],
     fileFieldsEnabled = false,
     getKnownVarNames = null,
+    getVarsList = null,
     onChange = null,
   } = options;
 
@@ -43,6 +45,7 @@ export function createKeyValueTable(options = {}) {
 
   const _picker = varPickerEnabled ? createVarPicker({ getVars }) : null;
   const _inlineDrop = varPickerEnabled ? createInlineVarDrop(getVars) : null;
+  const _overlays = [];
 
   const wrapper = document.createElement('div');
   wrapper.className = 'kv-table-wrapper';
@@ -129,7 +132,13 @@ export function createKeyValueTable(options = {}) {
     valInput.value = data.value || '';
     valInput.readOnly = readOnly;
     _styleValueInput(valInput);
-    valTd.appendChild(valInput);
+    if (getVarsList) {
+      const overlay = attachTokenOverlay(valInput, getVarsList);
+      _overlays.push(overlay);
+      valTd.appendChild(overlay.el);
+    } else {
+      valTd.appendChild(valInput);
+    }
     tr.appendChild(valTd);
 
     if (!readOnly) {
@@ -251,11 +260,13 @@ export function createKeyValueTable(options = {}) {
 
   function setRows(rows = []) {
     tbody.innerHTML = '';
+    _overlays.length = 0;
     rows.forEach(r => _addRow(r));
   }
 
   function restyleAll() {
     tbody.querySelectorAll('.kv-value').forEach(_styleValueInput);
+    _overlays.forEach(o => o.refresh());
   }
 
   return { el: wrapper, getRows, setRows, restyleAll };
