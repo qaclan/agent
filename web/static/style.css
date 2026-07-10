@@ -1740,6 +1740,55 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   color: var(--text-muted);
 }
 
+/* Per-token {{var}} text coloring overlay (headers/params/path-vars/auth/
+   URL bar/assertions/scripts/body-fallback inputs) — real field's text is
+   made transparent; this div renders the same text with colored spans. */
+.var-token-overlay-wrap { position: relative; }
+.var-token-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  white-space: pre;
+  color: var(--text-primary);
+  box-sizing: border-box;
+  border-style: solid;
+  border-color: transparent;
+  background: transparent;
+}
+.var-token-overlay--multiline { white-space: pre-wrap; word-break: break-word; }
+.var-tok--ok { color: var(--success); }
+.var-tok--missing { color: var(--danger); }
+
+/* Hover tooltip showing a {{var}}'s current value or "not defined" */
+.var-tooltip {
+  position: fixed;
+  z-index: 1003;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.28);
+  padding: 6px 10px;
+  font-size: 12px;
+  max-width: 320px;
+  pointer-events: none;
+}
+.var-tooltip strong { font-family: var(--font-mono); color: var(--text-primary); }
+.var-tooltip-value {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  margin-top: 3px;
+  word-break: break-all;
+}
+.var-tooltip-group {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  margin-top: 3px;
+}
+.var-tooltip-missing { color: var(--danger); margin-top: 3px; }
+
 /* Response panel */
 .response-panel {
   border: 1px solid var(--border-default);
