@@ -21,7 +21,7 @@
 - Frontend files are loaded directly as ES modules (no bundler). Verify syntax with `node --check <file>`; DOM-touching logic is verified by manually running the app (`python qaclan.py serve --port 7823`) and clicking through the flow.
 - `window.api()` never throws — it returns `{ok: false, error}` on failure. Always check `res.ok === false`.
 - Error surfacing in `collections-view.js` always uses `await window._alertDialog('Error: ' + res.error)` on failure — this file never uses `window._toast` for errors (confirmed: every existing error path in this file uses `_alertDialog`). Match this exactly; do not introduce `_toast` for errors.
-- No new task changes `web/routes/suites.py`, `cli/api_discovery/*`, `web/api/services/discovery_service.py`, `web/api/services/runner_service.py`, or any Postman/Bruno/HAR import/export code — those are out of scope per the spec and are covered only by the regression check in the final task.
+- No new task changes `web/routes/suites.py`, `cli/api_discovery/*`, `web/api/services/discovery_service.py`, or any Postman/Bruno/HAR import/export code — those are out of scope per the spec and are covered only by the regression check in the final task. `web/api/services/runner_service.py` IS in scope for Task 10 (depth-first collection-run order) — that is the one deliberate exception to this constraint.
 
 ---
 
@@ -43,11 +43,8 @@
 | `web/static/api/views/request-editor-view.js` | Modify | Accept and submit a target `folder_id` when creating a request |
 | `web/static/api/api-section.js` | Modify | Thread the new `defaultFolderId` argument from the sidebar into the request editor |
 | `web/static/style.css` | Modify | Folder-row, drag-handle, and drop-target styles |
-| `cli/api_discovery/folder_suggester.py` | Create | `suggest_folder_name(url)` — one-level folder-name heuristic, reuses `url_normalizer` |
-| `web/api/services/discovery_service.py` | Modify | `organize_into_folders` param on `_save_requests`/`save_library`, shared `folder_cache` |
-| `web/api/routes/discovery.py` | Modify | Thread `organize_into_folders` through `save_requests`/`save_library_route` |
-| `web/static/api/views/request-review-modal.js` | Modify | "Organize into folders by endpoint" checkbox, checked by default |
-| `web/static/api/views/variant-comparison-modal.js` | Modify | Forward `organizeIntoFolders` into its own `/discover/save-library` call |
+| `web/api/services/folder_service.py` | Modify | Add `flatten_run_order(collection_id, project_id)` — depth-first tree walk for collection-run ordering |
+| `web/api/services/runner_service.py` | Modify | `start_collection_run`/`_execute_collection` resolve run order via `FolderService.flatten_run_order` instead of `RequestRepo.list()` |
 
 ---
 
@@ -148,7 +145,7 @@ git commit -m "feat(db): add api_folders table and ordering columns for nested f
 
 **Interfaces:**
 - Consumes: `api_folders` table (Task 1).
-- Produces: `FolderRepo` with `list_for_collection(collection_id) -> list[dict]`, `get(id, project_id) -> dict|None`, `create(project_id, collection_id, name, parent_folder_id=None) -> dict`, `get_or_create_root(project_id, collection_id, name) -> dict`, `update(id, data: dict) -> bool` (fields: `name`, `parent_folder_id`), `set_order(id, collection_id, parent_folder_id, order_index) -> bool`, `delete(id) -> bool` — consumed by Task 3 (`FolderService`) and Task 11 (discovery folder suggestion, which uses `get_or_create_root` specifically).
+- Produces: `FolderRepo` with `list_for_collection(collection_id) -> list[dict]`, `get(id, project_id) -> dict|None`, `create(project_id, collection_id, name, parent_folder_id=None) -> dict`, `get_or_create_root(project_id, collection_id, name) -> dict`, `update(id, data: dict) -> bool` (fields: `name`, `parent_folder_id`), `set_order(id, collection_id, parent_folder_id, order_index) -> bool`, `delete(id) -> bool` — consumed by Task 3 (`FolderService`). `get_or_create_root` is unused after the discovery-integration revert but stays — harmless, small, and generically useful for any future manual "create if absent" folder flow.
 
 - [ ] **Step 1: Write the repo**
 
@@ -759,7 +756,7 @@ git commit -m "feat(api): add collection-level drag ordering"
 **Interfaces:**
 - Consumes: `api_requests.folder_id`/`order_index` (Task 1), `FolderRepo` (Task 2).
 - Produces: `RequestRepo._DEFAULTS['folder_id']`, order-aware `create`/`list`, `RequestRepo.set_order(id, collection_id, folder_id, order_index) -> bool`; `RequestService` validates `folder_id` on create/update — consumed by Task 7 (frontend) and by `FolderService.reorder` (Task 3, already calls `_req_repo.set_order`).
-- **This task also fixes collection-run ordering**: `RunnerService` (`web/api/services/runner_service.py`) calls `RequestRepo.list(project_id, collection_id=...)` in three places (`start_collection_run`, `_execute_collection`, `run_collection`) with no changes needed there — once `list()`'s `ORDER BY` respects `order_index`, collection runs automatically execute in the user's drag-arranged order. No `runner_service.py` edit in this plan; verified by inline test below and again in Task 12's regression pass.
+- **Note — this task does NOT fully fix collection-run ordering.** `RunnerService` (`web/api/services/runner_service.py`) calls `RequestRepo.list(project_id, collection_id=...)` in three places (`start_collection_run`, `_execute_collection`, `run_collection`). This task's order-aware `list()` correctly orders *root-level, no-folder* collections (the inline test below covers exactly that case). But `order_index` is scoped per-parent (Section 1's ordering rule — each folder's children have their own 0-based sequence), so once folders are involved, a flat `ORDER BY order_index` across the whole collection does NOT reproduce a depth-first tree walk. See Task 11, which replaces this flat query with a proper tree walk for the run path.
 
 - [ ] **Step 1: Add `folder_id` to defaults and order-aware `create`**
 
@@ -1774,278 +1771,67 @@ git commit -m "feat(api-ui): style nested folder tree and drag affordances"
 
 ---
 
-## Task 10: `folder_suggester.py` — one-level folder-name heuristic
+## Task 10: Collection run — depth-first tree-order execution
 
 **Files:**
-- Create: `cli/api_discovery/folder_suggester.py`
+- Modify: `web/api/services/folder_service.py`
+- Modify: `web/api/services/runner_service.py`
 
 **Interfaces:**
-- Consumes: `url_normalizer.normalize_url(url) -> str` (existing — already collapses numeric/UUID/hex path segments to `{param}` placeholders, so this task adds no new ID-detection logic).
-- Produces: `suggest_folder_name(url: str) -> str | None` — consumed by Task 11 (`discovery_service.py`).
+- Consumes: `FolderService.tree` (Task 3), `RequestRepo`/`CollectionRepo` (existing).
+- Produces: `FolderService.flatten_run_order(collection_id, project_id) -> list[dict]` — depth-first walk (folder's own items in `order_index` order, recursing into sub-folders before moving to the next sibling) flattened to a single ordered list of request rows. `RunnerService.start_collection_run`/`_execute_collection`/`run_collection` call this instead of `RequestRepo.list()` to resolve run order — consumed by Task 11's verification walkthrough.
+- **Why this task exists:** `order_index` is scoped per parent (Section 1's ordering rule in the spec) — each folder's children have their own 0-based sequence. Tasks 5–6 made `RequestRepo.list()`/`CollectionRepo.list()` order by `order_index` for the flat, no-folder case, but a flat `ORDER BY order_index` across an entire collection does not reproduce a depth-first tree walk once folders exist (see spec Section 5). This task is the piece that makes drag-arranged folder order actually govern run order — Postman's Collection Runner model this spec is aligned with (folder order = run order).
+- **Out of scope**: repeat-visits (the same request appearing more than once in one ordered run) — that's what `suites`/`suite_items` already support (arbitrary repeats, mixed scripts+api_requests). This task only makes each request-in-a-folder run exactly once, in tree order.
+- **Known gap, not fixed by this task**: `FolderRepo.create`/`RequestRepo.create` (Tasks 2, 6) each compute their own `order_index` from a per-table `MAX()+1` scoped to the same parent — folders count only sibling folders, requests count only sibling requests. So a folder and a sibling request can tie at `order_index=0` purely from creation order, even though the spec (Section 1) calls for one shared order space per parent. Ties are broken by node-type-then-`created_at` in this task's `_walk` (folders listed before requests when equal), which is deterministic but not necessarily what the user last dragged. A real fix means both repos sharing one counter per parent scope — out of scope here since it touches already-shipped Task 2/6 code; flagging for a future pass.
 
-- [ ] **Step 1: Write the module**
-
-```python
-from __future__ import annotations
-import re
-from cli.api_discovery.url_normalizer import normalize_url
-
-_SKIP_SEGMENTS = {"api", "rest", "graphql", "gateway", "gql"}
-_VERSION_RE = re.compile(r"^v\d+(\.\d+)*$", re.IGNORECASE)
-
-
-def suggest_folder_name(url: str) -> str | None:
-    """Derive a one-level folder name from a request URL's first meaningful path
-    segment. Reuses url_normalizer's dynamic-segment detection (IDs/UUIDs/hashes
-    already collapsed to {param} placeholders) so numeric/UUID segments are
-    skipped without re-implementing that heuristic. Returns None when no
-    meaningful segment exists (root path, or every segment is a namespace/
-    version/ID) — caller should leave the request at collection root."""
-    path = normalize_url(url)
-    for seg in path.strip("/").split("/"):
-        if not seg:
-            continue
-        if seg.startswith("{") and seg.endswith("}"):
-            continue
-        if seg.lower() in _SKIP_SEGMENTS:
-            continue
-        if _VERSION_RE.match(seg):
-            continue
-        return seg
-    return None
-```
-
-- [ ] **Step 2: Verify manually**
-
-```bash
-python3 -c "
-from cli.api_discovery.folder_suggester import suggest_folder_name
-
-assert suggest_folder_name('https://api.example.com/api/v1/users/123') == 'users'
-assert suggest_folder_name('https://api.example.com/orders/5/cancel') == 'orders'
-assert suggest_folder_name('https://api.example.com/api/v1/graphql') is None
-assert suggest_folder_name('https://api.example.com/') is None
-assert suggest_folder_name('https://api.example.com/550e8400-e29b-41d4-a716-446655440000') is None
-print('PASS: suggest_folder_name derives one-level folder names')
-"
-```
-
-Expected output: `PASS: suggest_folder_name derives one-level folder names`
-
-- [ ] **Step 3: Commit**
-
-```bash
-git add cli/api_discovery/folder_suggester.py
-git commit -m "feat(discovery): add suggest_folder_name for one-level folder placement"
-```
-
----
-
-## Task 11: Discovery save integration — "Organize into folders by endpoint"
-
-**Files:**
-- Modify: `web/api/services/discovery_service.py`
-- Modify: `web/api/routes/discovery.py`
-- Modify: `web/static/api/views/request-review-modal.js`
-- Modify: `web/static/api/views/variant-comparison-modal.js`
-
-**Interfaces:**
-- Consumes: `folder_suggester.suggest_folder_name` (Task 10), `FolderRepo.get_or_create_root` (Task 2).
-- Produces: `_save_requests(project_id, requests, collection_id=None, organize_into_folders=False, folder_cache=None) -> int`; `save_library(project_id, groups, collection_name, include_in_docs=1, organize_into_folders=False) -> dict` (same return shape as before); routes accept `organize_into_folders` in their JSON body; `showVariantComparisonModal(groups, collectionName, includeInDocs, organizeIntoFolders)` (new 4th param).
-- This task does **not** touch the CLI `qaclan api import` path (`DiscoveryService.import_openapi`/`import_postman`/`import_bruno`/`import_har`, which call `_save_requests` with its own pre-existing per-tag/per-folder collection grouping) — `organize_into_folders` defaults to `False`, and only the two routes below ever pass a non-default value. The web UI's HAR/OpenAPI/Postman/Bruno/cURL import views, by contrast, all route through `/discover/*/preview` → the same shared `request-review-modal.js` as Record APIs, so they *do* pick up the new checkbox — this is intended, not a scope leak, since it's the exact same modal.
-
-- [ ] **Step 1: Add the shared folder-resolution helper and thread it through `_save_requests`**
-
-In `web/api/services/discovery_service.py`, add after the `_MULTIPART_CDP_CAPTURE_SRC` block, directly before `_save_requests`:
+- [ ] **Step 1: Add `flatten_run_order` to `FolderService`**
 
 ```python
-def _resolve_folder_id(project_id: str, collection_id: str, url: str, folder_cache: dict) -> str | None:
-    """Get-or-create a root-level folder named after url's first meaningful path
-    segment, memoized in folder_cache for the duration of one save call so that
-    many requests mapping to the same folder name share one folder instead of
-    creating duplicates."""
-    from cli.api_discovery.folder_suggester import suggest_folder_name
-    from web.api.repositories.folder_repo import FolderRepo
+    def flatten_run_order(self, collection_id: str, project_id: str) -> list[dict]:
+        """Depth-first walk of the collection's folder tree, flattened to the
+        ordered list of request rows a collection run should execute. Each
+        folder's own children (folders+requests) are visited in order_index
+        order, recursing into a folder's subtree before its next sibling."""
+        t = self.tree(collection_id, project_id)
+        folders_by_parent: dict[str | None, list[dict]] = {}
+        requests_by_parent: dict[str | None, list[dict]] = {}
+        for f in t["folders"]:
+            folders_by_parent.setdefault(f.get("parent_folder_id"), []).append(f)
+        for r in t["requests"]:
+            requests_by_parent.setdefault(r.get("folder_id"), []).append(r)
 
-    name = suggest_folder_name(url)
-    if not name:
-        return None
-    if name in folder_cache:
-        return folder_cache[name]
-    folder = FolderRepo().get_or_create_root(project_id, collection_id, name)
-    folder_cache[name] = folder["id"]
-    return folder["id"]
+        ordered: list[dict] = []
+
+        def _walk(parent_folder_id: str | None) -> None:
+            nodes = (
+                [{"type": "folder", "order_index": f["order_index"], "data": f}
+                 for f in folders_by_parent.get(parent_folder_id, [])]
+                + [{"type": "request", "order_index": r["order_index"], "data": r}
+                   for r in requests_by_parent.get(parent_folder_id, [])]
+            )
+            nodes.sort(key=lambda n: n["order_index"])
+            for node in nodes:
+                if node["type"] == "request":
+                    ordered.append(node["data"])
+                else:
+                    _walk(node["data"]["id"])
+
+        _walk(None)
+        return ordered
 ```
 
-Replace the `_save_requests` function:
+- [ ] **Step 2: Point `RunnerService` at the tree walk**
+
+In `web/api/services/runner_service.py`, replace every `RequestRepo().list(project_id, collection_id=collection_id)` call inside `start_collection_run`, `_execute_collection`, and `run_collection` (if it independently re-fetches) with:
 
 ```python
-def _save_requests(project_id: str, requests: list[dict], collection_id: str | None = None,
-                    organize_into_folders: bool = False, folder_cache: dict | None = None) -> int:
-    """Save a list of parsed request dicts to the DB. Returns count saved."""
-    from web.api.services.doc_service import sync_doc_entry
-
-    if folder_cache is None:
-        folder_cache = {}
-    saved = 0
-    for req in requests:
-        data = dict(req)
-        data.pop("collection_name", None)  # not a DB column
-        if collection_id:
-            data["collection_id"] = collection_id
-            if organize_into_folders:
-                data["folder_id"] = _resolve_folder_id(project_id, collection_id, data.get("url", ""), folder_cache)
-        # Ensure JSON fields are lists/dicts (RequestRepo.create handles serialization)
-        for key in ("headers", "params"):
-            if isinstance(data.get(key), str):
-                try:
-                    data[key] = json.loads(data[key])
-                except (ValueError, TypeError):
-                    data[key] = []
-        if isinstance(data.get("assertions"), str):
-            try:
-                data["assertions"] = json.loads(data["assertions"])
-            except (ValueError, TypeError):
-                data["assertions"] = []
-        if isinstance(data.get("auth_config"), str):
-            try:
-                data["auth_config"] = json.loads(data["auth_config"])
-            except (ValueError, TypeError):
-                data["auth_config"] = {}
-
-        saved_req = _req_repo.create(project_id, data)
-
-        # Sync to API docs if flagged (default: include)
-        try:
-            sync_doc_entry(project_id, {**data, 'id': saved_req['id']})
-        except Exception as e:
-            logger.warning("sync_doc_entry failed for %s: %s", data.get('url'), e)
-
-        saved += 1
-    return saved
+from web.api.services.folder_service import FolderService
+requests = FolderService().flatten_run_order(collection_id, project_id)
 ```
 
-- [ ] **Step 2: Thread it through `save_library`'s merge branch**
+Leave `RequestRepo.list()` itself unchanged — other consumers (collection-detail page, suite-builder picker) legitimately want the flat "every request regardless of folder" view, not run order.
 
-Replace:
-
-```python
-def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1) -> dict:
-```
-
-with:
-
-```python
-def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1,
-                  organize_into_folders: bool = False) -> dict:
-```
-
-Replace:
-
-```python
-    col = _col_repo.create(project_id, collection_name)
-    example_repo = RequestExampleRepo()
-    saved = 0
-```
-
-with:
-
-```python
-    col = _col_repo.create(project_id, collection_name)
-    example_repo = RequestExampleRepo()
-    folder_cache: dict = {}
-    saved = 0
-```
-
-Replace:
-
-```python
-            merged_req["collection_id"] = col["id"]
-            merged_req["include_in_docs"] = include_in_docs
-            for k in ("response_status", "response_headers", "response_body", "duration_ms"):
-                merged_req.pop(k, None)
-```
-
-with:
-
-```python
-            merged_req["collection_id"] = col["id"]
-            merged_req["include_in_docs"] = include_in_docs
-            if organize_into_folders:
-                merged_req["folder_id"] = _resolve_folder_id(project_id, col["id"], merged_req.get("url", ""), folder_cache)
-            for k in ("response_status", "response_headers", "response_body", "duration_ms"):
-                merged_req.pop(k, None)
-```
-
-Replace:
-
-```python
-            saved += _save_requests(project_id, reqs, collection_id=col["id"])
-```
-
-with:
-
-```python
-            saved += _save_requests(project_id, reqs, collection_id=col["id"],
-                                     organize_into_folders=organize_into_folders, folder_cache=folder_cache)
-```
-
-- [ ] **Step 3: Thread `organize_into_folders` through both routes**
-
-In `web/api/routes/discovery.py`, replace:
-
-```python
-        include_in_docs = int(data.get("include_in_docs", 1))
-        if not requests_list:
-            return jsonify({"ok": False, "error": "No requests provided"}), 400
-        # Stamp include_in_docs on each request
-        for r in requests_list:
-            r['include_in_docs'] = include_in_docs
-        from web.api.services.discovery_service import _save_requests
-        from web.api.repositories.collection_repo import CollectionRepo
-        col = CollectionRepo().create(pid, collection_name)
-        saved = _save_requests(pid, requests_list, collection_id=col["id"])
-```
-
-with:
-
-```python
-        include_in_docs = int(data.get("include_in_docs", 1))
-        organize_into_folders = bool(data.get("organize_into_folders", False))
-        if not requests_list:
-            return jsonify({"ok": False, "error": "No requests provided"}), 400
-        # Stamp include_in_docs on each request
-        for r in requests_list:
-            r['include_in_docs'] = include_in_docs
-        from web.api.services.discovery_service import _save_requests
-        from web.api.repositories.collection_repo import CollectionRepo
-        col = CollectionRepo().create(pid, collection_name)
-        saved = _save_requests(pid, requests_list, collection_id=col["id"], organize_into_folders=organize_into_folders)
-```
-
-Replace:
-
-```python
-        include_in_docs = int(data.get("include_in_docs", 1))
-        if not groups:
-            return jsonify({"ok": False, "error": "No groups provided"}), 400
-        from web.api.services.discovery_service import save_library
-        result = save_library(pid, groups, collection_name, include_in_docs=include_in_docs)
-```
-
-with:
-
-```python
-        include_in_docs = int(data.get("include_in_docs", 1))
-        organize_into_folders = bool(data.get("organize_into_folders", False))
-        if not groups:
-            return jsonify({"ok": False, "error": "No groups provided"}), 400
-        from web.api.services.discovery_service import save_library
-        result = save_library(pid, groups, collection_name, include_in_docs=include_in_docs,
-                               organize_into_folders=organize_into_folders)
-```
-
-- [ ] **Step 4: Verify the backend manually**
+- [ ] **Step 3: Verify manually**
 
 ```bash
 python3 -c "
@@ -2057,174 +1843,50 @@ pid = generate_id('proj')
 conn.execute('INSERT INTO projects (id, name, created_at) VALUES (?, ?, ?)', (pid, 'tmp', datetime.now(timezone.utc).isoformat()))
 conn.commit()
 
-from web.api.services.discovery_service import _save_requests
-from web.api.repositories.collection_repo import CollectionRepo
+from web.api.services.collection_service import CollectionService
+from web.api.services.folder_service import FolderService
+from web.api.services.request_service import RequestService
+
+col = CollectionService().create(pid, 'Checkout Flow')
+fsvc = FolderService()
+setup = fsvc.create(pid, col['id'], 'Setup')
+cleanup = fsvc.create(pid, col['id'], 'Cleanup')
+auth = fsvc.create(pid, col['id'], 'Auth', setup['id'])
+
+rsvc = RequestService()
+login = rsvc.create(pid, {'name': 'Login', 'url': 'https://x/login', 'collection_id': col['id'], 'folder_id': auth['id']})
+cart = rsvc.create(pid, {'name': 'Cart', 'url': 'https://x/cart', 'collection_id': col['id'], 'folder_id': setup['id']})
+delcart = rsvc.create(pid, {'name': 'DeleteCart', 'url': 'https://x/cart', 'collection_id': col['id'], 'folder_id': cleanup['id']})
+
+# FolderRepo/RequestRepo compute order_index from separate per-table counters (folders vs
+# requests), so a folder and a sibling request can tie at order_index=0 by creation order
+# alone -- explicitly set order within Setup so Cart(0) sorts before Auth(1), matching the
+# 'drag Cart above the Auth subtree' scenario Task 11's walkthrough exercises.
 from web.api.repositories.request_repo import RequestRepo
+from web.api.repositories.folder_repo import FolderRepo
+RequestRepo().set_order(cart['id'], col['id'], setup['id'], 0)
+FolderRepo().set_order(auth['id'], col['id'], setup['id'], 1)
 
-col = CollectionRepo().create(pid, 'Recorded')
-reqs = [
-    {'name': 'List users', 'method': 'GET', 'url': 'https://api.example.com/api/v1/users', 'headers': [], 'params': []},
-    {'name': 'Get user', 'method': 'GET', 'url': 'https://api.example.com/api/v1/users/123', 'headers': [], 'params': []},
-    {'name': 'List orders', 'method': 'GET', 'url': 'https://api.example.com/api/v1/orders', 'headers': [], 'params': []},
-]
-saved = _save_requests(pid, reqs, collection_id=col['id'], organize_into_folders=True)
-assert saved == 3
-
-rows = RequestRepo().list(pid, collection_id=col['id'])
-users_folder_ids = {r['folder_id'] for r in rows if 'users' in r['url']}
-assert len(users_folder_ids) == 1 and None not in users_folder_ids, users_folder_ids
-orders_folder_ids = {r['folder_id'] for r in rows if 'orders' in r['url']}
-assert len(orders_folder_ids) == 1 and None not in orders_folder_ids, orders_folder_ids
-assert users_folder_ids != orders_folder_ids
-
-# organize_into_folders=False (default) — untouched, matches every other existing caller
-col2 = CollectionRepo().create(pid, 'Flat')
-_save_requests(pid, reqs, collection_id=col2['id'])
-rows2 = RequestRepo().list(pid, collection_id=col2['id'])
-assert all(r['folder_id'] is None for r in rows2)
-print('PASS: discovery save honors organize_into_folders, defaults to flat')
+order = [r['id'] for r in fsvc.flatten_run_order(col['id'], pid)]
+# Depth-first: Setup's own children first (Cart, order_index 0), then recurse into the
+# Auth subtree (order_index 1) for Login, then Cleanup's DeleteCart
+assert order == [cart['id'], login['id'], delcart['id']], order
+print('PASS: flatten_run_order matches depth-first tree walk')
 "
 ```
 
-Expected output: `PASS: discovery save honors organize_into_folders, defaults to flat`
+Expected output: `PASS: flatten_run_order matches depth-first tree walk`
 
-- [ ] **Step 5: Add the checkbox to the review modal**
-
-In `web/static/api/views/request-review-modal.js`, replace:
-
-```js
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-      <input type="checkbox" id="rev-include-docs" checked>
-      Include in API Documentation
-    </label>
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);">
-```
-
-with:
-
-```js
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
-      <input type="checkbox" id="rev-include-docs" checked>
-      Include in API Documentation
-    </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:6px;">
-      <input type="checkbox" id="rev-organize-folders" checked>
-      Organize into folders by endpoint
-    </label>
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);">
-```
-
-- [ ] **Step 6: Read the checkbox and forward it on both save paths**
-
-Replace:
-
-```js
-      const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
-      const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
-
-      if (mode === 'library') {
-        const plainRequests = selected.map(({ _idx, ...rest }) => rest);
-        const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
-        if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
-        window.closeModal();
-        showVariantComparisonModal(grouped.groups, colName, includeInDocs);
-        return;
-      }
-
-      const data = await window.api('POST', '/discover/save-requests', {
-        requests: selected,
-        collection_name: colName,
-        include_in_docs: includeInDocs,
-      });
-```
-
-with:
-
-```js
-      const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
-      const organizeIntoFolders = document.getElementById('rev-organize-folders')?.checked ? 1 : 0;
-      const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
-
-      if (mode === 'library') {
-        const plainRequests = selected.map(({ _idx, ...rest }) => rest);
-        const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
-        if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
-        window.closeModal();
-        showVariantComparisonModal(grouped.groups, colName, includeInDocs, organizeIntoFolders);
-        return;
-      }
-
-      const data = await window.api('POST', '/discover/save-requests', {
-        requests: selected,
-        collection_name: colName,
-        include_in_docs: includeInDocs,
-        organize_into_folders: organizeIntoFolders,
-      });
-```
-
-- [ ] **Step 7: Forward the flag from Modal 2**
-
-In `web/static/api/views/variant-comparison-modal.js`, replace:
-
-```js
-export function showVariantComparisonModal(groups, collectionName, includeInDocs) {
-```
-
-with:
-
-```js
-export function showVariantComparisonModal(groups, collectionName, includeInDocs, organizeIntoFolders) {
-```
-
-Replace:
-
-```js
-      const data = await window.api('POST', '/discover/save-library', {
-        groups: payloadGroups,
-        collection_name: collectionName,
-        include_in_docs: includeInDocs,
-      });
-```
-
-with:
-
-```js
-      const data = await window.api('POST', '/discover/save-library', {
-        groups: payloadGroups,
-        collection_name: collectionName,
-        include_in_docs: includeInDocs,
-        organize_into_folders: organizeIntoFolders,
-      });
-```
-
-- [ ] **Step 8: Verify syntax**
+- [ ] **Step 4: Commit**
 
 ```bash
-node --check web/static/api/views/request-review-modal.js
-node --check web/static/api/views/variant-comparison-modal.js
-```
-
-Expected: no output (exit code 0) for both.
-
-- [ ] **Step 9: Manual browser verification**
-
-Run `python qaclan.py serve --port 7823`, run a Record APIs session (or HAR import) against a site with at least two distinct API resources (e.g. `/api/users/...` and `/api/orders/...`), and confirm:
-1. The review modal shows "Organize into folders by endpoint", checked by default, next to "Include in API Documentation".
-2. With it checked, choosing "Save as Flow" creates folders named after each resource and places requests inside them (check the sidebar tree).
-3. With it checked, choosing "Save as Library" → Modal 2 → Save does the same, regardless of which groups were merged vs. kept separate.
-4. Unchecking it before saving (either mode) saves everything flat at the collection root — no folders created.
-5. Two requests that both suggest the same folder name (e.g. `GET /api/users` and `POST /api/users`) land in the *same* folder, not two folders with the same name.
-
-- [ ] **Step 10: Commit**
-
-```bash
-git add web/api/services/discovery_service.py web/api/routes/discovery.py web/static/api/views/request-review-modal.js web/static/api/views/variant-comparison-modal.js
-git commit -m "feat(discovery): suggest folders by endpoint on Save as Flow/Library"
+git add web/api/services/folder_service.py web/api/services/runner_service.py
+git commit -m "feat(api): run collections in depth-first folder-tree order"
 ```
 
 ---
 
-## Task 12: End-to-end verification and full API-testing business-logic regression review
+## Task 11: End-to-end verification and full API-testing business-logic regression review
 
 **Files:** none (verification only).
 
@@ -2236,18 +1898,18 @@ This task exists specifically to confirm the new folder/ordering columns and que
 2. Create a collection "Checkout Flow". Create folder "Setup" at root, then folder "Cleanup" at root. Inside "Setup", create a sub-folder "Auth".
 3. Add requests: "POST /login" inside Setup/Auth, "POST /cart" at Setup's root, "DELETE /cart" inside Cleanup.
 4. Drag "POST /cart" so it moves inside Setup/Auth, ordered above "POST /login". Reload the page — confirm both persisted (folder placement and order).
-5. Run the collection (▶) — confirm all three requests execute, and that "POST /cart" runs before "POST /login" (order now matches the drag from step 4), read from the run detail view's per-request order.
+5. Run the collection (▶) — confirm all three requests execute, and that "POST /cart" runs before "POST /login" (order now matches the drag from step 4), read from the run detail view's per-request order. This exercises Task 10's `flatten_run_order` — without it, run order would not reliably match the drag-arranged tree.
 6. Delete the "Setup" folder — confirm the warning mentions its contents, and after confirming, "Auth" and both requests inside it are gone; "Cleanup" and "DELETE /cart" remain untouched.
 
 - [ ] **Step 2: Regression pass over existing API-testing business logic**
 
-Confirm each of the following still behaves exactly as before this plan (all are consumers of `api_requests`/`api_collections` that were deliberately NOT modified, aside from the two `ORDER BY` changes in Tasks 5–6):
+Confirm each of the following still behaves exactly as before this plan (all are consumers of `api_requests`/`api_collections` that were deliberately NOT modified, aside from the `ORDER BY` changes in Tasks 5–6 and the run-order change in Task 10):
 
 1. **Suite builder "Add API Request" picker** (`web/static/app.js` suite-edit modal) — open a suite, click "+ Add API Request", confirm the dropdown still lists every request in the project regardless of which folder it's in.
 2. **Collection detail page → "Set all requests → Inherit auth"** (`collection-detail-view.js`) — click it on a collection with folders, confirm it still updates every request in that collection (including ones nested in folders), since it fetches by `collection_id` alone.
 3. **Bruno export** (`POST /api/collections/<id>/export`) — export a collection containing folders, confirm the zip still contains every request (folders are not reflected in the export path structure — that's expected, out of scope per the spec).
-4. **Discovery "Save as Flow"/"Save as Library"** — run a HAR import or Record APIs session, uncheck "Organize into folders by endpoint" in the review modal, save to a new collection, confirm every created request lands at that collection's root (`folder_id` is `NULL`) — exactly as before Task 11 existed. Then repeat leaving the checkbox checked and confirm folders get created instead (this is the new behavior from Task 11, not a regression, but confirms the opt-out path still reproduces the old behavior exactly).
-5. **CLI `qaclan api import`** (`--format openapi`/`postman`/`bruno`) — run one import, confirm it still saves via its own existing per-tag/per-folder collection grouping (separate collections, as before) with no `api_folders` rows created — this path never passes `organize_into_folders` and is untouched by Task 11.
+4. **Discovery "Save as Flow"/"Save as Library"** — run a HAR import or Record APIs session, save to a new collection, confirm every created request lands at that collection's root (`folder_id` is `NULL`) — discovery auto-foldering was built then reverted (see spec Section 5), so this path stays flat-only, same as before folders existed at all. No "organize into folders" checkbox should be present in the review modal.
+5. **CLI `qaclan api import`** (`--format openapi`/`postman`/`bruno`) — run one import, confirm it still saves via its own existing per-tag/per-folder collection grouping (separate collections, as before) with no `api_folders` rows created.
 6. **Variant library "Examples" dropdown** (`GET /api-requests/<id>/examples`) — open a request that has saved examples (from a prior "Save as Library" merge), confirm the dropdown still works — this endpoint never touches `folder_id`/`order_index`.
 7. **Collection vars / auth config** — open a collection's Auth and Variables tabs, confirm both still load and save correctly (untouched code paths).
 8. **Suite run report** — run a suite containing both scripts and API requests, confirm the unified timeline still shows correct order (this exercises `suite_items.order_index`, a separate column from the new `api_requests.order_index`, untouched by this plan).

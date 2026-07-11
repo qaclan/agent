@@ -127,26 +127,24 @@ Reuse `.suite-script-row`/`.dragging`/drag-handle styles from `style.css:1163-11
 
 ---
 
-## Section 5: Discovery Integration — Suggested Folders on Save
+## Section 5: Execution Order — Depth-First Collection Run Walk
 
-Once folders exist, the Discovery review flow can place saved requests into folders automatically instead of always dumping them flat at collection root. The web UI's HAR/OpenAPI/Postman/Bruno/cURL import views and Record APIs all call a `/discover/*/preview` endpoint and hand the parsed list to the same shared `request-review-modal.js` → this feature lands in exactly one place and applies uniformly across every web-UI discovery path.
+### Discovery auto-folder: descoped
 
-### Decisions
+An earlier revision of this spec had the Discovery review flow auto-place saved requests into folders named after their endpoint resource (`suggest_folder_name(url)`, first path segment). Reverted (commits `dce927c`/`3eac452`) once the actual use case was clarified: a real test flow revisits the same resource more than once (login → create job → look up user → back to job), and a folder is a single node — it can't represent "jobs, then users, then jobs again." Auto-grouping by resource optimizes for browsing, not for the ordered flow a folder tree is meant to encode here. Folders are manual and collection-scoped only: the user names a folder after a flow step (`auth`, `job creation`, `dashboard`, `logout`, ...) and mixes request types inside it freely, same as folders in Postman/Insomnia. Discovery/import paths always save flat at collection root (`folder_id = NULL`), same as before folders existed.
 
-| Question | Decision |
-|---|---|
-| Scope | Applies to **both** "Save as Flow" and "Save as Library" equally — folder placement (by endpoint resource) is orthogonal to variant grouping (by param/body differences), so it is not tied to Library's grouping modal |
-| Suggestion depth | One level — folder name is the first meaningful path segment (e.g. `GET /api/v1/users/123` → folder "users"). No path-mirroring, no multi-level nesting from discovery |
-| User control | One checkbox in the existing review modal, next to "Include in API Documentation" — "Organize into folders by endpoint", **checked by default**. Unchecking it saves flat at collection root exactly as today |
-| CLI import path | `qaclan api import` (OpenAPI/Postman/Bruno/HAR) calls `DiscoveryService.import_openapi/import_postman/import_bruno/import_har` directly — a separate code path from the web UI's preview+review-modal flow, with its own pre-existing per-tag/per-folder collection grouping. This plan does not touch it; it is unaffected by `organize_into_folders` |
+### Collection run must walk the tree, not a flat list
 
-### Suggestion heuristic
+Postman's Collection Runner walks a collection's folder tree depth-first in display order — a folder's own items in order, recursing into sub-folders in their listed position — so folder order *is* run order. That's the model this spec's folder ordering is meant to support (see brainstorming conversation, 2026-07-11).
 
-New pure module `cli/api_discovery/folder_suggester.py`, `suggest_folder_name(url) -> str | None`. Reuses the existing `url_normalizer.normalize_url()` — which already collapses numeric/UUID/hex path segments to `{param}` placeholders — so no new ID-detection logic is needed. Skips a small namespace-noise list (`api`, `rest`, `graphql`, `gateway`, `gql`) and version-literal segments (`v1`, `v2.0`, ...). Returns the first remaining real segment, or `None` when nothing meaningful is left (root path, or an API that's all namespace/version/IDs) — a `None` result means the request stays at collection root, same as today.
+Current gap: `RunnerService.start_collection_run`/`_execute_collection` (`web/api/services/runner_service.py`) both call `RequestRepo.list(project_id, collection_id=...)`, which orders `ORDER BY order_index, created_at` — a single flat query over every request in the collection regardless of folder. But `order_index` is only unique **within one parent scope** (per the Section 1 ordering rule — each folder's children start their own `order_index` sequence at 0). A flat collection-wide `ORDER BY order_index` therefore does not reproduce the tree order: it groups everything by numeric order_index value first (all folders' "slot 0" items, then all "slot 1" items, ...), tie-broken by `created_at`, not a depth-first walk. Folder drag-order stays cosmetic for running purposes until this is fixed — the same tension flagged for browsing-vs-flow-order applies to run-order too.
 
-### Save-path integration
+**Required fix (not yet implemented — follow-up task):** collection run must build an explicit depth-first ordering before executing:
+1. Fetch the collection's folder tree (`FolderService.tree`, already returns flat `folders`+`requests` with `parent_folder_id`/`folder_id`).
+2. Walk it depth-first from root (`parent_folder_id = None`), at each level visiting folders+requests interleaved by `order_index` (matching the tree's `_renderTreeLevel` UI logic in `collections-view.js`), recursing into each folder's children before moving to the next sibling.
+3. Flatten to a single ordered list of request rows; run that list instead of `RequestRepo.list()`'s flat query.
 
-Every discovery save path already funnels through one function, `discovery_service._save_requests()` (used directly by "Save as Flow" and by Library's "keep separate" branch) — plus one direct `_req_repo.create()` call in `save_library()`'s "merge" branch. Both gain an `organize_into_folders: bool = False` parameter (default `False` so Postman/OpenAPI/Bruno imports, which never pass it, are untouched). A shared per-save-call `folder_cache: dict[str, str]` (folder name → folder id) is threaded through both, so e.g. ten requests that all suggest "users" share one folder — via a new `FolderRepo.get_or_create_root(project_id, collection_id, name)` — instead of creating ten duplicates.
+This changes `start_collection_run`/`_execute_collection`/`run_collection` in `runner_service.py` to resolve the run order via the new tree-walk helper (likely `FolderService.flatten_run_order(collection_id, project_id) -> list[dict]`) instead of `RequestRepo.list()` directly. `RequestRepo.list()` itself stays unchanged — it's still correct for the collection-detail page's "every request regardless of folder" consumers (plan Task 11 regression items 1–2), which don't care about run order.
 
 ---
 
@@ -156,3 +154,5 @@ Every discovery save path already funnels through one function, `discovery_servi
 - Folder-level auth/env/vars inheritance (folders are pure organization, no new config surface — requests still inherit only from their collection, unchanged)
 - Bulk multi-select drag (one item dragged at a time, matches existing suite-script drag behavior)
 - Folder export/import mapping for Postman/Bruno formats (existing import flattens nested folders into one collection name today; this spec does not change import/export behavior)
+- Discovery/import auto-placement into folders by endpoint (previously in scope, descoped — see Section 5)
+- Repeat-visit flow sequencing (same request/folder appearing more than once in one ordered run) — out of scope for the depth-first collection-run walk in Section 5; that's what `suites`/`suite_items` already exist for (arbitrary repeats, mixed scripts+api_requests, own ordering)
