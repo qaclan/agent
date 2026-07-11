@@ -116,3 +116,16 @@ def send_request(req_id):
     except Exception as e:
         logger.exception("send_request")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/api-requests/<req_id>/examples", methods=["GET"])
+def list_request_examples(req_id):
+    try:
+        return jsonify({"ok": True, "examples": _svc.list_examples(req_id, _project_id())})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("list_request_examples")
+        return jsonify({"ok": False, "error": str(e)}), 500
