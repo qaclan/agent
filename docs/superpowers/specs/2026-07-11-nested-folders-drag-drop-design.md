@@ -127,6 +127,29 @@ Reuse `.suite-script-row`/`.dragging`/drag-handle styles from `style.css:1163-11
 
 ---
 
+## Section 5: Discovery Integration — Suggested Folders on Save
+
+Once folders exist, the Discovery review flow (Record APIs / HAR import / "From Playwright run" — anything that lands in `request-review-modal.js`) can place saved requests into folders automatically instead of always dumping them flat at collection root.
+
+### Decisions
+
+| Question | Decision |
+|---|---|
+| Scope | Applies to **both** "Save as Flow" and "Save as Library" equally — folder placement (by endpoint resource) is orthogonal to variant grouping (by param/body differences), so it is not tied to Library's grouping modal |
+| Suggestion depth | One level — folder name is the first meaningful path segment (e.g. `GET /api/v1/users/123` → folder "users"). No path-mirroring, no multi-level nesting from discovery |
+| User control | One checkbox in the existing review modal, next to "Include in API Documentation" — "Organize into folders by endpoint", **checked by default**. Unchecking it saves flat at collection root exactly as today |
+| Other import paths | Postman/OpenAPI/Bruno imports are unaffected — they already have their own organization scheme (one collection per tag/folder) and don't route through the review modal at all |
+
+### Suggestion heuristic
+
+New pure module `cli/api_discovery/folder_suggester.py`, `suggest_folder_name(url) -> str | None`. Reuses the existing `url_normalizer.normalize_url()` — which already collapses numeric/UUID/hex path segments to `{param}` placeholders — so no new ID-detection logic is needed. Skips a small namespace-noise list (`api`, `rest`, `graphql`, `gateway`, `gql`) and version-literal segments (`v1`, `v2.0`, ...). Returns the first remaining real segment, or `None` when nothing meaningful is left (root path, or an API that's all namespace/version/IDs) — a `None` result means the request stays at collection root, same as today.
+
+### Save-path integration
+
+Every discovery save path already funnels through one function, `discovery_service._save_requests()` (used directly by "Save as Flow" and by Library's "keep separate" branch) — plus one direct `_req_repo.create()` call in `save_library()`'s "merge" branch. Both gain an `organize_into_folders: bool = False` parameter (default `False` so Postman/OpenAPI/Bruno imports, which never pass it, are untouched). A shared per-save-call `folder_cache: dict[str, str]` (folder name → folder id) is threaded through both, so e.g. ten requests that all suggest "users" share one folder — via a new `FolderRepo.get_or_create_root(project_id, collection_id, name)` — instead of creating ten duplicates.
+
+---
+
 ## Out of Scope (This Version)
 
 - Cross-collection drag-and-drop (moving a request into a different collection stays a deliberate `PATCH collection_id` action, not a drag gesture)
