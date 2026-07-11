@@ -129,7 +129,7 @@ Reuse `.suite-script-row`/`.dragging`/drag-handle styles from `style.css:1163-11
 
 ## Section 5: Discovery Integration — Suggested Folders on Save
 
-Once folders exist, the Discovery review flow (Record APIs / HAR import / "From Playwright run" — anything that lands in `request-review-modal.js`) can place saved requests into folders automatically instead of always dumping them flat at collection root.
+Once folders exist, the Discovery review flow can place saved requests into folders automatically instead of always dumping them flat at collection root. The web UI's HAR/OpenAPI/Postman/Bruno/cURL import views and Record APIs all call a `/discover/*/preview` endpoint and hand the parsed list to the same shared `request-review-modal.js` → this feature lands in exactly one place and applies uniformly across every web-UI discovery path.
 
 ### Decisions
 
@@ -138,7 +138,7 @@ Once folders exist, the Discovery review flow (Record APIs / HAR import / "From 
 | Scope | Applies to **both** "Save as Flow" and "Save as Library" equally — folder placement (by endpoint resource) is orthogonal to variant grouping (by param/body differences), so it is not tied to Library's grouping modal |
 | Suggestion depth | One level — folder name is the first meaningful path segment (e.g. `GET /api/v1/users/123` → folder "users"). No path-mirroring, no multi-level nesting from discovery |
 | User control | One checkbox in the existing review modal, next to "Include in API Documentation" — "Organize into folders by endpoint", **checked by default**. Unchecking it saves flat at collection root exactly as today |
-| Other import paths | Postman/OpenAPI/Bruno imports are unaffected — they already have their own organization scheme (one collection per tag/folder) and don't route through the review modal at all |
+| CLI import path | `qaclan api import` (OpenAPI/Postman/Bruno/HAR) calls `DiscoveryService.import_openapi/import_postman/import_bruno/import_har` directly — a separate code path from the web UI's preview+review-modal flow, with its own pre-existing per-tag/per-folder collection grouping. This plan does not touch it; it is unaffected by `organize_into_folders` |
 
 ### Suggestion heuristic
 
