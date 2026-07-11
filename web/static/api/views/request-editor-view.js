@@ -19,6 +19,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
+  let examples = [];
   if (requestId) {
     const res = await window.api('GET', `/api-requests/${requestId}`);
     if (res.ok === false) {
@@ -26,6 +27,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       return;
     }
     existing = res.request;
+    const exRes = await window.api('GET', `/api-requests/${requestId}/examples`);
+    if (exRes.ok !== false) examples = exRes.examples || [];
   }
 
   const r = existing || {};
@@ -168,6 +171,50 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  let examplesSelect = null;
+  if (examples.length) {
+    examplesSelect = document.createElement('select');
+    examplesSelect.className = 'req-examples-select';
+    examplesSelect.style.cssText = 'font-size:12px;max-width:160px;';
+    examplesSelect.title = 'Load a previously captured example';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Default values';
+    examplesSelect.appendChild(defaultOpt);
+
+    examples.forEach(ex => {
+      const opt = document.createElement('option');
+      opt.value = ex.id;
+      opt.textContent = ex.label;
+      examplesSelect.appendChild(opt);
+    });
+    urlBar.appendChild(examplesSelect);
+
+    // paramsTable, responsePanel, and _setBodyValue are declared further down in this
+    // function; this listener only ever runs after the user interacts with the
+    // dropdown, by which point the whole function body (and those consts) has run.
+    examplesSelect.onchange = () => {
+      const chosen = examples.find(ex => ex.id === examplesSelect.value);
+      if (!chosen) {
+        paramsTable.setRows(r.params || []);
+        _setBodyValue(r.body || '');
+        responsePanel.el.style.display = 'none';
+        return;
+      }
+      paramsTable.setRows(chosen.params || []);
+      _setBodyValue(chosen.body || '');
+      responsePanel.show({
+        status_code: chosen.response_status,
+        duration_ms: null,
+        response_body: chosen.response_body,
+        response_headers: chosen.response_headers || {},
+        assertion_results: [],
+        state_updates: {},
+      }, { captured: true, label: chosen.label });
+    };
+  }
 
   const copyCurlBtn = document.createElement('button');
   copyCurlBtn.type = 'button';
