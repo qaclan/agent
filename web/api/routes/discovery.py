@@ -142,6 +142,45 @@ def save_requests():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/discover/group-requests", methods=["POST"])
+def group_requests_route():
+    """Preview grouping for Save-as-Library. Body: {requests}. Saves nothing."""
+    try:
+        data = request.get_json(force=True) or {}
+        requests_list = data.get("requests", [])
+        if not requests_list:
+            return jsonify({"ok": False, "error": "No requests provided"}), 400
+        from web.api.services.discovery_service import group_requests
+        groups = group_requests(requests_list)
+        return jsonify({"ok": True, "groups": groups})
+    except Exception as e:
+        logger.exception("group_requests_route")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/discover/save-library", methods=["POST"])
+def save_library_route():
+    """Commit the user's resolved per-group choices from the grouping preview.
+    Body: {groups, collection_name, include_in_docs}."""
+    try:
+        pid = _project_id()
+        data = request.get_json(force=True) or {}
+        groups = data.get("groups", [])
+        collection_name = data.get("collection_name", "Recorded APIs")
+        include_in_docs = int(data.get("include_in_docs", 1))
+        if not groups:
+            return jsonify({"ok": False, "error": "No groups provided"}), 400
+        from web.api.services.discovery_service import save_library
+        result = save_library(pid, groups, collection_name, include_in_docs=include_in_docs)
+        logger.info("save_library_route: saved %d to collection %s", result["imported"], result["collection_id"])
+        return jsonify({"ok": True, **result})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("save_library_route")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/discover/har/preview", methods=["POST"])
 def discover_har_preview():
     """Parse HAR file and return request list without saving."""
