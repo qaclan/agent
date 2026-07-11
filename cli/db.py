@@ -150,6 +150,7 @@ def init_db():
     _migrate_pre_extractor(conn)
     _migrate_collection_run_progress(conn)
     _migrate_api_request_examples(conn)
+    _migrate_nested_folders(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -186,6 +187,38 @@ def _migrate_api_request_examples(conn):
             created_at      TEXT NOT NULL
         )
     """)
+    conn.commit()
+
+
+def _migrate_nested_folders(conn):
+    """Create api_folders (unlimited-depth folder tree inside a collection) and add
+    folder_id/order_index to api_requests, order_index to api_collections.
+    See docs/superpowers/specs/2026-07-11-nested-folders-drag-drop-design.md."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_folders (
+            id               TEXT PRIMARY KEY,
+            project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            collection_id    TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            parent_folder_id TEXT REFERENCES api_folders(id) ON DELETE CASCADE,
+            name             TEXT NOT NULL,
+            order_index      INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL
+        )
+    """)
+    try:
+        conn.execute(
+            "ALTER TABLE api_requests ADD COLUMN folder_id TEXT REFERENCES api_folders(id) ON DELETE CASCADE"
+        )
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # already exists
     conn.commit()
 
 
