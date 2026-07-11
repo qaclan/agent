@@ -234,9 +234,9 @@ function renderApiPage(container) {
 
     const { reload: _reloadCollections } = renderCollectionsView(
       document.getElementById('api-collections-panel'),
-      (requestId, defaultCollectionId, collectionId, collectionEnvName) => {
+      (requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId) => {
         _teardown();
-        renderRequestEditor(mainEl(), requestId, defaultCollectionId, collectionId, collectionEnvName);
+        renderRequestEditor(mainEl(), requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId);
       },
       (runId, colId, colName) => _showRunDetail(runId, colId, colName),
       (col, runId) => _showCollectionDetail(col, runId)

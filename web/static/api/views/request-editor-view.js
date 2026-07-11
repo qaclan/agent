@@ -9,13 +9,14 @@ import { applyVarStyle } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
 
 /**
- * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
+ * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId)
  * requestId: string|null  (null = new request)
  * defaultCollectionId: string|null  (pre-select collection when creating new)
  * collectionId: string|null  (resolved collection for var loading)
  * collectionEnvName: string|null  (env bound to the collection)
+ * defaultFolderId: string|null  (pre-select the folder a new request is created into)
  */
-export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null) {
+export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null, defaultFolderId = null) {
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
@@ -1370,6 +1371,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       assertions: assertionBuilder.getAssertions(),
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
+    if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;
 
     const res = requestId
       ? await window.api('PUT', `/api-requests/${requestId}`, payload)
