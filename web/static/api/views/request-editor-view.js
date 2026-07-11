@@ -6,6 +6,7 @@ import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
 import { applyVarStyle } from '../components/var-style.js';
+import { attachTokenOverlay } from '../components/var-token-overlay.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -18,6 +19,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
+  let examples = [];
   if (requestId) {
     const res = await window.api('GET', `/api-requests/${requestId}`);
     if (res.ok === false) {
@@ -25,6 +27,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       return;
     }
     existing = res.request;
+    const exRes = await window.api('GET', `/api-requests/${requestId}/examples`);
+    if (exRes.ok !== false) examples = exRes.examples || [];
   }
 
   const r = existing || {};
@@ -49,15 +53,27 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   let _knownVarNames = null;
+  let _allVarsList = null;
   let _authFieldInputs = [];
+  let _authFieldOverlays = [];
+  let _urlOverlay = null;
+  let _scriptTextareaOverlays = [];
+  let _bodyFallbackOverlay = null;
 
   async function _refreshKnownVarNames() {
     const vars = await getAllVars();
     _knownVarNames = new Set(vars.map(v => v.key));
+    _allVarsList = vars;
     paramsTable.restyleAll();
     headersTable.restyleAll();
     pathVarsTable.restyleAll();
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
+    _authFieldOverlays.forEach(o => o.refresh());
+    _urlOverlay?.refresh();
+    _scriptTextareaOverlays.forEach(o => o.refresh());
+    _bodyFallbackOverlay?.refresh();
+    assertionBuilder.restyleAll();
+    _cmEditor?.refresh?.();
   }
 
   container.innerHTML = '';
@@ -105,7 +121,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlInput.className = 'req-url-input';
   urlInput.placeholder = 'https://api.example.com/endpoint';
   urlInput.value = r.url || '';
-  urlBar.appendChild(urlInput);
+  _urlOverlay = attachTokenOverlay(urlInput, () => _allVarsList);
+  urlBar.appendChild(_urlOverlay.el);
 
   urlInput.addEventListener('paste', async (e) => {
     const text = (e.clipboardData || window.clipboardData).getData('text');
@@ -146,6 +163,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _setBodyType(parsed.body_type || 'none');
 
     _syncPathVars();
+    _syncUrlFromQueryParams();
     window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
   });
 
@@ -153,6 +171,50 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  let examplesSelect = null;
+  if (examples.length) {
+    examplesSelect = document.createElement('select');
+    examplesSelect.className = 'req-examples-select';
+    examplesSelect.style.cssText = 'font-size:12px;max-width:160px;';
+    examplesSelect.title = 'Load a previously captured example';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Default values';
+    examplesSelect.appendChild(defaultOpt);
+
+    examples.forEach(ex => {
+      const opt = document.createElement('option');
+      opt.value = ex.id;
+      opt.textContent = ex.label;
+      examplesSelect.appendChild(opt);
+    });
+    urlBar.appendChild(examplesSelect);
+
+    // paramsTable, responsePanel, and _setBodyValue are declared further down in this
+    // function; this listener only ever runs after the user interacts with the
+    // dropdown, by which point the whole function body (and those consts) has run.
+    examplesSelect.onchange = () => {
+      const chosen = examples.find(ex => ex.id === examplesSelect.value);
+      if (!chosen) {
+        paramsTable.setRows(r.params || []);
+        _setBodyValue(r.body || '');
+        responsePanel.el.style.display = 'none';
+        return;
+      }
+      paramsTable.setRows(chosen.params || []);
+      _setBodyValue(chosen.body || '');
+      responsePanel.show({
+        status_code: chosen.response_status,
+        duration_ms: null,
+        response_body: chosen.response_body,
+        response_headers: chosen.response_headers || {},
+        assertion_results: [],
+        state_updates: {},
+      }, { captured: true, label: chosen.label });
+    };
+  }
 
   const copyCurlBtn = document.createElement('button');
   copyCurlBtn.type = 'button';
@@ -179,11 +241,65 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(tabBar);
   editor.appendChild(sectionContent);
 
+  // ── URL helpers: split into path / query / hash, shared by param + path-var sync ──
+  function _splitUrl(raw) {
+    const hashIdx = raw.indexOf('#');
+    const hash = hashIdx >= 0 ? raw.slice(hashIdx) : '';
+    const beforeHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+    const qIdx = beforeHash.indexOf('?');
+    const query = qIdx >= 0 ? beforeHash.slice(qIdx) : '';
+    const path = qIdx >= 0 ? beforeHash.slice(0, qIdx) : beforeHash;
+    return { path, query, hash };
+  }
+
+  function _stripQuery(raw) {
+    const { path, hash } = _splitUrl(raw);
+    return path + hash;
+  }
+
+  // Query string in the URL bar is a display convenience, not a wire value —
+  // the resolved request is built server-side from the params table. Only
+  // escape the chars that are structurally significant to our own & / =
+  // splitting, so {{VAR}} tokens stay readable instead of percent-encoded.
+  function _decodeQueryPart(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
+  function _encodeQueryPart(s) { return String(s).replace(/[&=#%]/g, c => encodeURIComponent(c)); }
+
+  function _parseQueryString(qs) {
+    if (!qs) return [];
+    return qs.split('&').filter(Boolean).map(pair => {
+      const eq = pair.indexOf('=');
+      const rawKey = eq >= 0 ? pair.slice(0, eq) : pair;
+      const rawVal = eq >= 0 ? pair.slice(eq + 1) : '';
+      return { key: _decodeQueryPart(rawKey), value: _decodeQueryPart(rawVal), enabled: true };
+    });
+  }
+
+  function _buildQueryString(rows) {
+    return rows.filter(r => r.key && r.enabled !== false)
+      .map(r => `${_encodeQueryPart(r.key)}=${_encodeQueryPart(r.value || '')}`)
+      .join('&');
+  }
+
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const paramsTable = createKeyValueTable({
+    placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    getVarsList: () => _allVarsList,
+    onChange: () => _syncUrlFromQueryParams(),
+  });
   paramsTable.setRows(r.params || []);
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  function _syncQueryParamsFromUrl() {
+    const { query } = _splitUrl(urlInput.value);
+    paramsTable.setRows(_parseQueryString(query.startsWith('?') ? query.slice(1) : query));
+  }
+
+  function _syncUrlFromQueryParams() {
+    const { path, hash } = _splitUrl(urlInput.value);
+    const qs = _buildQueryString(paramsTable.getRows());
+    urlInput.value = path + (qs ? '?' + qs : '') + hash;
+  }
+
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList });
   headersTable.setRows(r.headers || []);
 
   const authBanner = document.createElement('div');
@@ -195,7 +311,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _collectionAuth = null;
 
   // ── Path Variables ──
-  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const pathVarsTable = createKeyValueTable({
+    placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    getVarsList: () => _allVarsList,
+    onChange: () => _syncUrlFromPathVars(),
+  });
   const pathVarsSection = document.createElement('div');
   {
     const hdr = document.createElement('div');
@@ -203,12 +323,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     hdr.textContent = 'Path Variables';
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = 'Values for {param} segments in the URL. Supports {{VAR}} syntax.';
+    hint.textContent = 'Synced with {param} segments in the URL — renaming/adding/removing a row updates the URL too. Values support {{VAR}} syntax.';
     pathVarsSection.appendChild(hdr);
     pathVarsSection.appendChild(hint);
     pathVarsSection.appendChild(pathVarsTable.el);
   }
-  pathVarsSection.style.display = 'none';
 
   const queryParamsHdr = document.createElement('div');
   queryParamsHdr.style.cssText = 'font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:12px 0 4px;';
@@ -221,11 +340,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const _storedPathParams = r.path_params || [];
 
+  // Matches single-brace {param} segments, excluding any brace that's part of
+  // a {{VAR}} token (even a malformed one missing its closing brace) — the
+  // lookbehind rejects an opening `{` immediately preceded by another `{`.
+  const PATH_VAR_RE = /(?<!\{)\{(?!\{)([^{}]+)\}(?!\})/g;
+  let _lastPathKeys = [];
+
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(/\{(?!\{)([^{}]+)\}(?!\})/g)].map(m => m[1]);
+    const matches = [...urlInput.value.matchAll(PATH_VAR_RE)].map(m => m[1]);
     const keys = [...new Set(matches)];
-    if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
-    pathVarsSection.style.display = '';
+    _lastPathKeys = keys;
     const current = {};
     pathVarsTable.getRows().forEach(row => { current[row.key] = row.value; });
     const stored = {};
@@ -233,10 +357,35 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     pathVarsTable.setRows(keys.map(key => ({ key, value: current[key] ?? stored[key] ?? '', enabled: true })));
   }
 
-  urlInput.addEventListener('input', _syncPathVars);
-  _syncPathVars();
+  function _syncUrlFromPathVars() {
+    const newKeys = pathVarsTable.getRows().filter(row => row.key).map(row => row.key);
+    const { path, query, hash } = _splitUrl(urlInput.value);
+    let newPath = path;
 
-  const assertionBuilder = createAssertionBuilder();
+    if (newKeys.length === _lastPathKeys.length) {
+      _lastPathKeys.forEach((oldKey, i) => {
+        const newKey = newKeys[i];
+        if (newKey && newKey !== oldKey) newPath = newPath.replace(`{${oldKey}}`, `{${newKey}}`);
+      });
+    } else if (newKeys.length < _lastPathKeys.length) {
+      _lastPathKeys.filter(oldKey => !newKeys.includes(oldKey)).forEach(oldKey => {
+        newPath = newPath.includes(`/{${oldKey}}`) ? newPath.replace(`/{${oldKey}}`, '') : newPath.replace(`{${oldKey}}`, '');
+      });
+    } else {
+      newKeys.filter(key => !_lastPathKeys.includes(key)).forEach(key => {
+        if (!newPath.includes(`{${key}}`)) newPath += (newPath.endsWith('/') ? '' : '/') + `{${key}}`;
+      });
+    }
+
+    if (newPath !== path) urlInput.value = newPath + query + hash;
+    _lastPathKeys = [...new Set([...newPath.matchAll(PATH_VAR_RE)].map(m => m[1]))];
+  }
+
+  urlInput.addEventListener('input', () => { _syncPathVars(); _syncQueryParamsFromUrl(); });
+  _syncPathVars();
+  _syncUrlFromQueryParams(); // reflect params loaded from the saved request in the URL bar
+
+  const assertionBuilder = createAssertionBuilder({ getVarsList: () => _allVarsList });
   assertionBuilder.setAssertions(r.assertions || []);
 
   // ── Body section ──
@@ -300,8 +449,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // Fallback textarea — shown when CM unavailable (offline)
   const bodyFallback = document.createElement('textarea');
   bodyFallback.className = 'input-sm body-json-editor';
-  bodyFallback.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;display:none;';
+  bodyFallback.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;';
   bodyFallback.spellcheck = false;
+  _bodyFallbackOverlay = attachTokenOverlay(bodyFallback, () => _allVarsList);
+  _bodyFallbackOverlay.el.style.display = 'none';
 
   const jsonErrorEl = document.createElement('div');
   jsonErrorEl.style.cssText = 'display:none;font-size:11px;color:var(--danger,#e53e3e);padding:3px 6px;margin-top:2px;font-family:var(--font-mono);background:color-mix(in srgb,var(--danger,#e53e3e) 6%,transparent);border-radius:4px;';
@@ -424,12 +575,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       value: val,
       isDark,
       onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+      getVarsList: () => _allVarsList,
     });
     if (!_cmEditor) {
       // CM unavailable — show fallback textarea instead
       cmWrap.style.display = 'none';
       bodyFallback.value = val;
-      bodyFallback.style.display = '';
+      _bodyFallbackOverlay.el.style.display = '';
       jsonErrorEl.style.display = 'none';
     }
   }
@@ -470,7 +622,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmEditor.destroy();
       _cmEditor = null;
       cmWrap.style.display = 'none';
-      bodyFallback.style.display = 'none';
+      _bodyFallbackOverlay.el.style.display = 'none';
       _cmActive = false;
     }
 
@@ -486,7 +638,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     if (isText) {
       _cmActive = true;
       cmWrap.style.display = '';
-      bodyFallback.style.display = 'none';
+      _bodyFallbackOverlay.el.style.display = 'none';
       _activateCmEditor(bodyTextarea.value);
       if (type === 'graphql') bodyFallback.placeholder = '{ "query": "{ users { id name } }" }';
       else bodyFallback.placeholder = '{\n  "key": "value"\n}';
@@ -498,7 +650,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(bodyTypeGroup);
   bodySection.appendChild(bodyTextarea);   // hidden — source of truth for _save()
   bodySection.appendChild(cmWrap);
-  bodySection.appendChild(bodyFallback);
+  bodySection.appendChild(_bodyFallbackOverlay.el);
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
   bodySection.appendChild(multipartBodyTable.el);
@@ -547,8 +699,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     applyVarStyle(inp, _knownVarNames);
     _authInlineDrop.watchInput(inp);
     _authFieldInputs.push(inp);
+    const overlay = attachTokenOverlay(inp, () => _allVarsList);
+    _authFieldOverlays.push(overlay);
     wrap.appendChild(lbl);
-    wrap.appendChild(inp);
+    wrap.appendChild(overlay.el);
     return wrap;
   }
 
@@ -774,7 +928,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const effectiveAuth = await _resolveEffectiveAuth();
     const curl = buildCurlCommand({
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       bodyType: activeBodyType,
@@ -841,7 +995,9 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     textarea.placeholder = _ph(lang || 'js');
     langSelect.onchange = () => { textarea.placeholder = _ph(langSelect.value); };
     textarea.value = code || '';
-    div.appendChild(textarea);
+    const scriptOverlay = attachTokenOverlay(textarea, () => _allVarsList);
+    _scriptTextareaOverlays.push(scriptOverlay);
+    div.appendChild(scriptOverlay.el);
     _scriptInlineDrop.watchInput(textarea);
 
     div._getLang = () => langSelect.value;
@@ -1195,7 +1351,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const payload = {
       name: nameInput.value.trim() || 'Unnamed Request',
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),

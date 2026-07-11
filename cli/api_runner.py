@@ -80,6 +80,17 @@ def _resolve_list(items: list, env_vars: dict, state: dict) -> list:
     return out
 
 
+def _resolve_vars_deep(obj, env_vars: dict, state: dict):
+    """Recursively resolve {{var}} in string leaves of a nested dict/list (e.g. GraphQL variables)."""
+    if isinstance(obj, str):
+        return resolve_vars(obj, env_vars, state)
+    if isinstance(obj, dict):
+        return {k: _resolve_vars_deep(v, env_vars, state) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_resolve_vars_deep(v, env_vars, state) for v in obj]
+    return obj
+
+
 # ---------------------------------------------------------------------------
 # Auth injection
 # ---------------------------------------------------------------------------
@@ -455,10 +466,16 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         elif body_type == "form" and body_raw:
             try:
                 form_items = json.loads(body_raw)
-                data = {item["key"]: resolve_vars(item["value"], env_vars, state)
+                data = {item["key"]: resolve_vars(item.get("value", ""), env_vars, state)
                         for item in form_items if item.get("enabled", True)}
             except (ValueError, TypeError):
                 data = {}
+            # A stale Content-Type (e.g. carried over from a multipart import) would
+            # override httpx's auto x-www-form-urlencoded header since explicit
+            # headers win — strip it so httpx sets the correct one for this body.
+            for _k in list(headers.keys()):
+                if _k.lower() == "content-type":
+                    del headers[_k]
         elif body_type == "multipart" and body_raw:
             try:
                 form_items = json.loads(body_raw)
@@ -473,16 +490,16 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                         # (attached via the editor's file picker, or imported
                         # from a source that captured real content).
                         try:
-                            content = base64.b64decode(item["value"])
+                            file_content = base64.b64decode(item["value"])
                         except (ValueError, TypeError):
-                            content = b""
+                            file_content = b""
                     else:
                         value = resolve_vars(item.get("value", ""), env_vars, state)
-                        content = value.encode()
+                        file_content = value.encode()
                     # httpx: (filename, content, content_type) forces multipart
                     # encoding even for plain text fields; filename=None omits
                     # the filename attribute; content_type=None lets httpx guess.
-                    files[item["key"]] = (filename, content, content_type)
+                    files[item["key"]] = (filename, file_content, content_type)
             except (ValueError, TypeError):
                 files = {}
             # A captured/stale Content-Type carries the original boundary, which
@@ -495,7 +512,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 gql = json.loads(body_raw)
                 content = json.dumps({
                     "query": resolve_vars(gql.get("query", ""), env_vars, state),
-                    "variables": gql.get("variables", {}),
+                    "variables": _resolve_vars_deep(gql.get("variables", {}), env_vars, state),
                 }).encode()
                 for _k in list(headers.keys()):
                     if _k.lower() == "content-type":

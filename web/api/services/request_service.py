@@ -40,3 +40,10 @@ class RequestService:
         """Run a single request ad-hoc (not stored in api_runs). Returns result dict."""
         from web.api.services.runner_service import RunnerService
         return RunnerService().run_request(id, project_id, env_name=env_name)
+
+    def list_examples(self, request_id: str, project_id: str) -> list[dict]:
+        existing = _repo.get(request_id, project_id)
+        if existing is None:
+            raise LookupError(f"Request {request_id} not found")
+        from web.api.repositories.request_example_repo import RequestExampleRepo
+        return RequestExampleRepo().list_for_request(request_id)

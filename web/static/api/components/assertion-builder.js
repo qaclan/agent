@@ -1,8 +1,17 @@
 /**
- * createAssertionBuilder() → { el, getAssertions, setAssertions }
+ * createAssertionBuilder(options?) → { el, getAssertions, setAssertions, restyleAll }
+ * options.getVarsList?: () => Array<{key, value, group?}>|null — when provided,
+ * the path/expected-value inputs get per-token {{var}} coloring + hover
+ * tooltip, and the expected-value input additionally gets the whole-field
+ * kv-value--var-ok/--missing bg tint.
  * Assertion shape: {type, path?, key?, op, value}
  */
-export function createAssertionBuilder() {
+import { attachTokenOverlay } from './var-token-overlay.js';
+import { applyVarStyle } from './var-style.js';
+
+export function createAssertionBuilder(options = {}) {
+  const { getVarsList = null } = options;
+  const _overlays = [];
   const wrapper = document.createElement('div');
   wrapper.className = 'assertion-builder';
 
@@ -53,7 +62,14 @@ export function createAssertionBuilder() {
     extraInput.className = 'assertion-extra input-sm';
     extraInput.placeholder = '$.path or header-key';
     extraInput.value = data.path || data.key || '';
-    row.appendChild(extraInput);
+    let extraOverlay = null;
+    if (getVarsList) {
+      extraOverlay = attachTokenOverlay(extraInput, getVarsList);
+      _overlays.push(extraOverlay);
+      row.appendChild(extraOverlay.el);
+    } else {
+      row.appendChild(extraInput);
+    }
 
     // Operator select
     const opSelect = document.createElement('select');
@@ -66,7 +82,19 @@ export function createAssertionBuilder() {
     valInput.className = 'assertion-value input-sm';
     valInput.placeholder = 'expected value';
     valInput.value = data.value !== undefined ? String(data.value) : '';
-    row.appendChild(valInput);
+    function _styleValInput() {
+      if (getVarsList) applyVarStyle(valInput, new Set((getVarsList() || []).map(v => v.key)));
+    }
+    _styleValInput();
+    let valOverlay = null;
+    if (getVarsList) {
+      valInput.addEventListener('input', _styleValInput);
+      valOverlay = attachTokenOverlay(valInput, getVarsList);
+      _overlays.push(valOverlay);
+      row.appendChild(valOverlay.el);
+    } else {
+      row.appendChild(valInput);
+    }
 
     // Delete button
     const delBtn = document.createElement('button');
@@ -90,14 +118,16 @@ export function createAssertionBuilder() {
       });
       if (data.op && ops.includes(data.op)) opSelect.value = data.op;
 
-      // Show/hide extra input
+      // Show/hide extra input (toggle the overlay wrap when present, not the
+      // inner input directly — the sibling overlay div isn't hidden by the
+      // input's own display:none, so it must be the thing that's toggled)
       const needsExtra = (t === 'json_path' || t === 'header');
-      extraInput.style.display = needsExtra ? '' : 'none';
+      (extraOverlay ? extraOverlay.el : extraInput).style.display = needsExtra ? '' : 'none';
       extraInput.placeholder = t === 'json_path' ? '$.path' : 'Header-Name';
 
       // Show/hide value (exists/not_exists don't need it)
       const op = opSelect.value;
-      valInput.style.display = (op === 'exists' || op === 'not_exists') ? 'none' : '';
+      (valOverlay ? valOverlay.el : valInput).style.display = (op === 'exists' || op === 'not_exists') ? 'none' : '';
     }
 
     typeSelect.onchange = _updateUI;
@@ -129,8 +159,17 @@ export function createAssertionBuilder() {
 
   function setAssertions(assertions = []) {
     list.innerHTML = '';
+    _overlays.length = 0;
     assertions.forEach(a => _addRow(a));
   }
 
-  return { el: wrapper, getAssertions, setAssertions };
+  function restyleAll() {
+    _overlays.forEach(o => o.refresh());
+    if (getVarsList) {
+      const known = new Set((getVarsList() || []).map(v => v.key));
+      list.querySelectorAll('.assertion-value').forEach(inp => applyVarStyle(inp, known));
+    }
+  }
+
+  return { el: wrapper, getAssertions, setAssertions, restyleAll };
 }

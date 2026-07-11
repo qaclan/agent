@@ -272,7 +272,7 @@ export function createResponsePanel(opts = {}) {
     }
   }
 
-  function show(result) {
+  function show(result, meta = null) {
     _currentResult = result;
     panel.style.display = '';
 
@@ -286,8 +286,14 @@ export function createResponsePanel(opts = {}) {
     tabBar.innerHTML = '';
 
     const statusSpan = document.createElement('span');
-    statusSpan.className = `response-status ${statusClass}`;
-    statusSpan.textContent = statusCode ? `${statusCode} · ${duration}ms` : `ERROR · ${duration}ms`;
+    if (meta?.captured) {
+      statusSpan.className = 'response-status response-status-warn';
+      statusSpan.textContent = `⚠ Captured example · not live${meta.label ? ' · ' + meta.label : ''}`;
+      statusSpan.title = statusCode ? `${statusCode} · ${duration}ms at capture time` : 'No status captured';
+    } else {
+      statusSpan.className = `response-status ${statusClass}`;
+      statusSpan.textContent = statusCode ? `${statusCode} · ${duration}ms` : `ERROR · ${duration}ms`;
+    }
     tabBar.appendChild(statusSpan);
 
     tabBar.appendChild(_renderTab('Body', 'body', true));

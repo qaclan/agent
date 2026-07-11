@@ -1,3 +1,5 @@
+import { showVariantComparisonModal } from './variant-comparison-modal.js';
+
 function _esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
@@ -20,7 +22,7 @@ function _kvTable(data) {
   data = _parseJson(data);
   if (!data) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   const entries = Array.isArray(data)
-    ? data.map(h => [h.name ?? h.key ?? '', h.value ?? ''])
+    ? data.map(h => [h.name ?? h.key ?? '', h.is_file ? `📎 ${h.filename || 'file'}` : (h.value ?? '')])
     : Object.entries(data);
   if (!entries.length) return '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
   return `<div style="font-size:12px;">
@@ -54,9 +56,11 @@ function _detailHTML(req) {
   const headersSection = _section('Headers', _kvTable(req.headers));
   const paramsSection  = _section('Query Params', _kvTable(req.params));
 
-  const bodyContent = req.body
-    ? `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`
-    : '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>';
+  const bodyContent = !req.body
+    ? '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>'
+    : (req.body_type === 'form' || req.body_type === 'multipart')
+      ? _kvTable(req.body)
+      : `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`;
   const bodySection = _section('Request Body', bodyContent);
 
   const assertionsSection = assertions.length ? _section('Assertions',
@@ -193,7 +197,17 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
       <input type="checkbox" id="rev-include-docs" checked>
       Include in API Documentation
-    </label>`;
+    </label>
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);">
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="rev-save-mode" value="flow" checked style="margin-top:3px;">
+        <span><strong>Save as Flow</strong><br><span style="font-size:11px;color:var(--text-muted)">preserve exact order + repeats — for replaying this real flow</span></span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="rev-save-mode" value="library" style="margin-top:3px;">
+        <span><strong>Save as Library</strong><br><span style="font-size:11px;color:var(--text-muted)">group by endpoint, show variants — for building reusable requests</span></span>
+      </label>
+    </div>`;
 
   window.showModal('Review & Save Requests', modalBody, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
@@ -202,6 +216,17 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       const selected = indexedRequests.filter(r => document.getElementById(`rev-req-${r._idx}`)?.checked);
       if (!selected.length) { await window._alertDialog('No requests selected.'); return; }
       const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
+      const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
+
+      if (mode === 'library') {
+        const plainRequests = selected.map(({ _idx, ...rest }) => rest);
+        const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
+        if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
+        window.closeModal();
+        showVariantComparisonModal(grouped.groups, colName, includeInDocs);
+        return;
+      }
+
       const data = await window.api('POST', '/discover/save-requests', {
         requests: selected,
         collection_name: colName,
@@ -228,6 +253,14 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     document.getElementById('rev-hide-3p')?.addEventListener('change', e => {
       hidingThirdParty = e.target.checked;
       if (listEl) _renderList(listEl);
+    });
+
+    const saveBtn = document.querySelector('[data-btn-idx="1"]');
+    document.querySelectorAll('input[name="rev-save-mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value;
+        if (saveBtn) saveBtn.textContent = mode === 'library' ? 'Next →' : 'Save Selected';
+      });
     });
   });
 }

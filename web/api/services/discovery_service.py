@@ -91,6 +91,83 @@ def _save_requests(project_id: str, requests: list[dict], collection_id: str | N
     return saved
 
 
+def group_requests(requests: list[dict]) -> list[dict]:
+    """Preview grouping for Save-as-Library. Pure computation — nothing persisted."""
+    from cli.api_discovery.variant_grouper import group_requests as _group
+    return _group(requests)
+
+
+def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1) -> dict:
+    """Persist the user's resolved per-group choices from the Save-as-Library
+    comparison UI. See docs/superpowers/specs/2026-07-05-api-variant-library-design.md
+    Sections 2, 4, 5.
+
+    groups: [{action: "separate"|"merge", checked_fields: [field_key, ...],
+              variants: [{request: {...}, included: bool, name_override: str|None}, ...]}]
+    """
+    from cli.api_discovery.schema_merger import merge_schemas
+    from cli.api_discovery.variant_grouper import compute_diff_fields, suggest_label, templatize_request
+    from web.api.repositories.request_example_repo import RequestExampleRepo
+    from web.api.services.doc_service import sync_doc_entry
+
+    col = _col_repo.create(project_id, collection_name)
+    example_repo = RequestExampleRepo()
+    saved = 0
+
+    for group in groups:
+        included = [v for v in group.get("variants", []) if v.get("included", True)]
+        if not included:
+            continue
+
+        if group.get("action") == "merge" and len(included) > 1:
+            checked_keys = set(group.get("checked_fields", []))
+            default_req = dict(included[0]["request"])
+            merged_req = templatize_request(default_req, checked_keys)
+            merged_req["collection_id"] = col["id"]
+            merged_req["include_in_docs"] = include_in_docs
+            for k in ("response_status", "response_headers", "response_body", "duration_ms"):
+                merged_req.pop(k, None)
+
+            req_schema = None
+            resp_schema = None
+            for v in included:
+                req_schema = merge_schemas(req_schema, v["request"].get("request_schema"))
+                resp_schema = merge_schemas(resp_schema, v["request"].get("response_schema"))
+            merged_req["request_schema"] = req_schema
+            merged_req["response_schema"] = resp_schema
+
+            saved_req = _req_repo.create(project_id, merged_req)
+            try:
+                sync_doc_entry(project_id, {**merged_req, "id": saved_req["id"]})
+            except Exception as e:
+                logger.warning("sync_doc_entry failed for merged request %s: %s", saved_req["id"], e)
+
+            included_requests = [v["request"] for v in included]
+            diff_fields = compute_diff_fields(included_requests)
+            for i, v in enumerate(included[1:], start=1):
+                r = v["request"]
+                example_repo.create(saved_req["id"], {
+                    "label": suggest_label(r, diff_fields, i),
+                    "params": r.get("params", []),
+                    "body": r.get("body"),
+                    "response_status": r.get("response_status"),
+                    "response_headers": r.get("response_headers"),
+                    "response_body": r.get("response_body"),
+                })
+            saved += 1
+        else:
+            reqs = []
+            for v in included:
+                r = dict(v["request"])
+                if v.get("name_override"):
+                    r["name"] = v["name_override"]
+                r["include_in_docs"] = include_in_docs
+                reqs.append(r)
+            saved += _save_requests(project_id, reqs, collection_id=col["id"])
+
+    return {"imported": saved, "collection_id": col["id"]}
+
+
 class DiscoveryService:
     def import_har(self, project_id: str, har_json: dict,
                    collection_name: str | None = None) -> dict:

@@ -58,11 +58,17 @@ cd && rm -rf /tmp/cm6-bundle
 
 ## entry.js
 
+This is the actual entry point used to produce the committed `cm6.js` —
+keep it in sync with reality (json language + lint support, plus the
+decoration/hover-tooltip primitives used for {{var}} highlighting) so a
+future rebuild doesn't silently drop functionality.
+
 ```js
-import { EditorState, Compartment } from "@codemirror/state"
+import { EditorState, Compartment, RangeSetBuilder, StateEffect } from "@codemirror/state"
 import {
   EditorView, keymap, lineNumbers, highlightActiveLine,
   highlightActiveLineGutter, drawSelection,
+  Decoration, ViewPlugin, ViewUpdate, hoverTooltip,
 } from "@codemirror/view"
 import {
   defaultKeymap, indentWithTab, history, historyKeymap,
@@ -74,6 +80,8 @@ import {
 import { searchKeymap, highlightSelectionMatches } from "@codemirror/search"
 import { python } from "@codemirror/lang-python"
 import { javascript } from "@codemirror/lang-javascript"
+import { json, jsonParseLinter } from "@codemirror/lang-json"
+import { linter, lintGutter } from "@codemirror/lint"
 import { oneDark } from "@codemirror/theme-one-dark"
 
 function basicSetup() {
@@ -100,70 +108,10 @@ function basicSetup() {
 }
 
 window.CM6 = {
-  EditorState, EditorView, Compartment,
+  EditorState, Compartment, RangeSetBuilder, StateEffect,
+  EditorView, Decoration, ViewPlugin, ViewUpdate, hoverTooltip,
   basicSetup, oneDark, indentUnit,
-  python, javascript,
-}
-```
-
-## entry.js with scafolding
-```js
-import { EditorState, Compartment, RangeSetBuilder } from "@codemirror/state"
-import {
-  EditorView, keymap, lineNumbers, highlightActiveLine,
-  highlightActiveLineGutter, drawSelection,
-  Decoration, ViewPlugin, ViewUpdate,
-} from "@codemirror/view"
-import {
-  defaultKeymap, indentWithTab, history, historyKeymap,
-} from "@codemirror/commands"
-import {
-  indentOnInput, bracketMatching, syntaxHighlighting,
-  defaultHighlightStyle, foldGutter, foldKeymap, indentUnit,
-} from "@codemirror/language"
-import { searchKeymap, highlightSelectionMatches } from "@codemirror/search"
-import { python } from "@codemirror/lang-python"
-import { javascript } from "@codemirror/lang-javascript"
-import { oneDark } from "@codemirror/theme-one-dark"
-
-function basicSetup() {
-  return [
-    lineNumbers(),
-    highlightActiveLineGutter(),
-    highlightActiveLine(),
-    foldGutter(),
-    drawSelection(),
-    history(),
-    indentUnit.of("    "),
-    indentOnInput(),
-    bracketMatching(),
-    syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-    highlightSelectionMatches(),
-    keymap.of([
-      ...defaultKeymap,
-      ...historyKeymap,
-      ...foldKeymap,
-      ...searchKeymap,
-      indentWithTab,
-    ]),
-  ]
-}
-
-window.CM6 = {
-  EditorState,
-  Compartment,
-  RangeSetBuilder,
-
-  EditorView,
-  Decoration,
-  ViewPlugin,
-  ViewUpdate,
-
-  basicSetup,
-  oneDark,
-  indentUnit,
-  python,
-  javascript,
+  python, javascript, json, jsonParseLinter, linter, lintGutter,
 }
 ```
 
