@@ -281,26 +281,41 @@ def parse_har(har_json: dict) -> list[dict]:
             except (ValueError, TypeError):
                 pass
 
-        # Infer response schema from response body
-        response_schema = None
+        # Response snapshot — status/headers/body/duration are only meaningful for
+        # HAR-based paths (HAR import + Record APIs mode, which also produces a HAR
+        # under the hood and reuses this same parser). Spec-derived imports
+        # (OpenAPI/Postman/Bruno/cURL) have no live traffic, so these stay None there.
         resp = entry.get("response", {})
         resp_content = resp.get("content", {})
-        # mimeType may be in content or fall back to response headers
         resp_mime = resp_content.get("mimeType", "")
         if not resp_mime:
             for h in resp.get("headers", []):
                 if h.get("name", "").lower() == "content-type":
                     resp_mime = h.get("value", "")
                     break
-        if "json" in resp_mime:
-            resp_text = resp_content.get("text", "")
-            if resp_text:
-                try:
-                    if resp_content.get("encoding") == "base64":
-                        resp_text = base64.b64decode(resp_text).decode("utf-8", errors="replace")
-                    response_schema = _infer_schema(json.loads(resp_text))
-                except Exception:
-                    logger.debug("parse_har: could not infer response schema for %s", url)
+
+        resp_text = resp_content.get("text", "")
+        if resp_text and resp_content.get("encoding") == "base64":
+            try:
+                resp_text = base64.b64decode(resp_text).decode("utf-8", errors="replace")
+            except Exception:
+                resp_text = ""
+
+        response_schema = None
+        if "json" in resp_mime and resp_text:
+            try:
+                response_schema = _infer_schema(json.loads(resp_text))
+            except Exception:
+                logger.debug("parse_har: could not infer response schema for %s", url)
+
+        response_status = resp.get("status") or None
+        response_headers = {}
+        for h in resp.get("headers", []):
+            rh_name = h.get("name", "")
+            if rh_name.lower() in skip_headers or rh_name.startswith(":"):
+                continue
+            response_headers[rh_name] = h.get("value", "")
+        duration_ms = int(entry.get("time", 0) or 0)
 
         results.append({
             "name": name,
@@ -315,6 +330,10 @@ def parse_har(har_json: dict) -> list[dict]:
             "assertions": "[]",
             "request_schema": request_schema,
             "response_schema": response_schema,
+            "response_status": response_status,
+            "response_headers": response_headers,
+            "response_body": resp_text or None,
+            "duration_ms": duration_ms,
         })
 
     logger.info("parse_har: extracted %d requests from %d entries", len(results), len(entries))
