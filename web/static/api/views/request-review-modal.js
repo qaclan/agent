@@ -1,3 +1,5 @@
+import { showVariantComparisonModal } from './variant-comparison-modal.js';
+
 function _esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
@@ -195,7 +197,17 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
       <input type="checkbox" id="rev-include-docs" checked>
       Include in API Documentation
-    </label>`;
+    </label>
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);">
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="rev-save-mode" value="flow" checked style="margin-top:3px;">
+        <span><strong>Save as Flow</strong><br><span style="font-size:11px;color:var(--text-muted)">preserve exact order + repeats — for replaying this real flow</span></span>
+      </label>
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;">
+        <input type="radio" name="rev-save-mode" value="library" style="margin-top:3px;">
+        <span><strong>Save as Library</strong><br><span style="font-size:11px;color:var(--text-muted)">group by endpoint, show variants — for building reusable requests</span></span>
+      </label>
+    </div>`;
 
   window.showModal('Review & Save Requests', modalBody, [
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
@@ -204,6 +216,17 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       const selected = indexedRequests.filter(r => document.getElementById(`rev-req-${r._idx}`)?.checked);
       if (!selected.length) { await window._alertDialog('No requests selected.'); return; }
       const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
+      const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
+
+      if (mode === 'library') {
+        const plainRequests = selected.map(({ _idx, ...rest }) => rest);
+        const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
+        if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
+        window.closeModal();
+        showVariantComparisonModal(grouped.groups, colName, includeInDocs);
+        return;
+      }
+
       const data = await window.api('POST', '/discover/save-requests', {
         requests: selected,
         collection_name: colName,
@@ -230,6 +253,14 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     document.getElementById('rev-hide-3p')?.addEventListener('change', e => {
       hidingThirdParty = e.target.checked;
       if (listEl) _renderList(listEl);
+    });
+
+    const saveBtn = document.querySelector('[data-btn-idx="1"]');
+    document.querySelectorAll('input[name="rev-save-mode"]').forEach(r => {
+      r.addEventListener('change', () => {
+        const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value;
+        if (saveBtn) saveBtn.textContent = mode === 'library' ? 'Next →' : 'Save Selected';
+      });
     });
   });
 }
