@@ -149,6 +149,7 @@ def init_db():
     _migrate_api_collection_runs(conn)
     _migrate_pre_extractor(conn)
     _migrate_collection_run_progress(conn)
+    _migrate_api_request_examples(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -165,6 +166,26 @@ def _migrate_collection_run_progress(conn):
         )
     except Exception:
         pass  # already exists
+    conn.commit()
+
+
+def _migrate_api_request_examples(conn):
+    """Create api_request_examples — non-default variants preserved when a Save-as-Library
+    merge collapses several captured requests into one {{var}}-templated api_requests row.
+    See docs/superpowers/specs/2026-07-05-api-variant-library-design.md Section 4."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_request_examples (
+            id              TEXT PRIMARY KEY,
+            api_request_id  TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            label           TEXT NOT NULL,
+            params          TEXT NOT NULL DEFAULT '[]',
+            body            TEXT DEFAULT NULL,
+            response_status INTEGER,
+            response_headers TEXT,
+            response_body   TEXT,
+            created_at      TEXT NOT NULL
+        )
+    """)
     conn.commit()
 
 
