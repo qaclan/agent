@@ -411,6 +411,10 @@ UI entry: **API → + Discover → Record APIs** → opens browser window with a
 
 After Stop, same selection UI as Path 2 below.
 
+**Multipart file-upload bodies.** Chrome's DevTools protocol never exposes request bodies for `multipart/form-data` through the normal channels — Playwright's own `record_har_path` HAR export omits `postData` entirely for these requests, and so does `Request.postData()`/`postDataBuffer()`. The only way to retrieve it is the raw CDP command `Network.getRequestPostData`. The recording harness opens a CDP session alongside the HAR recording, watches `Network.requestWillBeSent` for multipart requests, and fetches their bodies that way, writing them to a `<capture.har>.multipart.json` sidecar next to the HAR file. `cli.api_discovery.har_parser.merge_multipart_postdata()` stitches the sidecar back into the HAR JSON (matched by method+URL, FIFO) before parsing, so file-upload fields (name, filename, content-type) survive recording instead of showing up as an empty body.
+
+**Session lifecycle.** Each recording session lives in an in-memory dict (`_recording_sessions`, keyed by `session_id`) alongside its `capture_dir`/`harness_dir` temp directories. `/record/status` is deliberately read-only and never tears anything down — it still needs those directories intact for `/record/stop` to parse the HAR afterward. A session that's never explicitly stopped (abandoned tab, dropped connection) would otherwise leak its temp directories forever. A TTL-based reap (2 hours) runs lazily on `/record/start` and `/record/status` calls: it pops any session older than the TTL out of the dict under lock (fast, no I/O), then hands the actual process-termination + directory-removal work to a short-lived spawned thread so the request that happened to trigger the reap is never blocked waiting on it.
+
 ---
 
 ### Path 2 — Capture from Playwright Run (users with existing scripts)

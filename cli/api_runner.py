@@ -16,7 +16,19 @@ _SENSITIVE_KEY_RE = re.compile(
     r"(password|secret|token|authorization|api.?key|auth)", re.IGNORECASE
 )
 _VAR_RE = re.compile(r"\{\{([^}]+)\}\}")
-_PATH_PARAM_RE = re.compile(r"\{([^}]+)\}")
+_PATH_PARAM_RE = re.compile(r"\{(?!\{)([^{}]+)\}(?!\})")
+_CHARSET_RE = re.compile(r"charset=([\w-]+)", re.IGNORECASE)
+
+
+def _detect_charset(response_headers: dict) -> str:
+    """Best-effort charset from Content-Type header, falling back to utf-8."""
+    for key, value in response_headers.items():
+        if key.lower() == "content-type":
+            match = _CHARSET_RE.search(value)
+            if match:
+                return match.group(1)
+            break
+    return "utf-8"
 
 
 def _substitute_path_params(url: str, path_params: list, env_vars: dict, state: dict) -> str:
@@ -438,7 +450,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         if body_type == "raw" and body_raw:
             content = resolve_vars(body_raw, env_vars, state).encode()
-            if "Content-Type" not in headers:
+            if not any(k.lower() == "content-type" for k in headers):
                 headers["Content-Type"] = "application/json"
         elif body_type == "form" and body_raw:
             try:
@@ -447,6 +459,37 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                         for item in form_items if item.get("enabled", True)}
             except (ValueError, TypeError):
                 data = {}
+        elif body_type == "multipart" and body_raw:
+            try:
+                form_items = json.loads(body_raw)
+                files = {}
+                for item in form_items:
+                    if not item.get("enabled", True):
+                        continue
+                    filename = item.get("filename")
+                    content_type = item.get("content_type")
+                    if item.get("is_file") and item.get("value"):
+                        # File fields carry their actual bytes base64-encoded
+                        # (attached via the editor's file picker, or imported
+                        # from a source that captured real content).
+                        try:
+                            content = base64.b64decode(item["value"])
+                        except (ValueError, TypeError):
+                            content = b""
+                    else:
+                        value = resolve_vars(item.get("value", ""), env_vars, state)
+                        content = value.encode()
+                    # httpx: (filename, content, content_type) forces multipart
+                    # encoding even for plain text fields; filename=None omits
+                    # the filename attribute; content_type=None lets httpx guess.
+                    files[item["key"]] = (filename, content, content_type)
+            except (ValueError, TypeError):
+                files = {}
+            # A captured/stale Content-Type carries the original boundary, which
+            # won't match the boundary httpx generates for the re-encoded body.
+            for _k in list(headers.keys()):
+                if _k.lower() == "content-type":
+                    del headers[_k]
         elif body_type == "graphql" and body_raw:
             try:
                 gql = json.loads(body_raw)
@@ -454,37 +497,60 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                     "query": resolve_vars(gql.get("query", ""), env_vars, state),
                     "variables": gql.get("variables", {}),
                 }).encode()
+                for _k in list(headers.keys()):
+                    if _k.lower() == "content-type":
+                        del headers[_k]
                 headers["Content-Type"] = "application/json"
             except (ValueError, TypeError):
                 content = body_raw.encode() if body_raw else None
 
+        # Framing headers (Content-Length, Transfer-Encoding) must be computed by
+        # httpx from the actual body — a stale value carried over from an import
+        # or an edited body causes h11 LocalProtocolError ("Too much/little data
+        # for declared Content-Length") since httpx trusts an explicit header.
+        for _k in list(headers.keys()):
+            if _k.lower() in ("content-length", "transfer-encoding"):
+                del headers[_k]
+
         # 5. Execute HTTP request
         method = req.get("method", "GET").upper()
-        timeout_ms = req.get("timeout_ms", 30000)
+        timeout_ms = int(req.get("timeout_ms") or 30000)
         follow_redirects = bool(req.get("follow_redirects", 1))
 
-        http_client = httpx.Client(
+        status_code = None
+        response_headers = {}
+        response_body = ''
+        _body_err = None
+
+        with httpx.Client(
             follow_redirects=follow_redirects,
             timeout=timeout_ms / 1000.0,
-        )
-
-        with http_client:
-            response = http_client.request(
-                method=method,
-                url=url,
+        ) as http_client:
+            with http_client.stream(
+                method, url,
                 headers=headers,
                 params=params or None,
                 content=content,
                 data=data,
                 files=files,
-            )
+            ) as response:
+                status_code = response.status_code
+                response_headers = dict(response.headers)
+                body_chunks = []
+                try:
+                    for chunk in response.iter_bytes():
+                        body_chunks.append(chunk)
+                except Exception as _be:
+                    _body_err = str(_be)
+                raw_body = b"".join(body_chunks)
+                if raw_body:
+                    try:
+                        response_body = raw_body.decode(_detect_charset(response_headers), errors="replace")
+                    except LookupError:
+                        response_body = raw_body.decode("utf-8", errors="replace")
 
         duration_ms = int((time.time() - start_time) * 1000)
         finished_at = datetime.now(timezone.utc).isoformat()
-
-        status_code = response.status_code
-        response_body = response.text
-        response_headers = dict(response.headers)
 
         # Store response for next request's pre-extractor
         state["_last_response"] = response_body
@@ -527,7 +593,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         if assertion_results:
             all_passed = all(r["passed"] for r in assertion_results)
         else:
-            all_passed = status_code < 400
+            all_passed = status_code is not None and status_code < 400
         status = "PASSED" if all_passed else "FAILED"
 
         logger.info("run_api_request: %s %s → %d (%dms) %s",
@@ -541,7 +607,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "response_headers": response_headers,
             "duration_ms": duration_ms,
             "assertion_results": assertion_results,
-            "error_message": None,
+            "error_message": _body_err,
             "state_updates": state_updates,
             "started_at": started_at,
             "finished_at": finished_at,

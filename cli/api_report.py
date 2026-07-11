@@ -153,11 +153,36 @@ def _render_request_rows(request_results: list) -> str:
             if error_msg else ""
         )
 
+        reason_html = ""
+        if status != "PASSED":
+            raw_body = rr.get("response_body") or ""
+            if raw_body:
+                try:
+                    parsed_body = json.loads(raw_body)
+                    if isinstance(parsed_body, dict):
+                        pick = (parsed_body.get("error") or parsed_body.get("message")
+                                or parsed_body.get("detail") or parsed_body.get("msg")
+                                or parsed_body.get("reason") or parsed_body.get("errorMessage")
+                                or parsed_body.get("description"))
+                        if pick is None and isinstance(parsed_body.get("errors"), list) and parsed_body["errors"]:
+                            e0 = parsed_body["errors"][0]
+                            pick = e0 if isinstance(e0, str) else json.dumps(e0)
+                        if pick is not None:
+                            reason_html = (
+                                f'<div style="color:#cf222e;margin-bottom:8px;padding:6px 8px;'
+                                f'background:rgba(207,34,46,.07);border-left:3px solid #cf222e;'
+                                f'border-radius:2px;font-size:11px;word-break:break-word">'
+                                f'{_esc(str(pick))}</div>'
+                            )
+                except (ValueError, TypeError):
+                    pass
+
         detail_html = (
             f'<tr class="det-{rid}" style="display:none">'
             f'<td colspan="8" style="padding:0;background:#f6f8fa;border-bottom:2px solid #d0d7de">'
             f'<div style="padding:14px 16px">'
             f'{error_html}'
+            f'{reason_html}'
             f'<div style="margin-bottom:14px">'
             f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Assertions</div>'

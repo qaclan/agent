@@ -1,6 +1,7 @@
 import { showHarImport } from './har-import-view.js';
 import { showOpenApiImport } from './openapi-import-view.js';
 import { showPostmanImport } from './postman-import-view.js';
+import { showCurlImport } from './curl-import-view.js';
 import { showRecordApis } from './record-apis-view.js';
 
 export function showDiscoverModal() {
@@ -10,6 +11,7 @@ export function showDiscoverModal() {
     { icon: '📄', title: 'Import HAR', desc: 'Chrome DevTools HAR export', action: showHarImport },
     { icon: '📋', title: 'Import OpenAPI', desc: 'OpenAPI 3.x / Swagger 2.x', action: showOpenApiImport },
     { icon: '📮', title: 'Import Postman', desc: 'Postman Collection v2.1', action: showPostmanImport },
+    { icon: '⌨️', title: 'Import cURL', desc: 'Paste one or more curl commands', action: showCurlImport },
     { icon: '🟤', title: 'Import Bruno', desc: '.bru collection files', action: () => showBrunoImport() },
     { icon: '🎭', title: 'From Playwright Run', desc: 'Extract APIs from recorded runs', action: () => window._toast('Coming soon — extract APIs from Playwright recordings') },
   ];

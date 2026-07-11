@@ -103,6 +103,15 @@ class DocRepo:
         conn.commit()
         return cur.rowcount > 0
 
+    def delete_all(self, project_id: str) -> int:
+        conn = get_conn()
+        cur = conn.execute(
+            "DELETE FROM api_doc_entries WHERE project_id = ?",
+            (project_id,),
+        )
+        conn.commit()
+        return cur.rowcount
+
     def update(self, project_id: str, entry_id: str, data: dict) -> dict | None:
         """Partial update of editable fields: description, request_schema, response_schema,
         headers_schema, params_schema."""

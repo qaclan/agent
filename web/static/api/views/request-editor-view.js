@@ -4,6 +4,8 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
+import { buildCurlCommand } from '../curl-builder.js';
+import { applyVarStyle } from '../components/var-style.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
@@ -44,6 +46,18 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       } catch(e) { /* no collection vars */ }
     }
     return results;
+  }
+
+  let _knownVarNames = null;
+  let _authFieldInputs = [];
+
+  async function _refreshKnownVarNames() {
+    const vars = await getAllVars();
+    _knownVarNames = new Set(vars.map(v => v.key));
+    paramsTable.restyleAll();
+    headersTable.restyleAll();
+    pathVarsTable.restyleAll();
+    _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
   }
 
   container.innerHTML = '';
@@ -93,10 +107,67 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   urlInput.value = r.url || '';
   urlBar.appendChild(urlInput);
 
+  urlInput.addEventListener('paste', async (e) => {
+    const text = (e.clipboardData || window.clipboardData).getData('text');
+    if (!/^\s*curl(\.exe)?\s/i.test(text)) return; // not a curl command — let normal paste happen
+
+    e.preventDefault();
+
+    const hasExistingData = urlInput.value.trim() || paramsTable.getRows().length
+      || headersTable.getRows().length || bodyTextarea.value.trim();
+    if (hasExistingData) {
+      const ok = await window._confirmDialog(
+        'Replace current request fields with parsed curl?',
+        'This will overwrite the URL, params, headers, and body currently in this editor.'
+      );
+      if (!ok) return;
+    }
+
+    const res = await window.api('POST', '/discover/curl/preview', { curl: text });
+    if (!res.ok) { window._toast('Could not parse curl: ' + res.error); return; }
+
+    const parsed = res.requests[0];
+    methodSelect.value = parsed.method;
+    _applyMethodColor();
+    urlInput.value = parsed.url;
+    paramsTable.setRows(parsed.params || []);
+    headersTable.setRows(parsed.headers || []);
+
+    if (parsed.auth_type && parsed.auth_type !== 'none') {
+      authTypeSelect.value = parsed.auth_type;
+      _authConfigCache = JSON.stringify(parsed.auth_config || {});
+      _renderAuthFields(authTypeSelect.value);
+      _updateAuthBanner();
+    }
+
+    if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
+    if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    bodyTextarea.value = parsed.body || '';
+    _setBodyType(parsed.body_type || 'none');
+
+    _syncPathVars();
+    window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
+  });
+
   const sendBtn = document.createElement('button');
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  const copyCurlBtn = document.createElement('button');
+  copyCurlBtn.type = 'button';
+  copyCurlBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlBtn.textContent = 'Copy as cURL';
+  copyCurlBtn.title = 'Copy this request as a curl command (secrets masked)';
+  urlBar.appendChild(copyCurlBtn);
+
+  const copyCurlUnmaskedBtn = document.createElement('button');
+  copyCurlUnmaskedBtn.type = 'button';
+  copyCurlUnmaskedBtn.className = 'btn btn-sm btn-ghost';
+  copyCurlUnmaskedBtn.textContent = '🔓';
+  copyCurlUnmaskedBtn.title = 'Copy as curl with real secret values (unmasked) — be careful where you paste this';
+  urlBar.appendChild(copyCurlUnmaskedBtn);
+
   editor.appendChild(urlBar);
 
   // ── Tab bar ──
@@ -109,14 +180,22 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(sectionContent);
 
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
+  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   paramsTable.setRows(r.params || []);
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars });
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   headersTable.setRows(r.headers || []);
 
+  const authBanner = document.createElement('div');
+  authBanner.style.display = 'none';
+  const headersWrapper = document.createElement('div');
+  headersWrapper.appendChild(authBanner);
+  headersWrapper.appendChild(headersTable.el);
+
+  let _collectionAuth = null;
+
   // ── Path Variables ──
-  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars });
+  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
   const pathVarsSection = document.createElement('div');
   {
     const hdr = document.createElement('div');
@@ -143,7 +222,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const _storedPathParams = r.path_params || [];
 
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(/\{([^}]+)\}/g)].map(m => m[1]);
+    const matches = [...urlInput.value.matchAll(/\{(?!\{)([^{}]+)\}(?!\})/g)].map(m => m[1]);
     const keys = [...new Set(matches)];
     if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
     pathVarsSection.style.display = '';
@@ -162,7 +241,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Body section ──
   const bodySection = document.createElement('div');
-  const BODY_TYPES = ['none', 'raw', 'form', 'graphql'];
+  const BODY_TYPES = ['none', 'raw', 'form', 'multipart', 'graphql'];
+  const BODY_TYPE_LABELS = { form: 'x-www-form-urlencoded', multipart: 'form-data/multipart' };
   let activeBodyType = r.body_type || 'none';
 
   const bodyTypeGroup = document.createElement('div');
@@ -173,7 +253,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'req-body-type-btn';
-    btn.textContent = t;
+    btn.textContent = BODY_TYPE_LABELS[t] || t;
     btn.dataset.type = t;
     btn.onclick = () => _setBodyType(t);
     bodyTypeGroup.appendChild(btn);
@@ -354,17 +434,30 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
   }
 
-  // Form body
-  let _formBodyRows = [];
+  // Form / multipart bodies share the same key-value table widget, but each
+  // type keeps its own row set — otherwise switching tabs would show one
+  // type's fields under the other's tab.
+  let _formRows = [];
+  let _multipartRows = [];
   try {
     const parsed = JSON.parse(r.body || '[]');
-    _formBodyRows = Array.isArray(parsed) ? parsed : [];
-  } catch(e) { _formBodyRows = []; }
+    if (Array.isArray(parsed)) {
+      if (r.body_type === 'multipart') _multipartRows = parsed;
+      else if (r.body_type === 'form') _formRows = parsed;
+    }
+  } catch(e) { /* leave both empty */ }
   const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
-  formBodyTable.setRows(_formBodyRows);
+  const multipartBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true });
+  formBodyTable.setRows(_formRows);
+  multipartBodyTable.setRows(_multipartRows);
   formBodyTable.el.style.display = 'none';
+  multipartBodyTable.el.style.display = 'none';
 
   function _setBodyType(type) {
+    const prevType = activeBodyType;
+    if (prevType === 'form') _formRows = formBodyTable.getRows();
+    else if (prevType === 'multipart') _multipartRows = multipartBodyTable.getRows();
+
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.type === type);
@@ -381,7 +474,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmActive = false;
     }
 
+    if (type === 'form') formBodyTable.setRows(_formRows);
+    else if (type === 'multipart') multipartBodyTable.setRows(_multipartRows);
     formBodyTable.el.style.display = type === 'form' ? '' : 'none';
+    multipartBodyTable.el.style.display = type === 'multipart' ? '' : 'none';
     bodyVarBtn.style.display = isText ? '' : 'none';
     formatBtn.style.display = isText ? '' : 'none';
     minifyBtn.style.display = isText ? '' : 'none';
@@ -405,6 +501,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(bodyFallback);
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
+  bodySection.appendChild(multipartBodyTable.el);
 
   // ── Auth section ──
   const authSection = document.createElement('div');
@@ -446,8 +543,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     inp.className = 'input-sm';
     inp.placeholder = placeholder;
     inp.value = getValue() || '';
-    inp.oninput = () => setValue(inp.value);
+    inp.oninput = () => { setValue(inp.value); applyVarStyle(inp, _knownVarNames); };
+    applyVarStyle(inp, _knownVarNames);
     _authInlineDrop.watchInput(inp);
+    _authFieldInputs.push(inp);
     wrap.appendChild(lbl);
     wrap.appendChild(inp);
     return wrap;
@@ -456,6 +555,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   function _renderAuthFields(type) {
     _authInlineDrop.close();
     authFieldsDiv.innerHTML = '';
+    _authFieldInputs = [];
     let cfg = {};
     try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
 
@@ -515,12 +615,196 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
   }
 
-  authTypeSelect.onchange = () => _renderAuthFields(authTypeSelect.value);
+  authTypeSelect.onchange = () => { _renderAuthFields(authTypeSelect.value); _updateAuthBanner(); };
   _renderAuthFields(authTypeSelect.value);
+  _refreshKnownVarNames();
   authSection.appendChild(authTypeSelect);
   authSection.appendChild(authFieldsDiv);
+  authFieldsDiv.addEventListener('input', _updateAuthBanner);
+
+  function _updateAuthBanner() {
+    const type = authTypeSelect.value;
+    let cfg = {};
+    try { cfg = JSON.parse(_authConfigCache); } catch(e) { cfg = {}; }
+
+    // Remove previous computed row + reset conflicting user rows
+    const tbody = headersTable.el.querySelector('tbody');
+    tbody.querySelector('tr.kv-computed-row')?.remove();
+    tbody.querySelectorAll('tr.kv-row').forEach(tr => {
+      tr.style.opacity = '';
+      tr.querySelector('.kv-override-warn')?.remove();
+    });
+    authBanner.innerHTML = '';
+    authBanner.style.display = 'none';
+
+    if (type === 'none') return;
+
+    // Resolve locked header name + value
+    let lockedName = null, lockedValue = null, sourceLabel = null, sourceClick = null;
+
+    if (type === 'bearer') {
+      lockedName = 'Authorization';
+      lockedValue = 'Bearer ' + (cfg.token || '{{ACCESS_TOKEN}}');
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'basic') {
+      lockedName = 'Authorization';
+      lockedValue = 'Basic …';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'api_key') {
+      lockedName = cfg.key_name || null;
+      lockedValue = cfg.key_value || '{{API_KEY}}';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'oauth2') {
+      lockedName = 'Authorization';
+      lockedValue = 'Bearer … (via token URL)';
+      sourceLabel = 'Auth tab →';
+      sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
+    } else if (type === 'inherit') {
+      if (!_collectionAuth) {
+        // Still fetching — show minimal notice only
+        authBanner.style.cssText = 'margin-bottom:6px;padding:4px 8px;font-size:11px;color:var(--text-muted);border-radius:4px;background:var(--surface-2,rgba(0,0,0,.04));border:1px solid var(--border-default);';
+        authBanner.textContent = '🔒 Auth inherited from collection';
+        authBanner.style.display = '';
+        return;
+      }
+      const colType = _collectionAuth.auth_type || 'none';
+      if (colType === 'none') return; // collection has no auth — nothing to lock
+      let colCfg = {};
+      try { colCfg = JSON.parse(_collectionAuth.auth_config || '{}'); } catch(e) { colCfg = {}; }
+      sourceLabel = 'Collection auth';
+      if (colType === 'bearer') {
+        lockedName = 'Authorization';
+        lockedValue = 'Bearer ' + (colCfg.token || '{{ACCESS_TOKEN}}');
+      } else if (colType === 'basic') {
+        lockedName = 'Authorization';
+        lockedValue = 'Basic …';
+      } else if (colType === 'api_key') {
+        lockedName = colCfg.key_name || null;
+        lockedValue = colCfg.key_value || '{{API_KEY}}';
+      } else if (colType === 'oauth2') {
+        lockedName = 'Authorization';
+        lockedValue = 'Bearer … (via token URL)';
+      }
+    }
+
+    if (!lockedName) return;
+
+    // Inject computed read-only row at top of tbody (5 cols: lock | key | value | badge | empty)
+    const computedTr = document.createElement('tr');
+    computedTr.className = 'kv-computed-row';
+    computedTr.title = type === 'inherit'
+      ? 'Injected from collection auth — not editable here'
+      : 'Injected by Auth tab — edit in Auth tab, not here';
+
+    const tdLock = document.createElement('td');
+    tdLock.style.cssText = 'text-align:center;font-size:11px;opacity:.55;';
+    tdLock.textContent = '🔒';
+    computedTr.appendChild(tdLock);
+
+    const tdKey = document.createElement('td');
+    const keyInp = document.createElement('input');
+    keyInp.type = 'text'; keyInp.className = 'kv-key input-sm';
+    keyInp.value = lockedName; keyInp.readOnly = true; keyInp.tabIndex = -1;
+    keyInp.style.cssText = 'opacity:.55;cursor:default;pointer-events:none;';
+    tdKey.appendChild(keyInp);
+    computedTr.appendChild(tdKey);
+
+    const tdVal = document.createElement('td');
+    const valInp = document.createElement('input');
+    valInp.type = 'text'; valInp.className = 'kv-value input-sm';
+    valInp.value = lockedValue; valInp.readOnly = true; valInp.tabIndex = -1;
+    valInp.style.cssText = 'opacity:.55;cursor:default;pointer-events:none;color:var(--text-muted);';
+    tdVal.appendChild(valInp);
+    computedTr.appendChild(tdVal);
+
+    const tdBadge = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.style.cssText = 'font-size:10px;color:var(--text-muted);background:var(--surface-3,rgba(0,0,0,.08));border-radius:3px;padding:1px 5px;white-space:nowrap;' + (sourceClick ? 'cursor:pointer;' : '');
+    badge.textContent = sourceLabel;
+    if (sourceClick) { badge.title = 'Click to switch to Auth tab'; badge.onclick = sourceClick; }
+    tdBadge.appendChild(badge);
+    computedTr.appendChild(tdBadge);
+
+    computedTr.appendChild(document.createElement('td')); // delete col placeholder
+    tbody.prepend(computedTr);
+
+    // Mark conflicting enabled user rows (strikethrough + warning)
+    tbody.querySelectorAll('tr.kv-row').forEach(tr => {
+      const keyEl = tr.querySelector('.kv-key');
+      const cbEl = tr.querySelector('.kv-enabled');
+      if (!keyEl) return;
+      const isEnabled = cbEl ? cbEl.checked : true;
+      if (isEnabled && keyEl.value.trim().toLowerCase() === lockedName.toLowerCase()) {
+        tr.style.opacity = '.45';
+        const valTd = tr.querySelector('.kv-value')?.closest('td');
+        if (valTd) {
+          const warn = document.createElement('div');
+          warn.className = 'kv-override-warn';
+          warn.style.cssText = 'font-size:10px;color:var(--warning,#d97706);margin-top:2px;';
+          warn.textContent = '⚠ Overridden by ' + (type === 'inherit' ? 'collection auth' : 'Auth tab');
+          valTd.appendChild(warn);
+        }
+      }
+    });
+  }
+  _updateAuthBanner();
+
+  async function _resolveEffectiveAuth() {
+    let type = authTypeSelect.value;
+    let cfg = {};
+    try { cfg = JSON.parse(_authConfigCache); } catch (e) { cfg = {}; }
+
+    if (type !== 'inherit') return { type, config: cfg };
+
+    if (!_collectionAuth && _effectiveCollectionId) {
+      const res = await window.api('GET', `/collections/${_effectiveCollectionId}`);
+      const col = res && (res.collection || res);
+      _collectionAuth = { auth_type: col?.auth_type || 'none', auth_config: col?.auth_config || '{}' };
+    }
+    const colType = _collectionAuth?.auth_type || 'none';
+    let colCfg = {};
+    try { colCfg = JSON.parse(_collectionAuth?.auth_config || '{}'); } catch (e) { colCfg = {}; }
+    return { type: colType, config: colCfg };
+  }
+
+  async function _copyAsCurl(reveal) {
+    const effectiveAuth = await _resolveEffectiveAuth();
+    const curl = buildCurlCommand({
+      method: methodSelect.value,
+      url: urlInput.value.trim(),
+      params: paramsTable.getRows(),
+      headers: headersTable.getRows(),
+      bodyType: activeBodyType,
+      body: bodyTextarea.value,
+      formRows: activeBodyType === 'multipart' ? multipartBodyTable.getRows() : formBodyTable.getRows(),
+      authType: effectiveAuth.type,
+      authConfig: effectiveAuth.config,
+    }, { reveal });
+    try {
+      await navigator.clipboard.writeText(curl);
+      window._toast(reveal ? 'Copied as cURL (unmasked)' : 'Copied as cURL');
+    } catch (e) {
+      window._toast("Couldn't copy — check clipboard permissions");
+    }
+  }
+
+  copyCurlBtn.onclick = () => _copyAsCurl(false);
+  copyCurlUnmaskedBtn.onclick = () => _copyAsCurl(true);
+
+  // Fetch collection auth in background for inherit resolution
+  if (_effectiveCollectionId) {
+    window.api('GET', `/collections/${_effectiveCollectionId}`).then(res => {
+      const col = res && (res.collection || res);
+      _collectionAuth = { auth_type: col.auth_type || 'none', auth_config: col.auth_config || '{}' };
+      _updateAuthBanner();
+    }).catch(() => { _collectionAuth = { auth_type: 'none', auth_config: '{}' }; });
+  }
 
   // ── Script sections ──
+  const _scriptInlineDrop = createInlineVarDrop(getAllVars);
   function makeScriptSection(lang, code, hint) {
     const div = document.createElement('div');
 
@@ -558,6 +842,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     langSelect.onchange = () => { textarea.placeholder = _ph(langSelect.value); };
     textarea.value = code || '';
     div.appendChild(textarea);
+    _scriptInlineDrop.watchInput(textarea);
 
     div._getLang = () => langSelect.value;
     div._getCode = () => textarea.value;
@@ -853,7 +1138,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const sectionMap = {
     'Params':      paramsWrapper,
-    'Headers':     headersTable.el,
+    'Headers':     headersWrapper,
     'Body':        bodySection,
     'Auth':        authSection,
     'Pre-Script':  preScriptSection,
@@ -874,6 +1159,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       activeSection = name;
       sectionContent.innerHTML = '';
       sectionContent.appendChild(sectionMap[name]);
+      if (name === 'Headers') _updateAuthBanner();
     };
     tabBar.appendChild(tab);
   });
@@ -914,8 +1200,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: activeBodyType === 'form'
-        ? JSON.stringify(formBodyTable.getRows())
+      body: activeBodyType === 'form' ? JSON.stringify(formBodyTable.getRows())
+        : activeBodyType === 'multipart' ? JSON.stringify(multipartBodyTable.getRows())
         : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
       auth_type: authTypeSelect.value,
       auth_config: parsedAuth,
