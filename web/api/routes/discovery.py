@@ -124,6 +124,7 @@ def save_requests():
         requests_list = data.get("requests", [])
         collection_name = data.get("collection_name", "Recorded APIs")
         include_in_docs = int(data.get("include_in_docs", 1))
+        organize_into_folders = bool(data.get("organize_into_folders", False))
         if not requests_list:
             return jsonify({"ok": False, "error": "No requests provided"}), 400
         # Stamp include_in_docs on each request
@@ -132,7 +133,7 @@ def save_requests():
         from web.api.services.discovery_service import _save_requests
         from web.api.repositories.collection_repo import CollectionRepo
         col = CollectionRepo().create(pid, collection_name)
-        saved = _save_requests(pid, requests_list, collection_id=col["id"])
+        saved = _save_requests(pid, requests_list, collection_id=col["id"], organize_into_folders=organize_into_folders)
         logger.info("save_requests: saved %d to collection %s", saved, col["id"])
         return jsonify({"ok": True, "imported": saved, "collection_id": col["id"]})
     except ValueError as e:
@@ -168,10 +169,12 @@ def save_library_route():
         groups = data.get("groups", [])
         collection_name = data.get("collection_name", "Recorded APIs")
         include_in_docs = int(data.get("include_in_docs", 1))
+        organize_into_folders = bool(data.get("organize_into_folders", False))
         if not groups:
             return jsonify({"ok": False, "error": "No groups provided"}), 400
         from web.api.services.discovery_service import save_library
-        result = save_library(pid, groups, collection_name, include_in_docs=include_in_docs)
+        result = save_library(pid, groups, collection_name, include_in_docs=include_in_docs,
+                               organize_into_folders=organize_into_folders)
         logger.info("save_library_route: saved %d to collection %s", result["imported"], result["collection_id"])
         return jsonify({"ok": True, **result})
     except ValueError as e:
