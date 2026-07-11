@@ -205,3 +205,19 @@ def export_collection(col_id):
     except Exception as e:
         logger.exception("export_collection")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/order", methods=["PUT"])
+def reorder_collections():
+    try:
+        data = request.get_json(force=True) or {}
+        ids = data.get("collection_ids", [])
+        if not ids:
+            return jsonify({"ok": False, "error": "collection_ids array is required"}), 400
+        _svc.reorder(_project_id(), ids)
+        return jsonify({"ok": True})
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("reorder_collections")
+        return jsonify({"ok": False, "error": str(e)}), 500
