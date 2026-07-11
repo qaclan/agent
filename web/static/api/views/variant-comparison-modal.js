@@ -2,7 +2,7 @@ function _esc(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
-export function showVariantComparisonModal(groups, collectionName, includeInDocs, organizeIntoFolders) {
+export function showVariantComparisonModal(groups, collectionName, includeInDocs) {
   if (!groups?.length) {
     window._alertDialog('Nothing to group — no requests were provided.');
     return;
@@ -98,7 +98,6 @@ export function showVariantComparisonModal(groups, collectionName, includeInDocs
         groups: payloadGroups,
         collection_name: collectionName,
         include_in_docs: includeInDocs,
-        organize_into_folders: organizeIntoFolders,
       });
       window.closeModal();
       if (data.ok) {

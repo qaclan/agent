@@ -198,10 +198,6 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       <input type="checkbox" id="rev-include-docs" checked>
       Include in API Documentation
     </label>
-    <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-top:6px;">
-      <input type="checkbox" id="rev-organize-folders" checked>
-      Organize into folders by endpoint
-    </label>
     <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border-subtle);">
       <label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;cursor:pointer;">
         <input type="radio" name="rev-save-mode" value="flow" checked style="margin-top:3px;">
@@ -220,7 +216,6 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       const selected = indexedRequests.filter(r => document.getElementById(`rev-req-${r._idx}`)?.checked);
       if (!selected.length) { await window._alertDialog('No requests selected.'); return; }
       const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
-      const organizeIntoFolders = document.getElementById('rev-organize-folders')?.checked ? 1 : 0;
       const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
 
       if (mode === 'library') {
@@ -228,7 +223,7 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
         if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
         window.closeModal();
-        showVariantComparisonModal(grouped.groups, colName, includeInDocs, organizeIntoFolders);
+        showVariantComparisonModal(grouped.groups, colName, includeInDocs);
         return;
       }
 
@@ -236,7 +231,6 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         requests: selected,
         collection_name: colName,
         include_in_docs: includeInDocs,
-        organize_into_folders: organizeIntoFolders,
       });
       window.closeModal();
       if (data.ok) {

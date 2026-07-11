@@ -51,39 +51,16 @@ _MULTIPART_CDP_CAPTURE_SRC = (
 )
 
 
-def _resolve_folder_id(project_id: str, collection_id: str, url: str, folder_cache: dict) -> str | None:
-    """Get-or-create a root-level folder named after url's first meaningful path
-    segment, memoized in folder_cache for the duration of one save call so that
-    many requests mapping to the same folder name share one folder instead of
-    creating duplicates."""
-    from cli.api_discovery.folder_suggester import suggest_folder_name
-    from web.api.repositories.folder_repo import FolderRepo
-
-    name = suggest_folder_name(url)
-    if not name:
-        return None
-    if name in folder_cache:
-        return folder_cache[name]
-    folder = FolderRepo().get_or_create_root(project_id, collection_id, name)
-    folder_cache[name] = folder["id"]
-    return folder["id"]
-
-
-def _save_requests(project_id: str, requests: list[dict], collection_id: str | None = None,
-                    organize_into_folders: bool = False, folder_cache: dict | None = None) -> int:
+def _save_requests(project_id: str, requests: list[dict], collection_id: str | None = None) -> int:
     """Save a list of parsed request dicts to the DB. Returns count saved."""
     from web.api.services.doc_service import sync_doc_entry
 
-    if folder_cache is None:
-        folder_cache = {}
     saved = 0
     for req in requests:
         data = dict(req)
         data.pop("collection_name", None)  # not a DB column
         if collection_id:
             data["collection_id"] = collection_id
-            if organize_into_folders:
-                data["folder_id"] = _resolve_folder_id(project_id, collection_id, data.get("url", ""), folder_cache)
         # Ensure JSON fields are lists/dicts (RequestRepo.create handles serialization)
         for key in ("headers", "params"):
             if isinstance(data.get(key), str):
@@ -120,8 +97,7 @@ def group_requests(requests: list[dict]) -> list[dict]:
     return _group(requests)
 
 
-def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1,
-                  organize_into_folders: bool = False) -> dict:
+def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1) -> dict:
     """Persist the user's resolved per-group choices from the Save-as-Library
     comparison UI. See docs/superpowers/specs/2026-07-05-api-variant-library-design.md
     Sections 2, 4, 5.
@@ -136,7 +112,6 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
 
     col = _col_repo.create(project_id, collection_name)
     example_repo = RequestExampleRepo()
-    folder_cache: dict = {}
     saved = 0
 
     for group in groups:
@@ -150,8 +125,6 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
             merged_req = templatize_request(default_req, checked_keys)
             merged_req["collection_id"] = col["id"]
             merged_req["include_in_docs"] = include_in_docs
-            if organize_into_folders:
-                merged_req["folder_id"] = _resolve_folder_id(project_id, col["id"], merged_req.get("url", ""), folder_cache)
             for k in ("response_status", "response_headers", "response_body", "duration_ms"):
                 merged_req.pop(k, None)
 
@@ -190,8 +163,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
                     r["name"] = v["name_override"]
                 r["include_in_docs"] = include_in_docs
                 reqs.append(r)
-            saved += _save_requests(project_id, reqs, collection_id=col["id"],
-                                     organize_into_folders=organize_into_folders, folder_cache=folder_cache)
+            saved += _save_requests(project_id, reqs, collection_id=col["id"])
 
     return {"imported": saved, "collection_id": col["id"]}
 
