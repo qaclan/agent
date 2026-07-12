@@ -2,6 +2,9 @@
  * API Section entry point.
  * Exposes window.__qaclanApi = { render(container) }
  */
+import { startActiveRunsTracker } from './services/active-runs-tracker.js';
+import { mountRunStatusChip } from './components/run-status-chip.js';
+import { notifyRunCompleted, maybeRequestPermission } from './components/run-notification.js';
 
 if (!window.api) {
   window.api = async function api(method, path, body = null) {
@@ -148,6 +151,11 @@ function renderApiPage(container) {
   topBar.appendChild(tabCollections);
   topBar.appendChild(tabDocs);
 
+  const chipSlot = document.createElement('div');
+  chipSlot.id = 'api-run-chip-slot';
+  chipSlot.style.cssText = 'margin-left:auto;display:flex;align-items:center;';
+  topBar.appendChild(chipSlot);
+
   const pageWrap = document.createElement('div');
   pageWrap.style.cssText = 'display:flex;flex-direction:column;height:100%;overflow:hidden;';
   pageWrap.appendChild(topBar);
@@ -206,10 +214,27 @@ function renderApiPage(container) {
     renderCollectionRunView, renderCollectionDetailView,
   }) => {
     const mainEl = () => document.getElementById('api-main-content');
+    let _currentlyViewedRunId = null;
 
     function _teardown() {
       const el = mainEl();
       if (el && el.__destroyRunView) { el.__destroyRunView(); el.__destroyRunView = null; }
+      window.__qaclanApi.isCurrentEditorDirty = null;
+      window.__qaclanApi.getCurrentEditorRequestId = null;
+      _currentlyViewedRunId = null;
+    }
+
+    // Guards navigation away from a dirty request editor — prompts to
+    // discard, and only proceeds if the user confirms (or there's nothing
+    // unsaved). Switching between requests/collections should never silently
+    // drop edits; only a page refresh or leaving the API section does that.
+    async function _confirmDiscardIfDirty() {
+      if (!window.__qaclanApi?.isCurrentEditorDirty?.()) return true;
+      return window._confirmDialog(
+        'Discard unsaved changes?',
+        'This request has unsaved changes. Switching now will discard them.',
+        'Discard', 'btn btn-sm btn-danger'
+      );
     }
 
     function _emptyMain() {
@@ -220,6 +245,8 @@ function renderApiPage(container) {
 
     function _showRunDetail(runId, colId, colName) {
       _teardown();
+      _currentlyViewedRunId = runId;
+      _runChip.refresh();
       renderCollectionRunView(mainEl(), runId, colId, colName, _emptyMain);
     }
 
@@ -232,16 +259,61 @@ function renderApiPage(container) {
       );
     }
 
-    const { reload: _reloadCollections } = renderCollectionsView(
+    const {
+      reload: _reloadCollections,
+      setActiveRequestId: _setActiveRequestId,
+      updateRunningRuns: _updateRunningRuns,
+    } = renderCollectionsView(
       document.getElementById('api-collections-panel'),
-      (requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId) => {
+      async (requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId) => {
+        if (!(await _confirmDiscardIfDirty())) return false;
         _teardown();
         renderRequestEditor(mainEl(), requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId);
       },
       (runId, colId, colName) => _showRunDetail(runId, colId, colName),
-      (col, runId) => _showCollectionDetail(col, runId)
+      async (col, runId) => {
+        if (!(await _confirmDiscardIfDirty())) return false;
+        _showCollectionDetail(col, runId);
+      }
     );
-    window.__qaclanApi.refresh = _reloadCollections;
+    // requestId (when given) is the just-saved request — keeps it highlighted
+    // as selected across the list rebuild instead of losing the highlight.
+    window.__qaclanApi.refresh = (requestId) => {
+      if (requestId !== undefined) _setActiveRequestId(requestId);
+      return _reloadCollections();
+    };
+
+    // Top-bar run-status chip + completion notifications, both fed by one
+    // shared poller (also feeds the sidebar's running-dots via _updateRunningRuns).
+    const _runChip = mountRunStatusChip(document.getElementById('api-run-chip-slot'), {
+      getCurrentViewedRunId: () => _currentlyViewedRunId,
+      onJump: (runId, colId, colName) => _showRunDetail(runId, colId, colName),
+    });
+
+    let _prevRunningCount = 0;
+    startActiveRunsTracker({
+      onChange: (runs) => {
+        _runChip.update(runs);
+        _updateRunningRuns(runs);
+        if (_prevRunningCount === 0 && runs.length > 0) maybeRequestPermission();
+        _prevRunningCount = runs.length;
+      },
+      onCompleted: (run) => {
+        if (run.id === _currentlyViewedRunId) return;
+        notifyRunCompleted(run, {
+          onView: () => _showRunDetail(run.id, run.collection_id, run.collection_name),
+        });
+      },
+    });
+
+    // Unsaved-changes dot next to the request currently open in the editor.
+    setInterval(() => {
+      const dirty = window.__qaclanApi?.isCurrentEditorDirty?.();
+      const reqId = window.__qaclanApi?.getCurrentEditorRequestId?.();
+      document.querySelectorAll('[data-req-dot]').forEach(dot => {
+        dot.style.display = (dirty && dot.dataset.reqDot === reqId) ? '' : 'none';
+      });
+    }, 400);
 
     document.getElementById('api-discover-btn').onclick = () => showDiscoverModal();
   }).catch(err => {
