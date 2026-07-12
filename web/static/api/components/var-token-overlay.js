@@ -58,16 +58,30 @@ export function attachTokenOverlay(el, getVarsList) {
   overlay.className = 'var-token-overlay' + (isTextarea ? ' var-token-overlay--multiline' : '');
   wrap.appendChild(overlay); // appended AFTER el so it paints on top; pointer-events:none lets clicks fall through
 
-  const cs = getComputedStyle(el);
-  const originalCaretColor = cs.color;
-  [
-    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
-    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
-    'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight',
-  ].forEach(prop => { overlay.style[prop] = cs[prop]; });
+  // el is typically still detached from the document at this point (callers build
+  // the whole view offscreen, then insert it in one shot) — getComputedStyle on a
+  // detached element resolves everything to '', which would blank the overlay's
+  // padding/font/border and make the caret inherit the (just-set) transparent text
+  // color, i.e. invisible. Re-sync once the element is actually connected.
+  function _syncGeometry() {
+    const cs = getComputedStyle(el);
+    if (!cs.color) return false; // still detached
+    [
+      'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+      'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+      'fontFamily', 'fontSize', 'fontWeight', 'letterSpacing', 'lineHeight',
+    ].forEach(prop => { overlay.style[prop] = cs[prop]; });
+    el.style.caretColor = cs.color; // capture real text color before hiding it below
+    el.style.color = 'transparent';
+    return true;
+  }
 
-  el.style.color = 'transparent';
-  el.style.caretColor = originalCaretColor;
+  // Inactive tabs (Headers/Auth/Body/Scripts/Assertions) stay detached until the
+  // user actually switches to them, which can be well after a single retry frame
+  // — keep polling every frame until it actually connects, then stop.
+  (function _trySync() {
+    if (!_syncGeometry()) requestAnimationFrame(_trySync);
+  })();
 
   function _render() {
     const value = el.value;

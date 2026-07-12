@@ -222,12 +222,18 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
               let reasonHtml = '';
               if (!a.passed) {
                 if (a.actual != null) {
-                  reasonHtml = ` <span style="opacity:.7">→ actual: ${_esc(String(a.actual))}</span>`;
+                  const actualStr = typeof a.actual === 'object' ? JSON.stringify(a.actual) : String(a.actual);
+                  reasonHtml = ` <span style="opacity:.7">→ actual: ${_esc(actualStr)}</span>`;
                 } else if (a.error) {
                   reasonHtml = ` <span style="opacity:.7">→ eval error: ${_esc(a.error)}</span>`;
                 } else if (a.type === 'json_path') {
                   reasonHtml = ` <span style="opacity:.7">→ path not found or response not JSON</span>`;
                 }
+              }
+              if (a.type === 'script') {
+                return `<div style="color:${a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)'}">
+                  ${a.passed ? '✓' : '✗'} ${_esc(a.name || 'script assertion')}${reasonHtml}
+                </div>`;
               }
               return `<div style="color:${a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)'}">
                 ${a.passed ? '✓' : '✗'} ${_esc(a.type)}${a.path ? ' ' + _esc(a.path) : ''}${a.key ? ' ' + _esc(a.key) : ''}

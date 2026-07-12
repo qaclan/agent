@@ -5,7 +5,7 @@ import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
-import { applyVarStyle } from '../components/var-style.js';
+import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
 
 /**
@@ -57,7 +57,6 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _allVarsList = null;
   let _authFieldInputs = [];
   let _authFieldOverlays = [];
-  let _urlOverlay = null;
   let _scriptTextareaOverlays = [];
   let _bodyFallbackOverlay = null;
 
@@ -70,7 +69,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     pathVarsTable.restyleAll();
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
     _authFieldOverlays.forEach(o => o.refresh());
-    _urlOverlay?.refresh();
+    _renderUrlTokens();
     _scriptTextareaOverlays.forEach(o => o.refresh());
     _bodyFallbackOverlay?.refresh();
     assertionBuilder.restyleAll();
@@ -117,17 +116,99 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   methodSelect.onchange = _applyMethodColor;
   urlBar.appendChild(methodSelect);
 
-  const urlInput = document.createElement('input');
-  urlInput.type = 'text';
+  // contenteditable, not <input> — no overlay here (see git history). Chrome's
+  // autofill paints its own text via -webkit-text-fill-color, which bypasses
+  // the color:transparent trick the overlay technique depends on, and Chrome
+  // ignores autocomplete=off for this field's autofill heuristic. contenteditable
+  // isn't an autofill target at all, and lets {{var}} tokens be colored inline
+  // (as real child <span>s) without a second stacked element.
+  const urlInput = document.createElement('div');
+  urlInput.contentEditable = 'true';
+  urlInput.spellcheck = false;
   urlInput.className = 'req-url-input';
-  urlInput.placeholder = 'https://api.example.com/endpoint';
+  urlInput.dataset.placeholder = 'https://api.example.com/endpoint';
+  urlBar.appendChild(urlInput);
+
+  function _urlCaretOffset() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !urlInput.contains(sel.anchorNode)) return null;
+    const range = sel.getRangeAt(0);
+    const pre = range.cloneRange();
+    pre.selectNodeContents(urlInput);
+    pre.setEnd(range.endContainer, range.endOffset);
+    return pre.toString().length;
+  }
+
+  function _setUrlCaretOffset(offset) {
+    if (offset == null) return;
+    const walker = document.createTreeWalker(urlInput, NodeFilter.SHOW_TEXT);
+    let remaining = offset;
+    let target = null;
+    let targetOffset = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+      const len = node.textContent.length;
+      if (remaining <= len) { target = node; targetOffset = remaining; break; }
+      remaining -= len;
+    }
+    const range = document.createRange();
+    if (target) {
+      range.setStart(target, targetOffset);
+      range.collapse(true);
+    } else {
+      range.selectNodeContents(urlInput);
+      range.collapse(false);
+    }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // Renders {{var}} tokens as colored, individually-hoverable (native title
+  // tooltip) spans — preserves caret position across the innerHTML rebuild so
+  // typing doesn't jump the cursor to the start every keystroke.
+  function _renderUrlTokens() {
+    const value = urlInput.textContent;
+    const caret = document.activeElement === urlInput ? _urlCaretOffset() : null;
+    const list = _allVarsList || [];
+    let html = '';
+    let last = 0;
+    tokenSpansIn(value).forEach(({ name, start, end }) => {
+      html += escapeHtml(value.slice(last, start));
+      const entry = list.find(v => v.key === name);
+      const known = _knownVarNames ? _knownVarNames.has(name) : null;
+      const cls = known == null ? 'var-tok' : known ? 'var-tok var-tok--ok' : 'var-tok var-tok--missing';
+      const title = entry ? `{{${name}}} = ${entry.value}` : `{{${name}}} — not defined`;
+      html += `<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(value.slice(start, end))}</span>`;
+      last = end;
+    });
+    html += escapeHtml(value.slice(last));
+    urlInput.innerHTML = html;
+    if (caret != null) _setUrlCaretOffset(caret);
+  }
+
+  // .value shim — the rest of this file reads/writes urlInput.value like a
+  // normal <input>; keep that working unchanged for a contenteditable div.
+  Object.defineProperty(urlInput, 'value', {
+    get() { return urlInput.textContent; },
+    set(v) { urlInput.textContent = v || ''; _renderUrlTokens(); },
+  });
   urlInput.value = r.url || '';
-  _urlOverlay = attachTokenOverlay(urlInput, () => _allVarsList);
-  urlBar.appendChild(_urlOverlay.el);
+
+  urlInput.addEventListener('input', _renderUrlTokens);
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') e.preventDefault(); // single-line field, no inserted linebreaks
+  });
 
   urlInput.addEventListener('paste', async (e) => {
     const text = (e.clipboardData || window.clipboardData).getData('text');
-    if (!/^\s*curl(\.exe)?\s/i.test(text)) return; // not a curl command — let normal paste happen
+    if (!/^\s*curl(\.exe)?\s/i.test(text)) {
+      // Not a curl command — still force plain-text insertion (contenteditable
+      // would otherwise paste the clipboard's HTML formatting).
+      e.preventDefault();
+      document.execCommand('insertText', false, text.replace(/[\r\n]+/g, ''));
+      return;
+    }
 
     e.preventDefault();
 
@@ -692,7 +773,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const lbl = document.createElement('label');
     lbl.textContent = labelText;
     const inp = document.createElement('input');
-    inp.type = /password|secret/i.test(labelText) ? 'password' : 'text';
+    const isSecret = /password|secret/i.test(labelText);
+    inp.type = isSecret ? 'password' : 'text';
+    // Chrome ignores autocomplete="off" on password fields and pairs them with the
+    // nearest preceding text field as a guessed "username" (no <form> needed for
+    // this heuristic) — forcing a save-credentials suggestion onto that field.
+    // "new-password" is the one value Chrome actually respects to suppress it.
+    inp.autocomplete = isSecret ? 'new-password' : 'off';
     inp.className = 'input-sm';
     inp.placeholder = placeholder;
     inp.value = getValue() || '';
@@ -1087,7 +1174,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     );
     const scriptPane = makeScriptSection(
       lang, code,
-      'Runs before the request. Use qc.set("var", value) to inject variables into URL/headers/body.'
+      'Runs before the request. Use qc.set("var", value) to inject variables, qc.setHeader/setParam plus qc.getHeader/getParam to read/write, env for active environment vars, and qc.expect/qc.test to assert.'
     );
 
     const paneArea = document.createElement('div');
@@ -1132,7 +1219,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const extractorPane = _buildExtractorPane(extractorRules || [], responseSchema || null);
     const scriptPane = makeScriptSection(
       lang, code,
-      'Runs after the response. Access response.json(), response.status, response.headers. Use qc.set("VAR", val) to save variables.'
+      'Runs after the response. Access response.json(), response.text(), response.status, response.headers. Use qc.set("VAR", val) to save variables, qc.getHeader/getParam to read the request that ran, and qc.expect/qc.test to assert.'
     );
 
     let activePane = extractorPane;
@@ -1229,6 +1316,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       const mk = (ph, val, mono) => {
         const inp = document.createElement('input');
         inp.type = 'text';
+        inp.autocomplete = 'off';
         inp.className = 'input-sm';
         inp.placeholder = ph;
         inp.value = val || '';
@@ -1349,6 +1437,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     let parsedAuth = {};
     try { parsedAuth = JSON.parse(_authConfigCache); } catch(e) { parsedAuth = {}; }
 
+    const assertions = assertionBuilder.getAssertions();
+    if (assertionBuilder.hasInvalidAssertions()) {
+      await window._alertDialog('One or more assertions is missing its expected value.');
+      return null;
+    }
+
     const payload = {
       name: nameInput.value.trim() || 'Unnamed Request',
       method: methodSelect.value,
@@ -1368,7 +1462,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       post_lang: postScriptSection._getLang(),
       post_script: postScriptSection._getCode() || null,
       post_extractor: postScriptSection._getExtractor(),
-      assertions: assertionBuilder.getAssertions(),
+      assertions,
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
     if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;
@@ -1378,6 +1472,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       : await window.api('POST', '/api-requests', payload);
 
     if (res.ok === false) { await window._alertDialog('Save failed: ' + res.error); return null; }
+    window.__qaclanApi?.refresh?.();
     return res.request?.id || requestId;
   }
 

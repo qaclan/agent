@@ -1621,8 +1621,10 @@ html[data-theme="light"] .req-method-select.m-PUT    { color: #b45309; }
 html[data-theme="light"] .req-method-select.m-PATCH  { color: #b45309; }
 html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 
-.req-url-bar input.req-url-input {
+.req-url-bar .req-url-input {
   flex: 1;
+  display: flex;
+  align-items: center;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -1632,9 +1634,17 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   color: var(--text-primary);
   min-height: 44px;
   box-shadow: none;
+  white-space: pre;
+  overflow-x: auto;
+  cursor: text;
 }
-.req-url-bar input.req-url-input:focus { outline: none; box-shadow: none; }
-.req-url-bar input.req-url-input::placeholder { color: var(--text-muted); font-family: var(--font-ui); }
+.req-url-bar .req-url-input:focus { outline: none; box-shadow: none; }
+/* contenteditable div has no native placeholder — fake it when empty */
+.req-url-bar .req-url-input:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+}
 .req-send-btn { border-radius: 0 !important; border-left: 1px solid var(--border-default); padding: 0 22px; min-height: 44px; }
 
 /* Request section tabs (Params / Headers / Body / …) */
@@ -1775,7 +1785,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 /* Per-token {{var}} text coloring overlay (headers/params/path-vars/auth/
    URL bar/assertions/scripts/body-fallback inputs) — real field's text is
    made transparent; this div renders the same text with colored spans. */
-.var-token-overlay-wrap { position: relative; }
+.var-token-overlay-wrap { position: relative; flex: 1 1 auto; min-width: 0; }
 .var-token-overlay {
   position: absolute;
   inset: 0;
@@ -1791,6 +1801,20 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .var-token-overlay--multiline { white-space: pre-wrap; word-break: break-word; }
 .var-tok--ok { color: var(--success); }
 .var-tok--missing { color: var(--danger); }
+
+/* Chrome/Edge autofill paints its own text via -webkit-text-fill-color, which
+   wins over the `color: transparent` we set on the real input — so autofilled
+   text becomes visible again, stacked behind/above the overlay's own text.
+   Force it back to transparent and neutralize the autofill background flash. */
+.var-token-overlay-wrap input:-webkit-autofill,
+.var-token-overlay-wrap input:-webkit-autofill:hover,
+.var-token-overlay-wrap input:-webkit-autofill:focus,
+.var-token-overlay-wrap input:-webkit-autofill:active {
+  -webkit-text-fill-color: transparent !important;
+  caret-color: var(--text-primary);
+  transition: background-color 5000s ease-in-out 0s;
+  box-shadow: 0 0 0 1000px transparent inset !important;
+}
 
 /* Hover tooltip showing a {{var}}'s current value or "not defined" */
 .var-tooltip {
@@ -1890,6 +1914,11 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 
 /* Assertions */
 .assertion-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.assertion-value--invalid {
+  border-color: var(--danger) !important;
+  background: var(--danger-bg);
+}
+.assertion-value--invalid::placeholder { color: var(--danger); }
 .assertion-result-row {
   display: flex;
   align-items: baseline;
