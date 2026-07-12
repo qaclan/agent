@@ -6,6 +6,10 @@ import { startActiveRunsTracker } from './services/active-runs-tracker.js';
 import { mountRunStatusChip } from './components/run-status-chip.js';
 import { notifyRunCompleted, maybeRequestPermission } from './components/run-notification.js';
 
+// renderApiPage() reruns on every nav into the API tab — stop the previous
+// tab's poller so switching tabs doesn't stack duplicate setIntervals.
+let _activeRunsTracker = null;
+
 if (!window.api) {
   window.api = async function api(method, path, body = null) {
     try {
@@ -247,6 +251,7 @@ function renderApiPage(container) {
       _teardown();
       _currentlyViewedRunId = runId;
       _runChip.refresh();
+      _activeRunsTracker?.notifyRunStarted();
       renderCollectionRunView(mainEl(), runId, colId, colName, _emptyMain);
     }
 
@@ -291,7 +296,8 @@ function renderApiPage(container) {
     });
 
     let _prevRunningCount = 0;
-    startActiveRunsTracker({
+    if (_activeRunsTracker) _activeRunsTracker.stop();
+    _activeRunsTracker = startActiveRunsTracker({
       onChange: (runs) => {
         _runChip.update(runs);
         _updateRunningRuns(runs);
