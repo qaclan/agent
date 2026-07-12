@@ -16,19 +16,29 @@ import { attachTokenOverlay } from '../components/var-token-overlay.js';
  * collectionEnvName: string|null  (env bound to the collection)
  * defaultFolderId: string|null  (pre-select the folder a new request is created into)
  */
+// Module-level — survives across calls, so a stale in-flight render (e.g. an
+// earlier sidebar click whose fetch resolves after a later one, from rapid
+// clicking through the list) can tell it's been superseded and bail instead
+// of overwriting the newer editor's DOM and dirty-tracking hooks out from
+// under it.
+let _renderGen = 0;
+
 export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null, defaultFolderId = null) {
+  const myGen = ++_renderGen;
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
   let examples = [];
   if (requestId) {
     const res = await window.api('GET', `/api-requests/${requestId}`);
+    if (myGen !== _renderGen) return; // superseded while this fetch was in flight
     if (res.ok === false) {
       container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${res.error}</p></div>`;
       return;
     }
     existing = res.request;
     const exRes = await window.api('GET', `/api-requests/${requestId}/examples`);
+    if (myGen !== _renderGen) return; // superseded while this fetch was in flight
     if (exRes.ok !== false) examples = exRes.examples || [];
   }
 
@@ -59,6 +69,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _authFieldOverlays = [];
   let _scriptTextareaOverlays = [];
   let _bodyFallbackOverlay = null;
+  let _extractorNameInputs = [];
+
+  // Extractor "Variable Name" fields hold a bare name (no {{ }}), so they're
+  // styled by exact match against known var names rather than token scanning.
+  function _styleExtractorNameInput(inp) {
+    inp.classList.remove('kv-value--var-ok', 'kv-value--var-missing');
+    const name = inp.value.trim();
+    if (!name || !_knownVarNames) return;
+    inp.classList.add(_knownVarNames.has(name) ? 'kv-value--var-ok' : 'kv-value--var-missing');
+  }
 
   async function _refreshKnownVarNames() {
     const vars = await getAllVars();
@@ -67,11 +87,14 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     paramsTable.restyleAll();
     headersTable.restyleAll();
     pathVarsTable.restyleAll();
+    formBodyTable.restyleAll();
+    multipartBodyTable.restyleAll();
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
     _authFieldOverlays.forEach(o => o.refresh());
     _renderUrlTokens();
     _scriptTextareaOverlays.forEach(o => o.refresh());
     _bodyFallbackOverlay?.refresh();
+    _extractorNameInputs.forEach(inp => _styleExtractorNameInput(inp));
     assertionBuilder.restyleAll();
     _cmEditor?.refresh?.();
   }
@@ -80,6 +103,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const editor = document.createElement('div');
   editor.className = 'request-editor';
+
+  // Dirty tracking is event-driven (see the `input`/`change` listeners wired
+  // to `editor` near the end of this function) — declared here since a few
+  // non-input actions below (body-type switch, curl paste-import) need to
+  // call it explicitly.
+  let _dirty = false;
+  function _markDirty() { _dirty = true; }
 
   // ── Header: name + save ──
   const header = document.createElement('div');
@@ -246,6 +276,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     _syncPathVars();
     _syncUrlFromQueryParams();
+    _markDirty(); // programmatic field fills below don't fire input/change events
     window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
   });
 
@@ -486,7 +517,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     btn.className = 'req-body-type-btn';
     btn.textContent = BODY_TYPE_LABELS[t] || t;
     btn.dataset.type = t;
-    btn.onclick = () => _setBodyType(t);
+    btn.onclick = () => {
+      if (t === activeBodyType) return; // reselecting the current type is a no-op, not an edit
+      _markDirty();
+      _setBodyType(t);
+    };
     bodyTypeGroup.appendChild(btn);
   });
 
@@ -680,13 +715,22 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       else if (r.body_type === 'form') _formRows = parsed;
     }
   } catch(e) { /* leave both empty */ }
-  const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
-  const multipartBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true });
+  const formBodyTable = createKeyValueTable({
+    placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars,
+    getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+  });
+  const multipartBodyTable = createKeyValueTable({
+    placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true,
+    getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+  });
   formBodyTable.setRows(_formRows);
   multipartBodyTable.setRows(_multipartRows);
   formBodyTable.el.style.display = 'none';
   multipartBodyTable.el.style.display = 'none';
 
+  // Called once unconditionally at load (line below) to mount the editor for
+  // whatever type is already saved, and from the type-button click handler
+  // for genuine switches — never called redundantly with the same type.
   function _setBodyType(type) {
     const prevType = activeBodyType;
     if (prevType === 'form') _formRows = formBodyTable.getRows();
@@ -1259,6 +1303,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   function _buildExtractorPane(initialRules, responseSchema, hintText) {
     const div = document.createElement('div');
     const _namePicker = createVarPicker({ getVars: getAllVars });
+    const _nameDrop = createInlineVarDrop(getAllVars);
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
@@ -1326,6 +1371,20 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
       const pathInp = mk('data.access_token', rule.path, true);
       const nameInp = mk('access_token', rule.name, false);
+
+      function _pickExtractorVar(varToken) {
+        nameInp.value = varToken.replace(/^\{\{|\}\}$/g, '');
+        _styleExtractorNameInput(nameInp);
+        nameInp.focus();
+      }
+      nameInp.addEventListener('focus', () => _nameDrop.open(nameInp, _pickExtractorVar, nameInp.value));
+      nameInp.addEventListener('input', () => {
+        _styleExtractorNameInput(nameInp);
+        _nameDrop.open(nameInp, _pickExtractorVar, nameInp.value);
+      });
+      nameInp.addEventListener('keydown', _nameDrop.handleKeydown);
+      _extractorNameInputs.push(nameInp);
+      _styleExtractorNameInput(nameInp);
 
       const nameWrap = document.createElement('div');
       nameWrap.style.cssText = 'display:flex;align-items:center;gap:3px;min-width:0;';
@@ -1433,15 +1492,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   };
 
   // ── Save ──
-  async function _save() {
+  // Builds the wire payload from current field state — also used (unsaved)
+  // as a dirty-check snapshot, so it must stay side-effect-free.
+  function _buildPayload() {
     let parsedAuth = {};
     try { parsedAuth = JSON.parse(_authConfigCache); } catch(e) { parsedAuth = {}; }
-
-    const assertions = assertionBuilder.getAssertions();
-    if (assertionBuilder.hasInvalidAssertions()) {
-      await window._alertDialog('One or more assertions is missing its expected value.');
-      return null;
-    }
 
     const payload = {
       name: nameInput.value.trim() || 'Unnamed Request',
@@ -1462,17 +1517,27 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       post_lang: postScriptSection._getLang(),
       post_script: postScriptSection._getCode() || null,
       post_extractor: postScriptSection._getExtractor(),
-      assertions,
+      assertions: assertionBuilder.getAssertions(),
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
     if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;
+    return payload;
+  }
 
+  async function _save() {
+    if (assertionBuilder.hasInvalidAssertions()) {
+      await window._alertDialog('One or more assertions is missing its expected value.');
+      return null;
+    }
+
+    const payload = _buildPayload();
     const res = requestId
       ? await window.api('PUT', `/api-requests/${requestId}`, payload)
       : await window.api('POST', '/api-requests', payload);
 
     if (res.ok === false) { await window._alertDialog('Save failed: ' + res.error); return null; }
-    window.__qaclanApi?.refresh?.();
+    _dirty = false;
+    window.__qaclanApi?.refresh?.(res.request?.id || requestId);
     return res.request?.id || requestId;
   }
 
@@ -1488,4 +1553,17 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       setTimeout(() => { saveBtn.textContent = 'Save'; }, 2000);
     }
   };
+
+  // ── Dirty tracking — event-driven, not a payload diff. A diff was fragile:
+  // any lazily-mounted widget (the CodeMirror body editor, tab remounts that
+  // detach/reattach a whole section) could shift the computed payload with
+  // zero real edits and falsely flag dirty. A real user edit always fires a
+  // native input/change event on the field the user touched, so delegating
+  // both at the editor root catches every field without per-widget wiring —
+  // and a remount alone never fires either event.
+  editor.addEventListener('input', _markDirty);
+  editor.addEventListener('change', _markDirty);
+  window.__qaclanApi = window.__qaclanApi || {};
+  window.__qaclanApi.isCurrentEditorDirty = () => _dirty;
+  window.__qaclanApi.getCurrentEditorRequestId = () => requestId;
 }

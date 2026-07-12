@@ -10,34 +10,53 @@ _col_repo = CollectionRepo()
 _req_repo = RequestRepo()
 
 # Embedded (as literal source, not imported) in the generated recording
+# harnesses below. Chromium only fills in Request.post_data_buffer from CDP's
+# postDataEntries, and postDataEntries is only populated on requestWillBeSent
+# when Fetch-domain interception is armed — with no route() handler
+# registered it's always None for multipart bodies (verified empirically;
+# JSON/urlencoded bodies don't need it, Chromium fills those via the plain
+# postData text field regardless of interception). So a no-op route handler
+# must be installed purely to arm interception before postData is readable.
+_ROUTE_ARM_SRC = (
+    "async def _arm_interception(ctx):\n"
+    "    async def _route_handler(route):\n"
+    "        try:\n"
+    "            await route.continue_()\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    await ctx.route('**/*', _route_handler)\n"
+)
+
+# Embedded (as literal source, not imported) in the generated recording
 # harnesses below. Playwright's own HAR export never captures postData for
-# multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it,
-# and Playwright's HAR writer doesn't fall back to the CDP command that can
-# actually fetch it (Network.getRequestPostData). This installs that fallback
-# via a raw CDP session and stashes results in a sidecar file next to the HAR,
-# merged back in by cli.api_discovery.har_parser.merge_multipart_postdata.
-_MULTIPART_CDP_CAPTURE_SRC = (
-    "async def _install_multipart_capture(ctx, page):\n"
-    "    cdp = await ctx.new_cdp_session(page)\n"
-    "    await cdp.send('Network.enable')\n"
+# multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it.
+# A raw CDP Network.getRequestPostData call can fetch it, but that command
+# hands the body back as a JSON string — Chromium encodes it UTF-8 before
+# Python ever sees it, which corrupts binary file uploads (images, PDFs,
+# etc.) since arbitrary bytes aren't valid UTF-8. Request.post_data_buffer
+# gives the same body as raw bytes with no such round trip, so this listens
+# on the page's native 'request' event and reads that instead. Results are
+# stashed in a sidecar file next to the HAR, merged back in by
+# cli.api_discovery.har_parser.merge_multipart_postdata. Requires
+# _arm_interception (above) to have run first, or post_data_buffer is always
+# None for multipart — see its docstring.
+_MULTIPART_CAPTURE_SRC = (
+    "def _install_multipart_capture(ctx):\n"
     "    captured = []\n"
-    "    def on_request(event):\n"
-    "        req = event.get('request', {})\n"
-    "        ct = ''\n"
-    "        for k, v in (req.get('headers') or {}).items():\n"
-    "            if k.lower() == 'content-type':\n"
-    "                ct = v\n"
-    "                break\n"
-    "        if req.get('hasPostData') and 'multipart/form-data' in ct.lower():\n"
-    "            request_id = event.get('requestId')\n"
-    "            async def fetch_body():\n"
-    "                try:\n"
-    "                    res = await cdp.send('Network.getRequestPostData', {'requestId': request_id})\n"
-    "                    captured.append({'url': req.get('url'), 'method': req.get('method'), 'postData': res.get('postData'), 'mimeType': ct})\n"
-    "                except Exception:\n"
-    "                    pass\n"
-    "            asyncio.create_task(fetch_body())\n"
-    "    cdp.on('Network.requestWillBeSent', on_request)\n"
+    "    def on_request(req):\n"
+    "        ct = req.headers.get('content-type', '') or ''\n"
+    "        if 'multipart/form-data' not in ct.lower():\n"
+    "            return\n"
+    "        buf = req.post_data_buffer\n"
+    "        if not buf:\n"
+    "            return\n"
+    "        captured.append({\n"
+    "            'url': req.url,\n"
+    "            'method': req.method,\n"
+    "            'mimeType': ct,\n"
+    "            'postData_b64': base64.b64encode(buf).decode('ascii'),\n"
+    "        })\n"
+    "    ctx.on('request', on_request)\n"
     "    return captured\n"
     "\n"
     "def _write_multipart_sidecar(captured):\n"
@@ -272,15 +291,17 @@ class DiscoveryService:
         import os, tempfile, uuid
         stop_file = os.path.join(tempfile.gettempdir(), f"qaclan_stop_{uuid.uuid4().hex}.flag")
         harness = (
-            "import asyncio, json, os, signal, sys, traceback\n"
+            "import asyncio, base64, json, os, signal, sys, traceback\n"
             "from playwright.async_api import async_playwright\n"
-            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
+            f"{_MULTIPART_CAPTURE_SRC}\n"
+            f"{_ROUTE_ARM_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
-            "        captured = await _install_multipart_capture(ctx, page)\n"
+            "        captured = _install_multipart_capture(ctx)\n"
+            "        await _arm_interception(ctx)\n"
             # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
             "        if sys.platform != 'win32':\n"
             "            stop = asyncio.Event()\n"
@@ -295,7 +316,6 @@ class DiscoveryService:
             "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
             "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
             "                await asyncio.sleep(0.3)\n"
-            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        try:\n"
             "            await ctx.close()\n"
             "        except Exception:\n"
@@ -315,18 +335,19 @@ class DiscoveryService:
     def record_sync(self, url: str, har_path: str) -> None:
         """Blocking. Returns when user closes browser. HAR flushed via ctx.close()."""
         harness = (
-            "import asyncio, json, os\n"
+            "import asyncio, base64, json, os\n"
             "from playwright.async_api import async_playwright\n"
-            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
+            f"{_MULTIPART_CAPTURE_SRC}\n"
+            f"{_ROUTE_ARM_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
-            "        captured = await _install_multipart_capture(ctx, page)\n"
+            "        captured = _install_multipart_capture(ctx)\n"
+            "        await _arm_interception(ctx)\n"
             "        await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        await browser.wait_for_event('disconnected')\n"
-            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        await ctx.close()\n"
             "        _write_multipart_sidecar(captured)\n"
             "asyncio.run(main())\n"

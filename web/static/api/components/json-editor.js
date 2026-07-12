@@ -6,7 +6,9 @@
  * the vendor bundle exposes Decoration/ViewPlugin/RangeSetBuilder/
  * StateEffect/hoverTooltip, {{name}} tokens in the doc get colored
  * (var-tok--ok/--missing) and a hover tooltip shows the current value or
- * "not defined". Silently skipped on older bundles (see REBUILD.md).
+ * "not defined". When the bundle also exposes autocompletion/completionKeymap,
+ * typing "{{" pops a suggestion list of known var names. Both are silently
+ * skipped on older bundles (see REBUILD.md).
  * editor: { getValue(), setValue(str), refresh(), focus(), destroy() }
  */
 import { tokenSpansIn, escapeHtml } from './var-style.js';
@@ -18,6 +20,7 @@ export async function createJsonEditor({ parent, value = '', isDark = true, onCh
 
     const { EditorView, EditorState, basicSetup, json, jsonParseLinter, linter, lintGutter, oneDark } = CM;
     const { Decoration, ViewPlugin, RangeSetBuilder, StateEffect, hoverTooltip } = CM;
+    const { autocompletion, completionKeymap, keymap } = CM;
 
     // Custom linter that understands {{VAR}} template syntax
     const varAwareLinter = linter((view) => {
@@ -63,6 +66,38 @@ export async function createJsonEditor({ parent, value = '', isDark = true, onCh
 
     const extensions = [basicSetup(), json(), lintGutter(), varAwareLinter, baseTheme];
     if (isDark) extensions.push(oneDark);
+
+    // {{var}} name suggestions while typing — only when the vendor bundle has
+    // the autocomplete module (older bundles built before REBUILD.md pulled
+    // it in won't have it) and a var list getter was passed in.
+    if (autocompletion && getVarsList) {
+      function varCompletions(context) {
+        const word = context.matchBefore(/\{\{[\w.-]*/);
+        if (!word) return null;
+        const list = getVarsList() || [];
+        if (!list.length) return null;
+        return {
+          from: word.from + 2,
+          options: list.map(v => ({
+            label: v.key,
+            type: 'variable',
+            detail: v.group || undefined,
+            info: () => document.createTextNode(String(v.value ?? '')),
+            apply: (view, completion, from, to) => {
+              const alreadyClosed = view.state.sliceDoc(to, to + 2) === '}}';
+              const insert = completion.label + (alreadyClosed ? '' : '}}');
+              view.dispatch({
+                changes: { from, to, insert },
+                selection: { anchor: from + insert.length },
+              });
+            },
+          })),
+          validFor: /^[\w.-]*$/,
+        };
+      }
+      extensions.push(autocompletion({ override: [varCompletions] }));
+      if (keymap && completionKeymap) extensions.push(keymap.of(completionKeymap));
+    }
 
     let forceRedecorate = null;
     const hasTokenSupport = !!(Decoration && ViewPlugin && RangeSetBuilder && StateEffect && hoverTooltip && getVarsList);
