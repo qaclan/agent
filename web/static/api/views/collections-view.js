@@ -8,22 +8,19 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   container.innerHTML = '<div class="text-muted text-sm" style="padding:10px 14px">Loading...</div>';
 
   let _runningByColId = {};
-  let _runningPollTimer = null;
+  let _activeRequestId = null; // re-applied to the matching row after every reload()
+  const _scrollParent = container.closest('.api-sidebar') || container;
+  let _savedScrollTop = 0; // restored after reload() and after each collection's async tree load
 
-  async function _refreshRunningStatus() {
-    try {
-      const res = await window.api('GET', '/api-collection-runs?status=RUNNING');
-      const runs = res.runs || [];
-      const fresh = {};
-      runs.forEach(r => { if (r.collection_id) fresh[r.collection_id] = r.id; });
-      const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
-      _runningByColId = fresh;
-      if (changed) _updateRunningDots();
-      if (Object.keys(_runningByColId).length === 0 && _runningPollTimer) {
-        clearInterval(_runningPollTimer);
-        _runningPollTimer = null;
-      }
-    } catch (_) {}
+  // Fed by the shared active-runs-tracker in api-section.js — this view no
+  // longer polls the RUNNING endpoint itself, since the top-bar run-status
+  // chip already polls it once for the whole page.
+  function updateRunningRuns(runs) {
+    const fresh = {};
+    (runs || []).forEach(r => { if (r.collection_id) fresh[r.collection_id] = r.id; });
+    const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
+    _runningByColId = fresh;
+    if (changed) _updateRunningDots();
   }
 
   function _updateRunningDots() {
@@ -34,6 +31,7 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   }
 
   async function reload() {
+    _savedScrollTop = _scrollParent.scrollTop;
     const res = await window.api('GET', '/collections');
     const collections = res.collections || [];
     container.innerHTML = '';
@@ -58,10 +56,9 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     collections.forEach(col => container.appendChild(_renderCollectionSection(col)));
     _appendNewCollectionButton();
     _wireCollectionOrderDrag();
-
-    if (_runningPollTimer) clearInterval(_runningPollTimer);
-    await _refreshRunningStatus();
-    _runningPollTimer = setInterval(_refreshRunningStatus, 3000);
+    _reapplyActiveRow();
+    _scrollParent.scrollTop = _savedScrollTop;
+    _updateRunningDots();
   }
 
   function _appendNewCollectionButton() {
@@ -91,11 +88,11 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
         background:var(--warning,#f59e0b);flex-shrink:0;animation:cdot-pulse 1s infinite"></span>
       <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(col.name)}</strong>
       <span class="text-muted text-sm" style="flex-shrink:0;">(${col.request_count})</span>`;
-    leftSide.onclick = (e) => {
+    leftSide.onclick = async (e) => {
       e.stopPropagation();
       if (onSelectCollection) {
         const runId = _runningByColId[col.id] || null;
-        onSelectCollection(col, runId);
+        await onSelectCollection(col, runId);
       }
     };
     header.appendChild(leftSide);
@@ -153,6 +150,8 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       allRequests = treeRes.requests || [];
       rerender();
       _wireCollectionTreeDrag(treeRoot, col, allFolders, allRequests, rerender);
+      _reapplyActiveRow();
+      _scrollParent.scrollTop = _savedScrollTop;
     });
 
     return section;
@@ -237,6 +236,15 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     return frag;
   }
 
+  // Discovery/import-generated names are "METHOD /path" — the method is
+  // already shown by the colored badge, so strip a matching leading prefix
+  // to avoid showing it twice. Leaves custom (renamed) names untouched.
+  function _displayReqName(req) {
+    const name = req.name || '';
+    const prefix = `${req.method || ''} `;
+    return name.toUpperCase().startsWith(prefix.toUpperCase()) ? name.slice(prefix.length) : name;
+  }
+
   function _renderRequestNode(col, req, parentFolderId) {
     const item = document.createElement('div');
     item.className = 'api-request-item';
@@ -246,7 +254,8 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     item.innerHTML = `
       <span class="api-drag-handle">⠿</span>
       <span class="method-badge method-${req.method}">${req.method}</span>
-      <span>${_esc(req.name)}</span>`;
+      <span>${_esc(_displayReqName(req))}</span>
+      <span data-req-dot="${_esc(req.id)}" class="req-unsaved-dot" style="display:none" title="Unsaved changes"></span>`;
 
     const removeBtn = document.createElement('button');
     removeBtn.className = 'remove-from-col-btn';
@@ -269,11 +278,14 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     };
     item.appendChild(removeBtn);
 
-    item.onclick = (e) => {
+    item.onclick = async (e) => {
       if (removeBtn.contains(e.target)) return;
+      if (item.classList.contains('active')) return;
+      const proceed = await onSelectRequest(req.id, null, col.id, col.env_name, parentFolderId);
+      if (proceed === false) return; // caller declined (unsaved-changes confirm)
       container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
       item.classList.add('active');
-      onSelectRequest(req.id, null, col.id, col.env_name, parentFolderId);
+      _activeRequestId = req.id;
     };
 
     return item;
@@ -283,12 +295,24 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     const row = document.createElement('div');
     row.className = 'api-request-item api-new-item-row';
     row.innerHTML = `<span style="color:var(--text-muted)">+ New Request</span>`;
-    row.onclick = () => {
+    row.onclick = async () => {
+      const proceed = await onSelectRequest(null, col.id, col.id, col.env_name, parentFolderId);
+      if (proceed === false) return;
       container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
       row.classList.add('active');
-      onSelectRequest(null, col.id, col.id, col.env_name, parentFolderId);
+      _activeRequestId = null;
     };
     return row;
+  }
+
+  // Re-applies the `.active` highlight to whichever request row matches
+  // the last-selected request id — reload() rebuilds the tree from scratch,
+  // so without this the selection highlight would disappear on every save.
+  function _reapplyActiveRow() {
+    if (!_activeRequestId) return;
+    container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
+    const row = container.querySelector(`.api-request-item[data-node-id="${_activeRequestId}"]`);
+    if (row) row.classList.add('active');
   }
 
   function _renderNewFolderRow(col, parentFolderId, allFolders, allRequests, containerEl) {
@@ -525,6 +549,10 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function setActiveRequestId(requestId) {
+    _activeRequestId = requestId || null;
+  }
+
   reload();
-  return { reload };
+  return { reload, setActiveRequestId, updateRunningRuns };
 }
