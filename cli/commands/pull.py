@@ -416,16 +416,22 @@ def pull_api_run_history(project_id):
             # and this avoids inserting a second, duplicate copy under the server's id.
             # Falls back to the server's id only for runs this machine never pushed itself.
             local_run_id = run_summary.get("cli_collection_run_id") or run_summary["id"]
+            # Scope both lookups by project_id: api_collection_runs has no cloud_id
+            # column, and cloud_id values on api_collections aren't unique across
+            # projects, so an unscoped match could resolve/dedup against a row that
+            # actually belongs to a different local project.
             existing = conn.execute(
-                "SELECT id FROM api_collection_runs WHERE id = ?", (local_run_id,)
+                "SELECT id FROM api_collection_runs WHERE id = ? AND project_id = ?",
+                (local_run_id, project_id),
             ).fetchone()
             if existing:
                 continue  # runs are immutable once finished — nothing to update
             local_collection_row = conn.execute(
-                "SELECT id FROM api_collections WHERE cloud_id = ?", (run_summary["collection_id"],)
+                "SELECT id FROM api_collections WHERE cloud_id = ? AND project_id = ?",
+                (run_summary["collection_id"], project_id),
             ).fetchone()
             if not local_collection_row:
-                continue  # collection not pulled locally yet — skip, will retry next pull
+                continue  # collection not pulled locally under this project — skip, will retry next pull
             detail = api.pull_api_run_detail(key, run_summary["id"])
             conn.execute(
                 "INSERT INTO api_collection_runs (id, project_id, collection_id, collection_name, "
@@ -438,10 +444,12 @@ def pull_api_run_history(project_id):
             )
             for r in detail.get("request_results", []):
                 local_request_row = conn.execute(
-                    "SELECT id FROM api_requests WHERE cloud_id = ?", (r["cli_request_id"],)
+                    "SELECT id FROM api_requests WHERE cloud_id = ? AND project_id = ?",
+                    (r["cli_request_id"], project_id),
                 ).fetchone()
                 if not local_request_row:
-                    # Parent request not pulled locally (yet, or ever — e.g. deleted since).
+                    # Parent request not pulled locally under this project (yet, or
+                    # ever — e.g. deleted since, or belongs to a different project).
                     # api_request_results.api_request_id is NOT NULL + FK-enforced
                     # (PRAGMA foreign_keys = ON, cli/db.py:20) — inserting the raw cloud
                     # request id here would raise sqlite3.IntegrityError. Skip the row

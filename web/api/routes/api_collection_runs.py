@@ -69,7 +69,7 @@ def pull_team_api_runs():
         pid = _project_id()
         inserted = pull_api_run_history(pid)
         return jsonify({"ok": True, "inserted": inserted})
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("pull_team_api_runs")

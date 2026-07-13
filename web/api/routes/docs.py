@@ -101,7 +101,7 @@ def pull_team_docs():
         pid = _project_id()
         changed = pull_api_docs_overlay(pid)
         return jsonify({"ok": True, "changed": changed})
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("pull_team_docs")
