@@ -38,6 +38,16 @@ ENTITY_ORDER = (
 _wake = threading.Event()
 _worker_started = False
 _lock = threading.Lock()
+# Serializes drain_once() across the background worker thread and any
+# request thread calling flush_sync() directly (e.g. POST /api/sync/push).
+# Without this, both can concurrently _fetch_batch() the same not-yet-deleted
+# queue rows and double-dispatch the same entity to the cloud — reproduced via
+# manual testing (Task 19): api_collection/collection_vars/api_request_example
+# each fired twice in a single push when the worker and the request thread
+# raced, while entities the worker had already fully processed by the time the
+# request thread's SELECT ran were unaffected (hence a partial, timing-
+# dependent duplicate pattern rather than a clean doubling of every row).
+_drain_lock = threading.Lock()
 
 IDLE_SLEEP = 30
 OFFLINE_BACKOFFS = (30, 60, 300, 900)
@@ -256,34 +266,40 @@ def _dispatch_run(run_id, conn, sync):
 
 
 def drain_once(max_items=BATCH_SIZE):
-    """Drain up to max_items from the queue. Returns (synced, failed, offline)."""
+    """Drain up to max_items from the queue. Returns (synced, failed, offline).
+
+    Holds _drain_lock for the whole fetch-dispatch-delete cycle — see that
+    lock's docstring for why: without it, the background worker and a
+    request thread's flush_sync() can both fetch and re-dispatch the same
+    not-yet-deleted row."""
     if not get_auth_key():
         return (0, 0, False)
     if not _is_online():
         return (0, 0, True)
 
-    from cli.db import get_conn
-    conn = get_conn()
-    rows = _fetch_batch(conn, max_items)
-    synced = 0
-    failed = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
+    with _drain_lock:
+        from cli.db import get_conn
+        conn = get_conn()
+        rows = _fetch_batch(conn, max_items)
+        synced = 0
+        failed = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-    for row in rows:
-        try:
-            _dispatch(row)
-            conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
-            conn.commit()
-            synced += 1
-        except Exception as e:
-            failed += 1
-            conn.execute(
-                "UPDATE sync_queue SET attempts = attempts + 1, "
-                "last_error = ?, last_attempt_at = ? WHERE id = ?",
-                (str(e)[:500], now_iso, row["id"]),
-            )
-            conn.commit()
-            logger.debug("sync_queue: failed %s %s %s: %s", row["entity_type"], row["entity_id"], row["op"], e)
+        for row in rows:
+            try:
+                _dispatch(row)
+                conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
+                conn.commit()
+                synced += 1
+            except Exception as e:
+                failed += 1
+                conn.execute(
+                    "UPDATE sync_queue SET attempts = attempts + 1, "
+                    "last_error = ?, last_attempt_at = ? WHERE id = ?",
+                    (str(e)[:500], now_iso, row["id"]),
+                )
+                conn.commit()
+                logger.debug("sync_queue: failed %s %s %s: %s", row["entity_type"], row["entity_id"], row["op"], e)
     return (synced, failed, False)
 
 
