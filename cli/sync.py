@@ -473,6 +473,36 @@ def sync_api_collection_run_to_cloud(run_id):
     return _try_sync("api collection run", lambda: api.sync_api_collection_run(key, payload))
 
 
+def _gather_api_run_results(suite_run_id):
+    """Build the api_results payload list for a mixed E2E+API suite run
+    (rows from the api_runs table, interleaved with script_runs via order_index)."""
+    from cli.db import get_conn
+    rows = get_conn().execute(
+        "SELECT ar.api_request_id, req.name AS request_name, ar.order_index, ar.status, "
+        "ar.status_code, ar.duration_ms, ar.response_body, ar.response_headers, "
+        "ar.assertion_results, ar.error_message, ar.started_at, ar.finished_at "
+        "FROM api_runs ar JOIN api_requests req ON ar.api_request_id = req.id "
+        "WHERE ar.suite_run_id = ? ORDER BY ar.order_index", (suite_run_id,)
+    ).fetchall()
+    return [
+        {
+            "cli_request_id": r["api_request_id"],
+            "request_name": r["request_name"],
+            "order_index": r["order_index"],
+            "status": (r["status"] or "error").lower(),
+            "status_code": r["status_code"],
+            "duration_ms": r["duration_ms"],
+            "response_body": r["response_body"],
+            "response_headers": json.loads(r["response_headers"]) if r["response_headers"] else None,
+            "assertion_results": json.loads(r["assertion_results"]) if r["assertion_results"] else None,
+            "error_message": r["error_message"],
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
+        }
+        for r in rows
+    ]
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
@@ -774,6 +804,7 @@ def sync_all(project_id=None):
                 browser=run["browser"],
                 resolution=run["resolution"],
                 headless=bool(run["headless"]) if run["headless"] is not None else None,
+                api_results=_gather_api_run_results(run["id"]),
                 script_results=[
                     {
                         "script_id": r["script_id"],
@@ -808,9 +839,10 @@ def sync_all(project_id=None):
 
 
 def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, duration_ms, script_results,
-                      project_id=None, browser=None, resolution=None, headless=None):
-    """Sync a completed test run with all script results.
-    Ensures the parent suite (and its project) are synced first."""
+                      project_id=None, browser=None, resolution=None, headless=None, api_results=None):
+    """Sync a completed test run with all script results (and, for mixed
+    E2E+API suites, api_results). Ensures the parent suite (and its project)
+    are synced first."""
     key = get_auth_key()
     if not key:
         return None
@@ -825,6 +857,8 @@ def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, durati
         "duration_ms": duration_ms,
         "script_results": script_results,
     }
+    if api_results:
+        payload["api_results"] = api_results
     if browser:
         payload["browser"] = browser
     if resolution:
