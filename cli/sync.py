@@ -263,6 +263,53 @@ def _ensure_api_collection_synced(collection_id):
     return None
 
 
+def sync_api_folder_to_cloud(folder_id):
+    """Sync an API folder. Requires cloud_project_id and cloud_collection_id;
+    recursively ensures its parent folder is synced first (if any)."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    row = get_conn().execute(
+        "SELECT project_id, collection_id, parent_folder_id, name, order_index "
+        "FROM api_folders WHERE id = ?", (folder_id,)
+    ).fetchone()
+    if not row:
+        return None
+    cloud_project_id = _ensure_project_synced(row["project_id"])
+    cloud_collection_id = _ensure_api_collection_synced(row["collection_id"])
+    if not cloud_project_id or not cloud_collection_id:
+        return None
+    cloud_parent_id = None
+    if row["parent_folder_id"]:
+        cloud_parent_id = _ensure_api_folder_synced(row["parent_folder_id"])
+    cloud_id = _get_cloud_id("api_folders", folder_id)
+    result = _try_sync("api folder", lambda: api.sync_api_folder(key, {
+        "cli_folder_id": folder_id,
+        "cloud_id": cloud_id,
+        "name": row["name"],
+        "order_index": row["order_index"],
+        "project_id": cloud_project_id,
+        "collection_id": cloud_collection_id,
+        "parent_folder_id": cloud_parent_id,
+    }))
+    if result and result.get("id"):
+        _save_cloud_id("api_folders", folder_id, result["id"])
+    return result
+
+
+def _ensure_api_folder_synced(folder_id):
+    """Ensure the API folder has a cloud_id. If not, sync it now
+    (which recursively ensures its parent folder first)."""
+    cloud_id = _get_cloud_id("api_folders", folder_id)
+    if cloud_id:
+        return cloud_id
+    result = sync_api_folder_to_cloud(folder_id)
+    if result:
+        return result.get("id") or _get_cloud_id("api_folders", folder_id)
+    return None
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
@@ -311,6 +358,14 @@ def delete_api_collection_from_cloud(collection_id):
     if not key:
         return None
     return _try_sync("delete api collection", lambda: api.delete_api_collection(key, collection_id))
+
+
+def delete_api_folder_from_cloud(folder_id):
+    """Delete an API folder from cloud by CLI folder ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete api folder", lambda: api.delete_api_folder(key, folder_id))
 
 
 # --- Suite items sync ---
