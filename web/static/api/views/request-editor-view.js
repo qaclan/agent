@@ -579,7 +579,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   function _parseBodyWithVarSub(text) {
     const vars = [];
-    const subbed = text.replace(/\{\{([^}]+)\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
+    const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
     return { parsed: JSON.parse(subbed), vars };
   }
 

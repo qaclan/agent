@@ -26,7 +26,7 @@ export async function createJsonEditor({ parent, value = '', isDark = true, onCh
     const varAwareLinter = linter((view) => {
       const text = view.state.doc.toString().trim();
       if (!text) return [];
-      const subbed = text.replace(/\{\{[^}]+\}\}/g, '"__QCVAR__"');
+      const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, '"__QCVAR__"');
       try { JSON.parse(subbed); return []; }
       catch (e) {
         const m = /at position (\d+)/i.exec(e.message) || /position (\d+)/i.exec(e.message);
