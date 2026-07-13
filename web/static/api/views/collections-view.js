@@ -1,28 +1,26 @@
 /**
- * renderCollectionsView(container, onSelectRequest)
+ * renderCollectionsView(container, onSelectRequest, onRunStarted, onSelectCollection)
  * container: DOM element to render into
- * onSelectRequest: (requestId) => void
+ * onSelectRequest: (requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId) => void
+ * defaultFolderId: string|null — which folder a "+ New Request" click was made from
  */
 export function renderCollectionsView(container, onSelectRequest, onRunStarted, onSelectCollection) {
   container.innerHTML = '<div class="text-muted text-sm" style="padding:10px 14px">Loading...</div>';
 
   let _runningByColId = {};
-  let _runningPollTimer = null;
+  let _activeRequestId = null; // re-applied to the matching row after every reload()
+  const _scrollParent = container.closest('.api-sidebar') || container;
+  let _savedScrollTop = 0; // restored after reload() and after each collection's async tree load
 
-  async function _refreshRunningStatus() {
-    try {
-      const res = await window.api('GET', '/api-collection-runs?status=RUNNING');
-      const runs = res.runs || [];
-      const fresh = {};
-      runs.forEach(r => { if (r.collection_id) fresh[r.collection_id] = r.id; });
-      const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
-      _runningByColId = fresh;
-      if (changed) _updateRunningDots();
-      if (Object.keys(_runningByColId).length === 0 && _runningPollTimer) {
-        clearInterval(_runningPollTimer);
-        _runningPollTimer = null;
-      }
-    } catch (_) {}
+  // Fed by the shared active-runs-tracker in api-section.js — this view no
+  // longer polls the RUNNING endpoint itself, since the top-bar run-status
+  // chip already polls it once for the whole page.
+  function updateRunningRuns(runs) {
+    const fresh = {};
+    (runs || []).forEach(r => { if (r.collection_id) fresh[r.collection_id] = r.id; });
+    const changed = JSON.stringify(fresh) !== JSON.stringify(_runningByColId);
+    _runningByColId = fresh;
+    if (changed) _updateRunningDots();
   }
 
   function _updateRunningDots() {
@@ -33,6 +31,7 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   }
 
   async function reload() {
+    _savedScrollTop = _scrollParent.scrollTop;
     const res = await window.api('GET', '/collections');
     const collections = res.collections || [];
     container.innerHTML = '';
@@ -50,155 +49,468 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       empty.style.cssText = 'padding:10px 14px;';
       empty.textContent = 'No collections yet.';
       container.appendChild(empty);
-      const newColBtn = document.createElement('div');
-      newColBtn.style.cssText = 'padding:8px 14px;cursor:pointer;font-size:12px;color:var(--text-muted)';
-      newColBtn.textContent = '+ New Collection';
-      newColBtn.onclick = _createCollection;
-      container.appendChild(newColBtn);
+      _appendNewCollectionButton();
       return;
     }
 
-    collections.forEach(col => {
-      const section = document.createElement('div');
-      section.className = 'api-collection-section';
+    collections.forEach(col => container.appendChild(_renderCollectionSection(col)));
+    _appendNewCollectionButton();
+    _wireCollectionOrderDrag();
+    _reapplyActiveRow();
+    _scrollParent.scrollTop = _savedScrollTop;
+    _updateRunningDots();
+  }
 
-      // Collection header row
-      const header = document.createElement('div');
-      header.className = 'api-collection-item';
-
-      const leftSide = document.createElement('span');
-      leftSide.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;flex:1;min-width:0;';
-      leftSide.innerHTML = `
-        <span data-col-dot="${_esc(col.id)}" style="display:none;width:7px;height:7px;border-radius:50%;
-          background:var(--warning,#f59e0b);flex-shrink:0;animation:cdot-pulse 1s infinite"></span>
-        <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(col.name)}</strong>
-        <span class="text-muted text-sm" style="flex-shrink:0;">(${col.request_count})</span>`;
-      leftSide.onclick = (e) => {
-        e.stopPropagation();
-        if (onSelectCollection) {
-          const runId = _runningByColId[col.id] || null;
-          onSelectCollection(col, runId);
-        }
-      };
-      header.appendChild(leftSide);
-
-      const rightSide = document.createElement('span');
-      rightSide.style.cssText = 'display:flex;gap:2px;align-items:center;';
-
-      const runBtn = document.createElement('button');
-      runBtn.className = 'btn btn-xs btn-ghost';
-      runBtn.title = 'Run collection';
-      runBtn.textContent = '▶';
-      runBtn.onclick = (e) => { e.stopPropagation(); _runCollection(col.id, col.name, col.env_name); };
-      rightSide.appendChild(runBtn);
-
-      const delBtn = document.createElement('button');
-      delBtn.className = 'btn btn-xs btn-ghost';
-      delBtn.title = 'Delete collection';
-      delBtn.style.color = 'var(--danger,#e53e3e)';
-      delBtn.textContent = '🗑';
-      delBtn.onclick = (e) => { e.stopPropagation(); _deleteCollection(col.id, col.name); };
-      rightSide.appendChild(delBtn);
-
-      const expandBtn = document.createElement('button');
-      expandBtn.className = 'btn btn-xs btn-ghost';
-      expandBtn.textContent = '▾';
-      rightSide.appendChild(expandBtn);
-      header.appendChild(rightSide);
-
-      section.appendChild(header);
-
-      // Requests list (togglable)
-      const reqList = document.createElement('div');
-      reqList.className = 'api-requests-list';
-      let expanded = true;
-
-      function _toggleExpand() {
-        expanded = !expanded;
-        reqList.style.display = expanded ? '' : 'none';
-        expandBtn.textContent = expanded ? '▾' : '▸';
-      }
-      header.onclick = (e) => {
-        if (rightSide.contains(e.target)) return;
-        if (leftSide.contains(e.target)) return;
-        _toggleExpand();
-      };
-      expandBtn.onclick = (e) => { e.stopPropagation(); _toggleExpand(); };
-
-      // Load requests for this collection
-      window.api('GET', `/api-requests?collection_id=${col.id}`).then(r => {
-        const reqs = r.requests || [];
-        reqs.forEach(req => {
-          const item = document.createElement('div');
-          item.className = 'api-request-item';
-          item.dataset.requestId = req.id;
-
-          const badge = document.createElement('span');
-          badge.className = `method-badge method-${req.method}`;
-          badge.textContent = req.method;
-
-          const name = document.createElement('span');
-          name.textContent = req.name;
-
-          const removeBtn = document.createElement('button');
-          removeBtn.className = 'remove-from-col-btn';
-          removeBtn.title = 'Remove from collection';
-          removeBtn.innerHTML = '&#x2715;';
-          removeBtn.onclick = async (e) => {
-            e.stopPropagation();
-            const confirmed = await window._confirmDialog(
-              'Remove from collection?',
-              `"${req.name}" will be removed from this collection but not deleted.`,
-              'Remove'
-            );
-            if (!confirmed) return;
-            const res = await window.api('PATCH', `/api-requests/${req.id}`, { collection_id: null });
-            if (res.ok === false) {
-              await window._alertDialog('Failed: ' + (res.error || 'unknown error'));
-              return;
-            }
-            item.remove();
-          };
-
-          item.appendChild(badge);
-          item.appendChild(name);
-          item.appendChild(removeBtn);
-
-          item.onclick = () => {
-            container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
-            item.classList.add('active');
-            onSelectRequest(req.id, null, col.id, col.env_name);
-          };
-          reqList.appendChild(item);
-        });
-
-        // "New request in collection" button
-        const newReqBtn = document.createElement('div');
-        newReqBtn.className = 'api-request-item';
-        newReqBtn.innerHTML = `<span style="color:var(--text-muted)">+ New Request</span>`;
-        newReqBtn.onclick = () => {
-          container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
-          newReqBtn.classList.add('active');
-          onSelectRequest(null, col.id, col.id, col.env_name);
-        };
-        reqList.appendChild(newReqBtn);
-      });
-
-      section.appendChild(reqList);
-      container.appendChild(section);
-    });
-
-    // "New collection" at bottom
+  function _appendNewCollectionButton() {
     const newColBtn = document.createElement('div');
     newColBtn.style.cssText = 'padding:8px 14px;cursor:pointer;font-size:12px;color:var(--text-muted)';
     newColBtn.textContent = '+ New Collection';
     newColBtn.onclick = _createCollection;
     container.appendChild(newColBtn);
-
-    if (_runningPollTimer) clearInterval(_runningPollTimer);
-    await _refreshRunningStatus();
-    _runningPollTimer = setInterval(_refreshRunningStatus, 3000);
   }
+
+  // ---- Collection section (header + tree) ----
+
+  function _renderCollectionSection(col) {
+    const section = document.createElement('div');
+    section.className = 'api-collection-section';
+    section.dataset.collectionId = col.id;
+
+    const header = document.createElement('div');
+    header.className = 'api-collection-item api-collection-header';
+    header.draggable = true;
+
+    const leftSide = document.createElement('span');
+    leftSide.style.cssText = 'display:flex;align-items:center;gap:5px;cursor:pointer;flex:1;min-width:0;';
+    leftSide.innerHTML = `
+      <span class="api-drag-handle">⠿</span>
+      <span data-col-dot="${_esc(col.id)}" style="display:none;width:7px;height:7px;border-radius:50%;
+        background:var(--warning,#f59e0b);flex-shrink:0;animation:cdot-pulse 1s infinite"></span>
+      <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(col.name)}</strong>
+      <span class="text-muted text-sm" style="flex-shrink:0;">(${col.request_count})</span>`;
+    leftSide.onclick = async (e) => {
+      e.stopPropagation();
+      if (onSelectCollection) {
+        const runId = _runningByColId[col.id] || null;
+        await onSelectCollection(col, runId);
+      }
+    };
+    header.appendChild(leftSide);
+
+    const rightSide = document.createElement('span');
+    rightSide.style.cssText = 'display:flex;gap:2px;align-items:center;';
+
+    const runBtn = document.createElement('button');
+    runBtn.className = 'btn btn-xs btn-ghost';
+    runBtn.title = 'Run collection';
+    runBtn.textContent = '▶';
+    runBtn.onclick = (e) => { e.stopPropagation(); _runCollection(col.id, col.name, col.env_name); };
+    rightSide.appendChild(runBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-xs btn-ghost';
+    delBtn.title = 'Delete collection';
+    delBtn.style.color = 'var(--danger,#e53e3e)';
+    delBtn.textContent = '🗑';
+    delBtn.onclick = (e) => { e.stopPropagation(); _deleteCollection(col.id, col.name); };
+    rightSide.appendChild(delBtn);
+
+    const expandBtn = document.createElement('button');
+    expandBtn.className = 'btn btn-xs btn-ghost';
+    expandBtn.textContent = '▾';
+    rightSide.appendChild(expandBtn);
+    header.appendChild(rightSide);
+
+    section.appendChild(header);
+
+    const treeRoot = document.createElement('div');
+    treeRoot.className = 'api-tree-root';
+    let expanded = true;
+
+    function _toggleExpand() {
+      expanded = !expanded;
+      treeRoot.style.display = expanded ? '' : 'none';
+      expandBtn.textContent = expanded ? '▾' : '▸';
+    }
+    header.onclick = (e) => {
+      if (rightSide.contains(e.target)) return;
+      if (leftSide.contains(e.target)) return;
+      _toggleExpand();
+    };
+    expandBtn.onclick = (e) => { e.stopPropagation(); _toggleExpand(); };
+
+    section.appendChild(treeRoot);
+
+    let allFolders = [];
+    let allRequests = [];
+    const rerender = () => _renderTreeLevel(treeRoot, col, null, allFolders, allRequests);
+
+    window.api('GET', `/collections/${col.id}/tree`).then(treeRes => {
+      allFolders = treeRes.folders || [];
+      allRequests = treeRes.requests || [];
+      rerender();
+      _wireCollectionTreeDrag(treeRoot, col, allFolders, allRequests, rerender);
+      _reapplyActiveRow();
+      _scrollParent.scrollTop = _savedScrollTop;
+    });
+
+    return section;
+  }
+
+  // ---- Tree rendering (recursive) ----
+
+  function _renderTreeLevel(containerEl, col, parentFolderId, allFolders, allRequests) {
+    containerEl.dataset.parentFolderId = parentFolderId || '';
+    containerEl.innerHTML = '';
+
+    const childFolders = allFolders.filter(f => (f.parent_folder_id || null) === parentFolderId);
+    const childRequests = allRequests.filter(r => (r.folder_id || null) === parentFolderId);
+    const nodes = [
+      ...childFolders.map(f => ({ type: 'folder', order_index: f.order_index, data: f })),
+      ...childRequests.map(r => ({ type: 'request', order_index: r.order_index, data: r })),
+    ].sort((a, b) => a.order_index - b.order_index);
+
+    nodes.forEach(node => {
+      containerEl.appendChild(node.type === 'folder'
+        ? _renderFolderNode(col, node.data, allFolders, allRequests)
+        : _renderRequestNode(col, node.data, parentFolderId));
+    });
+
+    containerEl.appendChild(_renderNewRequestRow(col, parentFolderId));
+    containerEl.appendChild(_renderNewFolderRow(col, parentFolderId, allFolders, allRequests, containerEl));
+  }
+
+  function _renderFolderNode(col, folder, allFolders, allRequests) {
+    // Returns a DocumentFragment of two siblings — [row, childrenEl] — rather than a
+    // wrapping <div>. This matters for drag-and-drop: dragEl.parentElement must be the
+    // shared level container (containerEl) for BOTH folder rows and request rows, so the
+    // "same level = plain reorder" check in _wireCollectionTreeDrag works uniformly. A
+    // wrapping div would put a folder row one level deeper in the DOM than a request row.
+    const row = document.createElement('div');
+    row.className = 'api-folder-item';
+    row.draggable = true;
+    row.dataset.nodeType = 'folder';
+    row.dataset.nodeId = folder.id;
+    row.innerHTML = `
+      <span class="api-drag-handle">⠿</span>
+      <span class="api-folder-toggle">▾</span>
+      <span class="api-folder-name">${_esc(folder.name)}</span>`;
+
+    const actions = document.createElement('span');
+    actions.className = 'api-folder-actions';
+
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'btn btn-xs btn-ghost';
+    renameBtn.title = 'Rename folder';
+    renameBtn.textContent = '✎';
+    renameBtn.onclick = async (e) => { e.stopPropagation(); await _renameFolder(folder); };
+    actions.appendChild(renameBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-xs btn-ghost';
+    delBtn.title = 'Delete folder';
+    delBtn.style.color = 'var(--danger,#e53e3e)';
+    delBtn.textContent = '🗑';
+    delBtn.onclick = async (e) => { e.stopPropagation(); await _deleteFolder(folder); };
+    actions.appendChild(delBtn);
+
+    row.appendChild(actions);
+
+    const childrenEl = document.createElement('div');
+    childrenEl.className = 'api-folder-children';
+
+    let expanded = true;
+    const toggle = row.querySelector('.api-folder-toggle');
+    row.onclick = (e) => {
+      if (actions.contains(e.target)) return;
+      expanded = !expanded;
+      childrenEl.style.display = expanded ? '' : 'none';
+      toggle.textContent = expanded ? '▾' : '▸';
+    };
+
+    _renderTreeLevel(childrenEl, col, folder.id, allFolders, allRequests);
+
+    const frag = document.createDocumentFragment();
+    frag.appendChild(row);
+    frag.appendChild(childrenEl);
+    return frag;
+  }
+
+  // Discovery/import-generated names are "METHOD /path" — the method is
+  // already shown by the colored badge, so strip a matching leading prefix
+  // to avoid showing it twice. Leaves custom (renamed) names untouched.
+  function _displayReqName(req) {
+    const name = req.name || '';
+    const prefix = `${req.method || ''} `;
+    return name.toUpperCase().startsWith(prefix.toUpperCase()) ? name.slice(prefix.length) : name;
+  }
+
+  function _renderRequestNode(col, req, parentFolderId) {
+    const item = document.createElement('div');
+    item.className = 'api-request-item';
+    item.draggable = true;
+    item.dataset.nodeType = 'request';
+    item.dataset.nodeId = req.id;
+    item.innerHTML = `
+      <span class="api-drag-handle">⠿</span>
+      <span class="method-badge method-${req.method}">${req.method}</span>
+      <span>${_esc(_displayReqName(req))}</span>
+      <span data-req-dot="${_esc(req.id)}" class="req-unsaved-dot" style="display:none" title="Unsaved changes"></span>`;
+
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'remove-from-col-btn';
+    removeBtn.title = 'Remove from collection';
+    removeBtn.innerHTML = '&#x2715;';
+    removeBtn.onclick = async (e) => {
+      e.stopPropagation();
+      const confirmed = await window._confirmDialog(
+        'Remove from collection?',
+        `"${req.name}" will be removed from this collection but not deleted.`,
+        'Remove'
+      );
+      if (!confirmed) return;
+      const res = await window.api('PATCH', `/api-requests/${req.id}`, { collection_id: null, folder_id: null });
+      if (res.ok === false) {
+        await window._alertDialog('Error: ' + (res.error || 'unknown error'));
+        return;
+      }
+      item.remove();
+    };
+    item.appendChild(removeBtn);
+
+    item.onclick = async (e) => {
+      if (removeBtn.contains(e.target)) return;
+      if (item.classList.contains('active')) return;
+      const proceed = await onSelectRequest(req.id, null, col.id, col.env_name, parentFolderId);
+      if (proceed === false) return; // caller declined (unsaved-changes confirm)
+      container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      _activeRequestId = req.id;
+    };
+
+    return item;
+  }
+
+  function _renderNewRequestRow(col, parentFolderId) {
+    const row = document.createElement('div');
+    row.className = 'api-request-item api-new-item-row';
+    row.innerHTML = `<span style="color:var(--text-muted)">+ New Request</span>`;
+    row.onclick = async () => {
+      const proceed = await onSelectRequest(null, col.id, col.id, col.env_name, parentFolderId);
+      if (proceed === false) return;
+      container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
+      row.classList.add('active');
+      _activeRequestId = null;
+    };
+    return row;
+  }
+
+  // Re-applies the `.active` highlight to whichever request row matches
+  // the last-selected request id — reload() rebuilds the tree from scratch,
+  // so without this the selection highlight would disappear on every save.
+  function _reapplyActiveRow() {
+    if (!_activeRequestId) return;
+    container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
+    const row = container.querySelector(`.api-request-item[data-node-id="${_activeRequestId}"]`);
+    if (row) row.classList.add('active');
+  }
+
+  function _renderNewFolderRow(col, parentFolderId, allFolders, allRequests, containerEl) {
+    const row = document.createElement('div');
+    row.className = 'api-request-item api-new-item-row';
+    row.innerHTML = `<span style="color:var(--text-muted)">+ New Folder</span>`;
+    row.onclick = async () => {
+      const name = await window._promptDialog('Folder name:');
+      if (!name) return;
+      const res = await window.api('POST', `/collections/${col.id}/folders`, {
+        name: name.trim(), parent_folder_id: parentFolderId,
+      });
+      if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
+      allFolders.push(res.folder);
+      _renderTreeLevel(containerEl, col, parentFolderId, allFolders, allRequests);
+    };
+    return row;
+  }
+
+  async function _renameFolder(folder) {
+    const name = await window._promptDialog('Rename folder:', folder.name);
+    if (!name || name.trim() === folder.name) return;
+    const res = await window.api('PATCH', `/api-folders/${folder.id}`, { name: name.trim() });
+    if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
+    reload();
+  }
+
+  async function _deleteFolder(folder) {
+    const confirmed = await window._confirmDialog(
+      `Delete '${folder.name}'?`,
+      'This folder and everything inside it (sub-folders and requests) will be permanently deleted.',
+      'Delete', 'btn btn-sm btn-danger'
+    );
+    if (!confirmed) return;
+    const res = await window.api('DELETE', `/api-folders/${folder.id}`);
+    if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
+    reload();
+  }
+
+  // ---- Drag-and-drop: folders + requests within one collection ----
+  // One delegated listener per collection (attached to that collection's treeRoot),
+  // not one per level — avoids nested-listener event-bubbling conflicts entirely.
+
+  function _isDescendant(folderId, allFolders, candidateId) {
+    let cursor = allFolders.find(f => f.id === candidateId);
+    while (cursor) {
+      if (cursor.id === folderId) return true;
+      cursor = allFolders.find(f => f.id === cursor.parent_folder_id);
+    }
+    return false;
+  }
+
+  function _wireCollectionTreeDrag(treeRoot, col, allFolders, allRequests, rerender) {
+    let dragEl = null;
+    let hoverFolderRow = null;
+
+    treeRoot.addEventListener('dragstart', e => {
+      const row = e.target.closest('[data-node-type]');
+      if (!row) return;
+      dragEl = row;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+
+    treeRoot.addEventListener('dragover', e => {
+      if (!dragEl) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+
+      if (hoverFolderRow) { hoverFolderRow.classList.remove('drop-target-folder'); hoverFolderRow = null; }
+
+      const targetRow = e.target.closest('[data-node-type]');
+      if (!targetRow || targetRow === dragEl) return;
+
+      const rect = targetRow.getBoundingClientRect();
+      const topZone = rect.top + rect.height * 0.25;
+      const bottomZone = rect.top + rect.height * 0.75;
+      const draggingFolder = dragEl.dataset.nodeType === 'folder';
+      const wouldCycle = draggingFolder && _isDescendant(dragEl.dataset.nodeId, allFolders, targetRow.dataset.nodeId);
+
+      if (targetRow.dataset.nodeType === 'folder' && e.clientY > topZone && e.clientY < bottomZone && !wouldCycle) {
+        targetRow.classList.add('drop-target-folder');
+        hoverFolderRow = targetRow;
+        return;
+      }
+
+      const targetList = targetRow.parentElement;
+      if (targetList !== dragEl.parentElement) return; // plain reorder only within the same level
+      if (e.clientY < rect.top + rect.height / 2) {
+        targetList.insertBefore(dragEl, targetRow);
+      } else {
+        targetList.insertBefore(dragEl, targetRow.nextSibling);
+      }
+    });
+
+    treeRoot.addEventListener('dragend', async () => {
+      if (!dragEl) return;
+      dragEl.classList.remove('dragging');
+      const draggedType = dragEl.dataset.nodeType;
+      const draggedId = dragEl.dataset.nodeId;
+      const sourceList = dragEl.parentElement;
+
+      if (hoverFolderRow) {
+        const targetFolderId = hoverFolderRow.dataset.nodeId;
+        hoverFolderRow.classList.remove('drop-target-folder');
+        hoverFolderRow = null;
+        dragEl = null;
+        await _reparentNode(col, allFolders, allRequests, rerender, draggedType, draggedId, targetFolderId);
+        return;
+      }
+
+      dragEl = null;
+      const parentFolderId = sourceList.dataset.parentFolderId || null;
+      const items = [...sourceList.querySelectorAll(':scope > [data-node-type]')].map(el => ({
+        type: el.dataset.nodeType, id: el.dataset.nodeId,
+      }));
+      const res = await window.api('PUT', `/collections/${col.id}/tree-order`, { parent_folder_id: parentFolderId, items });
+      if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
+      items.forEach((it, idx) => {
+        const arr = it.type === 'folder' ? allFolders : allRequests;
+        const n = arr.find(x => x.id === it.id);
+        if (n) n.order_index = idx;
+      });
+    });
+  }
+
+  async function _reparentNode(col, allFolders, allRequests, rerender, draggedType, draggedId, newParentFolderId) {
+    const patchUrl = draggedType === 'folder' ? `/api-folders/${draggedId}` : `/api-requests/${draggedId}`;
+    const patchBody = draggedType === 'folder' ? { parent_folder_id: newParentFolderId } : { folder_id: newParentFolderId };
+    const res = await window.api('PATCH', patchUrl, patchBody);
+    if (res.ok === false) { await window._alertDialog('Move failed: ' + res.error); return; }
+
+    const movedList = draggedType === 'folder' ? allFolders : allRequests;
+    const moved = movedList.find(n => n.id === draggedId);
+    if (moved) {
+      if (draggedType === 'folder') moved.parent_folder_id = newParentFolderId;
+      else moved.folder_id = newParentFolderId;
+    }
+
+    const siblingFolders = allFolders.filter(f => f.parent_folder_id === newParentFolderId && f.id !== draggedId);
+    const siblingRequests = allRequests.filter(r => r.folder_id === newParentFolderId && r.id !== draggedId);
+    const destItems = [
+      ...siblingFolders.map(f => ({ type: 'folder', id: f.id })),
+      ...siblingRequests.map(r => ({ type: 'request', id: r.id })),
+      { type: draggedType, id: draggedId },
+    ];
+    const orderRes = await window.api('PUT', `/collections/${col.id}/tree-order`, {
+      parent_folder_id: newParentFolderId, items: destItems,
+    });
+    if (orderRes.ok === false) { await window._alertDialog('Error: ' + orderRes.error); return; }
+    destItems.forEach((it, idx) => {
+      const arr = it.type === 'folder' ? allFolders : allRequests;
+      const n = arr.find(x => x.id === it.id);
+      if (n) n.order_index = idx;
+    });
+
+    rerender();
+  }
+
+  // ---- Drag-and-drop: collections themselves ----
+
+  function _wireCollectionOrderDrag() {
+    let dragEl = null;
+
+    container.addEventListener('dragstart', e => {
+      const header = e.target.closest('.api-collection-header');
+      if (!header) return;
+      dragEl = header.closest('.api-collection-section');
+      dragEl.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+
+    container.addEventListener('dragover', e => {
+      if (!dragEl) return;
+      const targetHeader = e.target.closest('.api-collection-header');
+      const target = targetHeader ? targetHeader.closest('.api-collection-section') : null;
+      if (!target || target === dragEl || target.parentElement !== container) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = target.getBoundingClientRect();
+      if (e.clientY < rect.top + rect.height / 2) {
+        container.insertBefore(dragEl, target);
+      } else {
+        container.insertBefore(dragEl, target.nextSibling);
+      }
+    });
+
+    container.addEventListener('dragend', async () => {
+      if (!dragEl) return;
+      dragEl.classList.remove('dragging');
+      dragEl = null;
+      const ids = [...container.querySelectorAll('.api-collection-section')].map(s => s.dataset.collectionId);
+      const res = await window.api('PUT', '/collections/order', { collection_ids: ids });
+      if (res.ok === false) await window._alertDialog('Error: ' + res.error);
+    });
+  }
+
+  // ---- Collection-level actions (unchanged from before this rewrite) ----
 
   async function _runCollection(colId, colName, envName) {
     const confirmed = await window._confirmDialog(
@@ -237,6 +549,10 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  function setActiveRequestId(requestId) {
+    _activeRequestId = requestId || null;
+  }
+
   reload();
-  return { reload };
+  return { reload, setActiveRequestId, updateRunningRuns };
 }

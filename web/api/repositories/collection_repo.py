@@ -10,12 +10,13 @@ class CollectionRepo:
     def list(self, project_id: str) -> list[dict]:
         conn = get_conn()
         rows = conn.execute(
-            "SELECT ac.id, ac.name, ac.description, ac.env_name, ac.auth_type, ac.auth_config, ac.created_at, "
+            "SELECT ac.id, ac.name, ac.description, ac.env_name, ac.auth_type, ac.auth_config, "
+            "ac.order_index, ac.created_at, "
             "COUNT(ar.id) AS request_count "
             "FROM api_collections ac "
             "LEFT JOIN api_requests ar ON ar.collection_id = ac.id "
             "WHERE ac.project_id = ? "
-            "GROUP BY ac.id ORDER BY ac.created_at DESC",
+            "GROUP BY ac.id ORDER BY ac.order_index, ac.created_at DESC",
             (project_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -57,5 +58,14 @@ class CollectionRepo:
     def delete(self, id: str) -> bool:
         conn = get_conn()
         cur = conn.execute("DELETE FROM api_collections WHERE id = ?", (id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+    def set_order(self, id: str, project_id: str, order_index: int) -> bool:
+        conn = get_conn()
+        cur = conn.execute(
+            "UPDATE api_collections SET order_index = ? WHERE id = ? AND project_id = ?",
+            (order_index, id, project_id),
+        )
         conn.commit()
         return cur.rowcount > 0

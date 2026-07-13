@@ -112,7 +112,8 @@ def compute_diff_fields(variant_requests: list[dict]) -> list[dict]:
     diff_fields = []
     for key in all_keys:
         values = [fields.get(key, _ABSENT) for fields in per_variant_fields]
-        if len(set(values)) > 1:
+        hashable_values = [json.dumps(v, sort_keys=True) if isinstance(v, (list, dict)) else v for v in values]
+        if len(set(hashable_values)) > 1:
             kind = "param" if key.startswith("param:") else "header" if key.startswith("header:") else "body"
             diff_fields.append({
                 "key": key,

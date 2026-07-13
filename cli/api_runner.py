@@ -164,17 +164,33 @@ def _build_python_sandbox(script: str, context: dict) -> str:
     header = (
         "import json, os\n"
         "_ctx = " + ctx_json + "\n"
-        '_output = {"headers": dict(_ctx.get("headers", {})), "params": dict(_ctx.get("params", {})), "state": {}}\n'
+        '_output = {"headers": dict(_ctx.get("headers", {})), "params": dict(_ctx.get("params", {})), '
+        '"state": {}, "assertions": []}\n'
+        "env = _ctx.get('env', {})\n"
         "class _Qc:\n"
         "    def set(self, k, v): _output['state'][k] = v\n"
         "    def set_header(self, k, v): _output['headers'][k] = v\n"
         "    def set_param(self, k, v): _output['params'][k] = v\n"
+        "    def get_header(self, k, default=None):\n"
+        "        for hk, hv in _output['headers'].items():\n"
+        "            if hk.lower() == str(k).lower(): return hv\n"
+        "        return default\n"
+        "    def get_param(self, k, default=None): return _output['params'].get(k, default)\n"
+        "    def expect(self, condition, message='assertion failed'):\n"
+        "        _output['assertions'].append({'type': 'script', 'name': message, 'passed': bool(condition)})\n"
+        "    def test(self, name, fn):\n"
+        "        try:\n"
+        "            fn()\n"
+        "            _output['assertions'].append({'type': 'script', 'name': name, 'passed': True})\n"
+        "        except Exception as e:\n"
+        "            _output['assertions'].append({'type': 'script', 'name': name, 'passed': False, 'error': str(e)})\n"
         "qc = _Qc()\n"
         'response_body = _ctx.get("response_body", "")\n'
         'response_headers = _ctx.get("response_headers", {})\n'
         'status_code = _ctx.get("status_code", 0)\n'
         "class _Resp:\n"
         "    def json(s): return json.loads(response_body)\n"
+        "    def text(s): return response_body\n"
         "    headers = response_headers\n"
         "response = _Resp()\n"
     )
@@ -190,9 +206,18 @@ def _build_js_sandbox(script: str, context: dict) -> str:
     ctx_json = json.dumps(context)
     header = (
         "const _ctx = " + ctx_json + ";\n"
-        "const _output = { headers: Object.assign({}, _ctx.headers), params: Object.assign({}, _ctx.params), state: {} };\n"
-        "const qc = { set:(k,v)=>_output.state[k]=v, setHeader:(k,v)=>_output.headers[k]=v, setParam:(k,v)=>_output.params[k]=v };\n"
-        "const response = { json:()=>JSON.parse(_ctx.response_body||'null'), headers:_ctx.response_headers||{}, status:_ctx.status_code||0 };\n"
+        "const env = _ctx.env || {};\n"
+        "const _output = { headers: Object.assign({}, _ctx.headers), params: Object.assign({}, _ctx.params), state: {}, assertions: [] };\n"
+        "const qc = {\n"
+        "  set:(k,v)=>_output.state[k]=v,\n"
+        "  setHeader:(k,v)=>_output.headers[k]=v,\n"
+        "  setParam:(k,v)=>_output.params[k]=v,\n"
+        "  getHeader:(k,d)=>{ const lk=String(k).toLowerCase(); for(const hk in _output.headers) if(hk.toLowerCase()===lk) return _output.headers[hk]; return d; },\n"
+        "  getParam:(k,d)=>Object.prototype.hasOwnProperty.call(_output.params,k)?_output.params[k]:d,\n"
+        "  expect:(condition,message)=>{ _output.assertions.push({type:'script', name: message||'assertion failed', passed: !!condition}); },\n"
+        "  test:(name,fn)=>{ try { fn(); _output.assertions.push({type:'script', name, passed:true}); } catch(e) { _output.assertions.push({type:'script', name, passed:false, error:String((e && e.message) || e)}); } },\n"
+        "};\n"
+        "const response = { json:()=>JSON.parse(_ctx.response_body||'null'), text:()=>_ctx.response_body||'', headers:_ctx.response_headers||{}, status:_ctx.status_code||0 };\n"
     )
     footer = (
         "\nconst fs=require('fs'); const out=process.env.QACLAN_SANDBOX_OUTPUT;"
@@ -287,17 +312,60 @@ def _run_script_sandbox(script: str, lang: str, context: dict, state_path: str |
 # Assertions
 # ---------------------------------------------------------------------------
 
+def _values_equal(actual, expected) -> bool:
+    """Type-aware equality for the `eq`/`ne` ops.
+
+    `actual` comes from the response (real JSON types: str/int/float/bool/None/
+    list/dict). `expected` is whatever was stored on the assertion — usually a
+    plain string typed into the UI (the builder no longer coerces it), but a
+    hand-edited/imported assertion can hand it any JSON type directly.
+    """
+    if isinstance(actual, bool):
+        if isinstance(expected, bool):
+            return actual == expected
+        if isinstance(expected, str):
+            return expected.strip().lower() == str(actual).lower()
+        return False
+    if actual is None:
+        if expected is None:
+            return True
+        return isinstance(expected, str) and expected.strip().lower() == "null"
+    if isinstance(actual, (int, float)):
+        if isinstance(expected, bool):
+            return False
+        if isinstance(expected, (int, float)):
+            return float(actual) == float(expected)
+        if isinstance(expected, str):
+            try:
+                return float(actual) == float(expected)
+            except ValueError:
+                return False
+        return False
+    return str(actual) == str(expected)
+
+
+def _contains(actual, expected) -> bool:
+    """Real membership for list/dict `actual` (json_path matches); falls back
+    to substring matching for scalars (json_path scalar, header, body_text)."""
+    if isinstance(actual, (list, tuple)):
+        return any(_values_equal(item, expected) for item in actual)
+    if isinstance(actual, dict):
+        return (any(_values_equal(k, expected) for k in actual.keys())
+                or any(_values_equal(v, expected) for v in actual.values()))
+    return str(expected) in str(actual)
+
+
 def _compare(actual, op: str, expected) -> bool:
     if op == "eq":
-        return str(actual) == str(expected)
+        return _values_equal(actual, expected)
     if op == "ne":
-        return str(actual) != str(expected)
+        return not _values_equal(actual, expected)
     if op == "lt":
         return float(actual) < float(expected)
     if op == "gt":
         return float(actual) > float(expected)
     if op == "contains":
-        return str(expected) in str(actual)
+        return _contains(actual, expected)
     if op == "exists":
         return actual is not None
     if op == "not_exists":
@@ -332,26 +400,45 @@ def _evaluate_assertions(assertions: list, status_code: int, response_body: str,
 
             elif atype == "json_path":
                 path = assertion.get("path", "$")
+                match_mode = assertion.get("matchMode", "first")
                 result["path"] = path
                 if body_json is None:
-                    result["passed"] = False
+                    # No JSON body at all: every path trivially has no match.
                     result["actual"] = None
+                    result["passed"] = (op == "not_exists")
                 else:
                     expr = jp_parse(path)
                     matches = [m.value for m in expr.find(body_json)]
-                    actual = matches[0] if matches else None
-                    result["actual"] = actual
+                    present = bool(matches)  # a match on a JSON `null` still counts as present
                     if op in ("exists", "not_exists"):
-                        result["passed"] = _compare(actual if matches else None, op, expected)
-                    else:
-                        result["passed"] = _compare(actual, op, expected) if matches else False
+                        result["actual"] = matches[0] if matches else None
+                        result["passed"] = present if op == "exists" else not present
+                    elif not present:
+                        result["actual"] = None
+                        result["passed"] = False
+                    elif match_mode == "any":
+                        result["actual"] = matches
+                        result["passed"] = any(_compare(m, op, expected) for m in matches)
+                    elif match_mode == "all":
+                        result["actual"] = matches
+                        result["passed"] = all(_compare(m, op, expected) for m in matches)
+                    else:  # "first" (default) — only the first match is checked
+                        result["actual"] = matches[0]
+                        result["passed"] = _compare(matches[0], op, expected)
 
             elif atype == "header":
                 key = assertion.get("key", "")
-                actual = response_headers.get(key) or response_headers.get(key.lower())
+                actual = response_headers.get(key)
+                if actual is None:
+                    actual = response_headers.get(key.lower())
                 result["key"] = key
                 result["actual"] = actual
-                result["passed"] = _compare(actual, op, expected)
+                if actual is None:
+                    # Missing header: only not_exists can pass. Don't let eq/
+                    # contains/matches stringify None into the literal "None".
+                    result["passed"] = (op == "not_exists")
+                else:
+                    result["passed"] = _compare(actual, op, expected)
 
             elif atype == "response_time":
                 actual = duration_ms
@@ -442,6 +529,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 state.setdefault("qaclan_vars", {}).update(extracted)
 
         # 3. Pre-script
+        script_assertions = []
         pre_script = req.get("pre_script")
         pre_lang = req.get("pre_lang", "js")
         if pre_script:
@@ -451,6 +539,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 headers.update(pre_out.get("headers", {}))
                 params.update(pre_out.get("params", {}))
                 state.setdefault("qaclan_vars", {}).update(pre_out.get("state", {}))
+                script_assertions.extend(pre_out.get("assertions", []))
 
         # 4. Build request body
         body_type = req.get("body_type")
@@ -479,7 +568,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         elif body_type == "multipart" and body_raw:
             try:
                 form_items = json.loads(body_raw)
-                files = {}
+                files = []
                 for item in form_items:
                     if not item.get("enabled", True):
                         continue
@@ -499,9 +588,12 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                     # httpx: (filename, content, content_type) forces multipart
                     # encoding even for plain text fields; filename=None omits
                     # the filename attribute; content_type=None lets httpx guess.
-                    files[item["key"]] = (filename, file_content, content_type)
+                    # List of (key, tuple) pairs, not a dict — a dict would
+                    # collapse repeated field names (e.g. multiple "files"
+                    # entries for a bulk upload) down to the last one.
+                    files.append((item["key"], (filename, file_content, content_type)))
             except (ValueError, TypeError):
-                files = {}
+                files = []
             # A captured/stale Content-Type carries the original boundary, which
             # won't match the boundary httpx generates for the re-encoded body.
             for _k in list(headers.keys()):
@@ -600,12 +692,14 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 script_state = post_out.get("state", {})
                 state_updates.update(script_state)
                 state.setdefault("qaclan_vars", {}).update(script_state)
+                script_assertions.extend(post_out.get("assertions", []))
 
         # 7. Evaluate assertions
         assertions = req.get("assertions", [])
         if isinstance(assertions, str):
             assertions = json.loads(assertions)
         assertion_results = _evaluate_assertions(assertions, status_code, response_body, response_headers, duration_ms)
+        assertion_results.extend(script_assertions)
 
         if assertion_results:
             all_passed = all(r["passed"] for r in assertion_results)

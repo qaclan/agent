@@ -39,3 +39,7 @@ class CollectionService:
             raise LookupError(f"Collection {id} not found")
         _req_repo.delete_by_collection(id)
         return _col_repo.delete(id)
+
+    def reorder(self, project_id: str, ids: list[str]) -> None:
+        for idx, cid in enumerate(ids):
+            _col_repo.set_order(cid, project_id, idx)
