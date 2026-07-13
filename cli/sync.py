@@ -310,6 +310,73 @@ def _ensure_api_folder_synced(folder_id):
     return None
 
 
+def sync_api_request_to_cloud(request_id):
+    """Sync an API request. project_id is required (lazy-ensured); feature_id/
+    collection_id/folder_id are attached only if those parents already have a
+    cloud_id (same rule sync_script_to_cloud uses for suite_id/feature_id)."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    row = get_conn().execute(
+        "SELECT project_id, feature_id, collection_id, folder_id, name, method, url, headers, "
+        "params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, "
+        "pre_extractor, post_script, post_lang, post_extractor, request_schema, response_schema, "
+        "assertions, follow_redirects, timeout_ms, include_in_docs, order_index "
+        "FROM api_requests WHERE id = ?", (request_id,)
+    ).fetchone()
+    if not row:
+        return None
+    cloud_project_id = _ensure_project_synced(row["project_id"])
+    if not cloud_project_id:
+        return None
+    cloud_id = _get_cloud_id("api_requests", request_id)
+    payload = {
+        "cli_request_id": request_id,
+        "cloud_id": cloud_id,
+        "name": row["name"],
+        "method": row["method"],
+        "url": row["url"],
+        "headers": json.loads(row["headers"] or "[]"),
+        "params": json.loads(row["params"] or "[]"),
+        "path_params": json.loads(row["path_params"] or "[]"),
+        "body_type": row["body_type"],
+        "body": row["body"],
+        "auth_type": row["auth_type"],
+        "auth_config": json.loads(row["auth_config"] or "{}"),
+        "pre_script": row["pre_script"],
+        "pre_lang": row["pre_lang"],
+        "pre_extractor": json.loads(row["pre_extractor"]) if row["pre_extractor"] else None,
+        "post_script": row["post_script"],
+        "post_lang": row["post_lang"],
+        "post_extractor": json.loads(row["post_extractor"]) if row["post_extractor"] else None,
+        "request_schema": json.loads(row["request_schema"]) if row["request_schema"] else None,
+        "response_schema": json.loads(row["response_schema"]) if row["response_schema"] else None,
+        "assertions": json.loads(row["assertions"] or "[]"),
+        "follow_redirects": bool(row["follow_redirects"]),
+        "timeout_ms": row["timeout_ms"],
+        "include_in_docs": bool(row["include_in_docs"]),
+        "order_index": row["order_index"],
+        "project_id": cloud_project_id,
+    }
+    if row["feature_id"]:
+        cloud_feature_id = _get_cloud_id("features", row["feature_id"])
+        if cloud_feature_id:
+            payload["feature_id"] = cloud_feature_id
+    if row["collection_id"]:
+        cloud_collection_id = _get_cloud_id("api_collections", row["collection_id"])
+        if cloud_collection_id:
+            payload["collection_id"] = cloud_collection_id
+    if row["folder_id"]:
+        cloud_folder_id = _get_cloud_id("api_folders", row["folder_id"])
+        if cloud_folder_id:
+            payload["folder_id"] = cloud_folder_id
+    result = _try_sync("api request", lambda: api.sync_api_request(key, payload))
+    if result and result.get("id"):
+        _save_cloud_id("api_requests", request_id, result["id"])
+    return result
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
@@ -366,6 +433,14 @@ def delete_api_folder_from_cloud(folder_id):
     if not key:
         return None
     return _try_sync("delete api folder", lambda: api.delete_api_folder(key, folder_id))
+
+
+def delete_api_request_from_cloud(request_id):
+    """Delete an API request from cloud by CLI request ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete api request", lambda: api.delete_api_request(key, request_id))
 
 
 # --- Suite items sync ---
