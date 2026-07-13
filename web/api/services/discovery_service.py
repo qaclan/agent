@@ -3,6 +3,7 @@ import json
 import logging
 from web.api.repositories.collection_repo import CollectionRepo
 from web.api.repositories.request_repo import RequestRepo
+from cli.sync_queue import enqueue
 
 logger = logging.getLogger("qaclan.discovery_service")
 
@@ -99,6 +100,7 @@ def _save_requests(project_id: str, requests: list[dict], collection_id: str | N
                 data["auth_config"] = {}
 
         saved_req = _req_repo.create(project_id, data)
+        enqueue("api_request", saved_req["id"], "upsert")
 
         # Sync to API docs if flagged (default: include)
         try:
@@ -130,6 +132,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
     from web.api.services.doc_service import sync_doc_entry
 
     col = _col_repo.create(project_id, collection_name)
+    enqueue("api_collection", col["id"], "upsert")
     example_repo = RequestExampleRepo()
     saved = 0
 
@@ -156,6 +159,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
             merged_req["response_schema"] = resp_schema
 
             saved_req = _req_repo.create(project_id, merged_req)
+            enqueue("api_request", saved_req["id"], "upsert")
             try:
                 sync_doc_entry(project_id, {**merged_req, "id": saved_req["id"]})
             except Exception as e:
@@ -165,7 +169,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
             diff_fields = compute_diff_fields(included_requests)
             for i, v in enumerate(included[1:], start=1):
                 r = v["request"]
-                example_repo.create(saved_req["id"], {
+                example = example_repo.create(saved_req["id"], {
                     "label": suggest_label(r, diff_fields, i),
                     "params": r.get("params", []),
                     "body": r.get("body"),
@@ -173,6 +177,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
                     "response_headers": r.get("response_headers"),
                     "response_body": r.get("response_body"),
                 })
+                enqueue("api_request_example", example["id"], "upsert")
             saved += 1
         else:
             reqs = []
