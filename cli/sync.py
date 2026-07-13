@@ -510,6 +510,25 @@ def sync_env_vars_to_cloud(env_id):
     }))
 
 
+def sync_collection_vars_to_cloud(collection_id):
+    """Read collection vars from local DB and push full list to cloud
+    (full-replace, same semantics as sync_env_vars_to_cloud)."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    rows = get_conn().execute(
+        "SELECT key, initial_value FROM collection_vars WHERE collection_id = ? ORDER BY key",
+        (collection_id,)
+    ).fetchall()
+    cloud_collection_id = _get_cloud_id("api_collections", collection_id)
+    return _try_sync("collection vars", lambda: api.sync_collection_vars(key, {
+        "cli_collection_id": str(collection_id),
+        "cloud_collection_id": cloud_collection_id,
+        "vars": [{"key": r["key"], "initial_value": r["initial_value"]} for r in rows],
+    }))
+
+
 def sync_all(project_id=None):
     """Push all local data to cloud. Syncs projects, features, suites, scripts, and past runs."""
     from cli.db import get_conn
