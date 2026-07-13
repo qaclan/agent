@@ -23,9 +23,15 @@ ENTITY_ORDER = (
     "feature",
     "suite",
     "script",
+    "api_collection",
+    "api_folder",
+    "api_request",
+    "collection_vars",
+    "api_request_example",
     "environment",
     "env_vars",
     "suite_items",
+    "api_collection_run",
     "run",
 )
 
@@ -116,6 +122,10 @@ def _dispatch(row):
                 "suite": sync.delete_suite_from_cloud,
                 "script": sync.delete_script_from_cloud,
                 "environment": sync.delete_environment_from_cloud,
+                "api_collection": sync.delete_api_collection_from_cloud,
+                "api_folder": sync.delete_api_folder_from_cloud,
+                "api_request": sync.delete_api_request_from_cloud,
+                "api_request_example": sync.delete_api_request_example_from_cloud,
             }[et](eid)
             return
 
@@ -166,6 +176,18 @@ def _dispatch(row):
                     language=r["language"],
                     wait_timeout=r["wait_timeout"],
                 )
+        elif et == "api_collection":
+            sync.sync_api_collection_to_cloud(eid)
+        elif et == "api_folder":
+            sync.sync_api_folder_to_cloud(eid)
+        elif et == "api_request":
+            sync.sync_api_request_to_cloud(eid)
+        elif et == "collection_vars":
+            sync.sync_collection_vars_to_cloud(eid)
+        elif et == "api_request_example":
+            sync.sync_api_request_example_to_cloud(eid)
+        elif et == "api_collection_run":
+            sync.sync_api_collection_run_to_cloud(eid)
         elif et == "environment":
             r = conn.execute(
                 "SELECT name, project_id FROM environments WHERE id = ?", (eid,)
@@ -212,6 +234,7 @@ def _dispatch_run(run_id, conn, sync):
         browser=run["browser"],
         resolution=run["resolution"],
         headless=bool(run["headless"]) if run["headless"] is not None else None,
+        api_results=sync._gather_api_run_results(run_id),
         script_results=[
             {
                 "script_id": r["script_id"],
@@ -329,11 +352,24 @@ def enqueue_all(project_ids=None):
             enqueue("suite_items", s["id"], "upsert")
         for sc in conn.execute("SELECT id FROM scripts WHERE project_id = ?", (pid,)).fetchall():
             enqueue("script", sc["id"], "upsert")
+        for col in conn.execute("SELECT id FROM api_collections WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_collection", col["id"], "upsert")
+            enqueue("collection_vars", col["id"], "upsert")
+        for fold in conn.execute("SELECT id FROM api_folders WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_folder", fold["id"], "upsert")
+        for req in conn.execute("SELECT id FROM api_requests WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_request", req["id"], "upsert")
+            for ex in conn.execute(
+                "SELECT id FROM api_request_examples WHERE api_request_id = ?", (req["id"],)
+            ).fetchall():
+                enqueue("api_request_example", ex["id"], "upsert")
         for env in conn.execute("SELECT id FROM environments WHERE project_id = ?", (pid,)).fetchall():
             enqueue("environment", env["id"], "upsert")
             enqueue("env_vars", env["id"], "upsert")
         for run in conn.execute("SELECT id FROM suite_runs WHERE project_id = ?", (pid,)).fetchall():
             enqueue("run", run["id"], "upsert")
+        for arun in conn.execute("SELECT id FROM api_collection_runs WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_collection_run", arun["id"], "upsert")
     after = queue_depth()
     return (after - before, after)
 
