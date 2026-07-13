@@ -377,6 +377,42 @@ def sync_api_request_to_cloud(request_id):
     return result
 
 
+def sync_api_request_example_to_cloud(example_id):
+    """Sync a variant-library example. Requires the parent request's cloud_id
+    (ensured here since every example always has exactly one parent request)."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    row = get_conn().execute(
+        "SELECT api_request_id, label, params, body, response_status, response_headers, response_body "
+        "FROM api_request_examples WHERE id = ?", (example_id,)
+    ).fetchone()
+    if not row:
+        return None
+    cloud_request_id = _get_cloud_id("api_requests", row["api_request_id"])
+    if not cloud_request_id:
+        parent_result = sync_api_request_to_cloud(row["api_request_id"])
+        cloud_request_id = parent_result.get("id") if parent_result else None
+    if not cloud_request_id:
+        return None
+    cloud_id = _get_cloud_id("api_request_examples", example_id)
+    result = _try_sync("api request example", lambda: api.sync_api_request_example(key, {
+        "cli_example_id": example_id,
+        "cloud_id": cloud_id,
+        "request_id": cloud_request_id,
+        "label": row["label"],
+        "params": json.loads(row["params"] or "[]"),
+        "body": row["body"],
+        "response_status": row["response_status"],
+        "response_headers": json.loads(row["response_headers"]) if row["response_headers"] else None,
+        "response_body": row["response_body"],
+    }))
+    if result and result.get("id"):
+        _save_cloud_id("api_request_examples", example_id, result["id"])
+    return result
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
@@ -441,6 +477,14 @@ def delete_api_request_from_cloud(request_id):
     if not key:
         return None
     return _try_sync("delete api request", lambda: api.delete_api_request(key, request_id))
+
+
+def delete_api_request_example_from_cloud(example_id):
+    """Delete a variant-library example from cloud by CLI example ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete api request example", lambda: api.delete_api_request_example(key, example_id))
 
 
 # --- Suite items sync ---
