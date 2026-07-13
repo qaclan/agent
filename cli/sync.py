@@ -4,6 +4,7 @@ Enter strict_mode() to make failures raise (used by the sync_queue drainer)."""
 
 import base64
 import contextlib
+import json
 import os
 import threading
 
@@ -219,6 +220,49 @@ def sync_script_to_cloud(script_id, name, suite_id=None, feature_id=None, projec
     return result
 
 
+def sync_api_collection_to_cloud(collection_id):
+    """Sync an API collection. Requires cloud_project_id."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    row = get_conn().execute(
+        "SELECT project_id, name, description, env_name, auth_type, auth_config, order_index "
+        "FROM api_collections WHERE id = ?", (collection_id,)
+    ).fetchone()
+    if not row:
+        return None
+    cloud_project_id = _ensure_project_synced(row["project_id"])
+    if not cloud_project_id:
+        return None
+    cloud_id = _get_cloud_id("api_collections", collection_id)
+    result = _try_sync("api collection", lambda: api.sync_api_collection(key, {
+        "cli_collection_id": collection_id,
+        "cloud_id": cloud_id,
+        "name": row["name"],
+        "description": row["description"],
+        "env_name": row["env_name"],
+        "auth_type": row["auth_type"],
+        "auth_config": json.loads(row["auth_config"] or "{}"),
+        "order_index": row["order_index"],
+        "project_id": cloud_project_id,
+    }))
+    if result and result.get("id"):
+        _save_cloud_id("api_collections", collection_id, result["id"])
+    return result
+
+
+def _ensure_api_collection_synced(collection_id):
+    """Ensure the API collection has a cloud_id. If not, sync it now."""
+    cloud_id = _get_cloud_id("api_collections", collection_id)
+    if cloud_id:
+        return cloud_id
+    result = sync_api_collection_to_cloud(collection_id)
+    if result:
+        return result.get("id") or _get_cloud_id("api_collections", collection_id)
+    return None
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
@@ -259,6 +303,14 @@ def delete_environment_from_cloud(env_id):
     if not key:
         return None
     return _try_sync("delete environment", lambda: api.delete_environment(key, env_id))
+
+
+def delete_api_collection_from_cloud(collection_id):
+    """Delete an API collection from cloud by CLI collection ID."""
+    key = get_auth_key()
+    if not key:
+        return None
+    return _try_sync("delete api collection", lambda: api.delete_api_collection(key, collection_id))
 
 
 # --- Suite items sync ---
