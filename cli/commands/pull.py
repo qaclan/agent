@@ -392,3 +392,126 @@ def pull_workspace():
         set_active_project_id(first_local_id)
 
     return counts
+
+
+def pull_api_run_history(project_id):
+    """On-demand pull of standalone collection-run history for one project.
+    Not part of pull_workspace() — called lazily when the API Runs view opens.
+    Returns the number of new runs inserted."""
+    key = get_auth_key()
+    if not key:
+        raise RuntimeError("Not logged in")
+    conn = get_conn()
+    inserted = 0
+    page = 1
+    while True:
+        data = api.pull_api_runs(key, page=page, per_page=50)
+        runs = data.get("runs", [])
+        if not runs:
+            break
+        for run_summary in runs:
+            # Match on cli_collection_run_id (the pushing client's own local id) first —
+            # api_collection_runs has no cloud_id column, so if this row was originally
+            # pushed FROM this machine, its local id already equals cli_collection_run_id
+            # and this avoids inserting a second, duplicate copy under the server's id.
+            # Falls back to the server's id only for runs this machine never pushed itself.
+            local_run_id = run_summary.get("cli_collection_run_id") or run_summary["id"]
+            existing = conn.execute(
+                "SELECT id FROM api_collection_runs WHERE id = ?", (local_run_id,)
+            ).fetchone()
+            if existing:
+                continue  # runs are immutable once finished — nothing to update
+            local_collection_row = conn.execute(
+                "SELECT id FROM api_collections WHERE cloud_id = ?", (run_summary["collection_id"],)
+            ).fetchone()
+            if not local_collection_row:
+                continue  # collection not pulled locally yet — skip, will retry next pull
+            detail = api.pull_api_run_detail(key, run_summary["id"])
+            conn.execute(
+                "INSERT INTO api_collection_runs (id, project_id, collection_id, collection_name, "
+                "env_name, status, total, passed, failed, error_count, started_at, finished_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_run_id, project_id, local_collection_row["id"], run_summary["collection_name"],
+                 run_summary.get("env_name"), run_summary["status"].upper(), run_summary["total"],
+                 run_summary["passed"], run_summary["failed"], run_summary["error_count"],
+                 run_summary["started_at"], run_summary.get("completed_at")),
+            )
+            for r in detail.get("request_results", []):
+                local_request_row = conn.execute(
+                    "SELECT id FROM api_requests WHERE cloud_id = ?", (r["cli_request_id"],)
+                ).fetchone()
+                if not local_request_row:
+                    # Parent request not pulled locally (yet, or ever — e.g. deleted since).
+                    # api_request_results.api_request_id is NOT NULL + FK-enforced
+                    # (PRAGMA foreign_keys = ON, cli/db.py:20) — inserting the raw cloud
+                    # request id here would raise sqlite3.IntegrityError. Skip the row
+                    # instead, same as every other orphan guard in pull_workspace().
+                    continue
+                conn.execute(
+                    "INSERT INTO api_request_results (id, collection_run_id, api_request_id, "
+                    "request_name, method, url, order_index, status, status_code, response_body, "
+                    "response_headers, duration_ms, assertion_results, error_message, started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (generate_id("arreq"), local_run_id, local_request_row["id"],
+                     r["request_name"], r.get("method"), r.get("url"), r["order_index"],
+                     r["status"].upper(), r.get("status_code"), r.get("response_body"),
+                     json.dumps(r["response_headers"]) if r.get("response_headers") else None,
+                     r.get("duration_ms"),
+                     json.dumps(r["assertion_results"]) if r.get("assertion_results") else None,
+                     r.get("error_message"), r.get("started_at"), r.get("finished_at")),
+                )
+            inserted += 1
+        if len(runs) < 50:
+            break
+        page += 1
+    conn.commit()
+    return inserted
+
+
+def pull_api_docs_overlay(project_id):
+    """On-demand pull of the server-computed docs cache for one project. Overlay
+    semantics: only overwrite a local doc entry if the pulled last_seen_at is
+    newer, so a user's own live-regenerated local docs aren't clobbered by a
+    stale team snapshot. Returns the number of entries updated or inserted."""
+    key = get_auth_key()
+    if not key:
+        raise RuntimeError("Not logged in")
+    conn = get_conn()
+    data = api.pull_api_docs(key, project_id)
+    changed = 0
+    for entry in data.get("doc_entries", []):
+        existing = conn.execute(
+            "SELECT id, last_seen_at FROM api_doc_entries WHERE project_id = ? AND method = ? AND path_pattern = ?",
+            (project_id, entry["method"], entry["path_pattern"]),
+        ).fetchone()
+        if existing and existing["last_seen_at"] >= entry["last_seen_at"]:
+            continue  # local copy is newer or equal — don't clobber
+        if existing:
+            conn.execute(
+                "UPDATE api_doc_entries SET request_schema=?, response_schema=?, headers_schema=?, "
+                "params_schema=?, source_request_ids=?, last_seen_at=? WHERE id=?",
+                (json.dumps(entry.get("request_schema")) if entry.get("request_schema") else None,
+                 json.dumps(entry.get("response_schema")) if entry.get("response_schema") else None,
+                 json.dumps(entry.get("headers_schema")) if entry.get("headers_schema") else None,
+                 json.dumps(entry.get("params_schema")) if entry.get("params_schema") else None,
+                 json.dumps(entry.get("source_request_ids", [])), entry["last_seen_at"], existing["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO api_doc_entries (id, project_id, method, path_pattern, description, "
+                "request_schema, response_schema, headers_schema, params_schema, source_request_ids, "
+                "include_in_docs, first_seen_at, last_seen_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (generate_id("apidoc"), project_id, entry["method"], entry["path_pattern"],
+                 entry.get("description"),
+                 json.dumps(entry.get("request_schema")) if entry.get("request_schema") else None,
+                 json.dumps(entry.get("response_schema")) if entry.get("response_schema") else None,
+                 json.dumps(entry.get("headers_schema")) if entry.get("headers_schema") else None,
+                 json.dumps(entry.get("params_schema")) if entry.get("params_schema") else None,
+                 json.dumps(entry.get("source_request_ids", [])),
+                 1 if entry.get("include_in_docs", True) else 0,
+                 entry.get("first_seen_at", entry["last_seen_at"]), entry["last_seen_at"]),
+            )
+        changed += 1
+    conn.commit()
+    return changed
