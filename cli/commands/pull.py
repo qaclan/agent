@@ -49,13 +49,18 @@ def pull_workspace():
     now = datetime.now(timezone.utc).isoformat()
 
     # Track cloud_id -> local_id mappings for resolving foreign keys
-    project_map = {}   # cloud project id -> local project id
-    feature_map = {}   # cloud feature id -> local feature id
-    suite_map = {}     # cloud suite id -> local suite id
-    script_map = {}    # cloud script cli_script_id -> local script id
-    env_map = {}       # cloud environment id -> local environment id
+    project_map = {}    # cloud project id -> local project id
+    feature_map = {}    # cloud feature id -> local feature id
+    suite_map = {}      # cloud suite id -> local suite id
+    script_map = {}     # cloud script cli_script_id -> local script id
+    env_map = {}        # cloud environment id -> local environment id
+    collection_map = {} # cloud api_collection id -> local api_collection id
+    folder_map = {}     # cloud api_folder id -> local api_folder id
 
-    counts = {"projects": 0, "features": 0, "scripts": 0, "suites": 0, "environments": 0, "env_vars": 0}
+    counts = {
+        "projects": 0, "features": 0, "scripts": 0, "suites": 0, "environments": 0, "env_vars": 0,
+        "api_collections": 0, "api_folders": 0, "api_requests": 0, "collection_vars": 0,
+    }
 
     # 1. Projects
     for p in data.get("projects", []):
@@ -144,6 +149,156 @@ def pull_workspace():
             script_map[s.get("cli_script_id", cloud_id)] = local_id
             counts["scripts"] += 1
             console.print(f"  [green]✓[/green] Script: {s['name']}")
+
+    # 3b. API collections
+    for c in data.get("api_collections", []):
+        cloud_id = c["id"]
+        existing = conn.execute("SELECT id FROM api_collections WHERE cloud_id = ?", (cloud_id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE api_collections SET name = ?, description = ?, env_name = ?, auth_type = ?, "
+                "auth_config = ?, order_index = ? WHERE id = ?",
+                (c["name"], c.get("description"), c.get("env_name"), c.get("auth_type", "none"),
+                 json.dumps(c.get("auth_config", {})), c.get("order_index", 0), existing["id"]),
+            )
+            collection_map[cloud_id] = existing["id"]
+        else:
+            local_project_id = project_map.get(c["project_id"])
+            if not local_project_id:
+                continue
+            local_id = generate_id("apicol")
+            conn.execute(
+                "INSERT INTO api_collections (id, project_id, name, description, env_name, auth_type, "
+                "auth_config, order_index, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_project_id, c["name"], c.get("description"), c.get("env_name"),
+                 c.get("auth_type", "none"), json.dumps(c.get("auth_config", {})),
+                 c.get("order_index", 0), now, cloud_id),
+            )
+            collection_map[cloud_id] = local_id
+            counts["api_collections"] += 1
+            console.print(f"  [green]✓[/green] API collection: {c['name']}")
+
+    # 3c. API folders — self-referential tree, resolve parents before children.
+    # Repeatedly sweep the pulled list, inserting any folder whose parent is
+    # already resolved (or has none), until a full pass makes no progress.
+    pending_folders = list(data.get("api_folders", []))
+    while pending_folders:
+        progressed = False
+        still_pending = []
+        for f in pending_folders:
+            cloud_id = f["id"]
+            parent_cloud_id = f.get("parent_folder_id")
+            if parent_cloud_id and parent_cloud_id not in folder_map:
+                existing_parent = conn.execute(
+                    "SELECT id FROM api_folders WHERE cloud_id = ?", (parent_cloud_id,)
+                ).fetchone()
+                if existing_parent:
+                    folder_map[parent_cloud_id] = existing_parent["id"]
+                else:
+                    still_pending.append(f)
+                    continue
+            local_parent_id = folder_map.get(parent_cloud_id) if parent_cloud_id else None
+            existing = conn.execute("SELECT id FROM api_folders WHERE cloud_id = ?", (cloud_id,)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE api_folders SET name = ?, order_index = ?, parent_folder_id = ? WHERE id = ?",
+                    (f["name"], f.get("order_index", 0), local_parent_id, existing["id"]),
+                )
+                folder_map[cloud_id] = existing["id"]
+            else:
+                local_project_id = project_map.get(f.get("project_id"))
+                local_collection_id = collection_map.get(f.get("collection_id"))
+                if not local_project_id or not local_collection_id:
+                    continue
+                local_id = generate_id("apifold")
+                conn.execute(
+                    "INSERT INTO api_folders (id, project_id, collection_id, parent_folder_id, name, "
+                    "order_index, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (local_id, local_project_id, local_collection_id, local_parent_id,
+                     f["name"], f.get("order_index", 0), now, cloud_id),
+                )
+                folder_map[cloud_id] = local_id
+                counts["api_folders"] += 1
+                console.print(f"  [green]✓[/green] API folder: {f['name']}")
+            progressed = True
+        if not progressed:
+            for f in still_pending:
+                console.print(f"  [yellow]⚠[/yellow] API folder skipped (unresolved parent): {f.get('name')}")
+            break
+        pending_folders = still_pending
+
+    # 3d. API requests
+    for r in data.get("api_requests", []):
+        cloud_id = r["id"]
+        local_project_id = project_map.get(r.get("project_id"))
+        local_feature_id = feature_map.get(r.get("feature_id")) if r.get("feature_id") else None
+        local_collection_id = collection_map.get(r.get("collection_id")) if r.get("collection_id") else None
+        local_folder_id = folder_map.get(r.get("folder_id")) if r.get("folder_id") else None
+        row_values = (
+            r["name"], r.get("method", "GET"), r.get("url", ""),
+            json.dumps(r.get("headers", [])), json.dumps(r.get("params", [])),
+            json.dumps(r.get("path_params", [])), r.get("body_type"), r.get("body"),
+            r.get("auth_type", "none"), json.dumps(r.get("auth_config", {})),
+            r.get("pre_script"), r.get("pre_lang", "js"),
+            json.dumps(r["pre_extractor"]) if r.get("pre_extractor") else None,
+            r.get("post_script"), r.get("post_lang", "js"),
+            json.dumps(r["post_extractor"]) if r.get("post_extractor") else None,
+            json.dumps(r["request_schema"]) if r.get("request_schema") else None,
+            json.dumps(r["response_schema"]) if r.get("response_schema") else None,
+            json.dumps(r.get("assertions", [])),
+            1 if r.get("follow_redirects", True) else 0, r.get("timeout_ms", 30000),
+            1 if r.get("include_in_docs", True) else 0, r.get("order_index", 0),
+        )
+        existing = conn.execute("SELECT id FROM api_requests WHERE cloud_id = ?", (cloud_id,)).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE api_requests SET name=?, method=?, url=?, headers=?, params=?, path_params=?, "
+                "body_type=?, body=?, auth_type=?, auth_config=?, pre_script=?, pre_lang=?, pre_extractor=?, "
+                "post_script=?, post_lang=?, post_extractor=?, request_schema=?, response_schema=?, "
+                "assertions=?, follow_redirects=?, timeout_ms=?, include_in_docs=?, order_index=?, "
+                "feature_id=?, collection_id=?, folder_id=? WHERE id=?",
+                row_values + (local_feature_id, local_collection_id, local_folder_id, existing["id"]),
+            )
+        else:
+            if not local_project_id:
+                console.print(f"  [yellow]⚠[/yellow] API request skipped (missing project): {r.get('name')}")
+                continue
+            local_id = generate_id("apireq")
+            conn.execute(
+                "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, name, "
+                "method, url, headers, params, path_params, body_type, body, auth_type, auth_config, "
+                "pre_script, pre_lang, pre_extractor, post_script, post_lang, post_extractor, "
+                "request_schema, response_schema, assertions, follow_redirects, timeout_ms, "
+                "include_in_docs, order_index, created_at, cloud_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_project_id, local_feature_id, local_collection_id, local_folder_id)
+                + row_values + (now, cloud_id),
+            )
+            counts["api_requests"] += 1
+            console.print(f"  [green]✓[/green] API request: {r.get('name')}")
+
+    # 3e. Collection variables (full-replace-list semantics, like env_vars)
+    for v in data.get("collection_vars", []):
+        local_collection_id = collection_map.get(v["collection_id"])
+        if not local_collection_id:
+            continue
+        existing = conn.execute(
+            "SELECT id FROM collection_vars WHERE collection_id = ? AND key = ?",
+            (local_collection_id, v["key"]),
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE collection_vars SET initial_value = ? WHERE id = ?",
+                (v["initial_value"], existing["id"]),
+            )
+        else:
+            local_id = generate_id("cv")
+            conn.execute(
+                "INSERT INTO collection_vars (id, collection_id, key, initial_value, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (local_id, local_collection_id, v["key"], v["initial_value"], now),
+            )
+            counts["collection_vars"] += 1
 
     # 4. Environments
     for e in data.get("environments", []):
