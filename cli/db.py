@@ -151,6 +151,7 @@ def init_db():
     _migrate_collection_run_progress(conn)
     _migrate_api_request_examples(conn)
     _migrate_nested_folders(conn)
+    _migrate_api_cloud_id(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -530,6 +531,19 @@ def _migrate_cloud_id(conn):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
         except Exception:
             pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_cloud_id(conn):
+    """Add cloud_id column to the API-testing tables that get individually
+    upserted to the cloud (collections/folders/requests/variant-library
+    examples). collection_vars/api_collection_runs/api_request_results don't
+    need it — full-replace-list or append-only, same as env_vars/suite_runs."""
+    for table in ("api_collections", "api_folders", "api_requests", "api_request_examples"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
+        except Exception:
+            pass  # already exists
     conn.commit()
 
 
