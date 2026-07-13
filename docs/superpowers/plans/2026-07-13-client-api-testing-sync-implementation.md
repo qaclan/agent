@@ -1938,37 +1938,49 @@ def pull_api_run_history(project_id):
         if not runs:
             break
         for run_summary in runs:
+            # Match on cli_collection_run_id (the pushing client's own local id) first —
+            # api_collection_runs has no cloud_id column, so if this row was originally
+            # pushed FROM this machine, its local id already equals cli_collection_run_id
+            # and this avoids inserting a second, duplicate copy under the server's id.
+            # Falls back to the server's id only for runs this machine never pushed itself.
+            local_run_id = run_summary.get("cli_collection_run_id") or run_summary["id"]
             existing = conn.execute(
-                "SELECT id FROM api_collection_runs WHERE id = ?", (run_summary["id"],)
+                "SELECT id FROM api_collection_runs WHERE id = ?", (local_run_id,)
             ).fetchone()
             if existing:
                 continue  # runs are immutable once finished — nothing to update
-            local_collection_id = conn.execute(
+            local_collection_row = conn.execute(
                 "SELECT id FROM api_collections WHERE cloud_id = ?", (run_summary["collection_id"],)
             ).fetchone()
-            if not local_collection_id:
+            if not local_collection_row:
                 continue  # collection not pulled locally yet — skip, will retry next pull
             detail = api.pull_api_run_detail(key, run_summary["id"])
             conn.execute(
                 "INSERT INTO api_collection_runs (id, project_id, collection_id, collection_name, "
                 "env_name, status, total, passed, failed, error_count, started_at, finished_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (run_summary["id"], project_id, local_collection_id["id"], run_summary["collection_name"],
+                (local_run_id, project_id, local_collection_row["id"], run_summary["collection_name"],
                  run_summary.get("env_name"), run_summary["status"].upper(), run_summary["total"],
                  run_summary["passed"], run_summary["failed"], run_summary["error_count"],
                  run_summary["started_at"], run_summary.get("completed_at")),
             )
             for r in detail.get("request_results", []):
-                local_request_id = conn.execute(
+                local_request_row = conn.execute(
                     "SELECT id FROM api_requests WHERE cloud_id = ?", (r["cli_request_id"],)
                 ).fetchone()
+                if not local_request_row:
+                    # Parent request not pulled locally (yet, or ever — e.g. deleted since).
+                    # api_request_results.api_request_id is NOT NULL + FK-enforced
+                    # (PRAGMA foreign_keys = ON, cli/db.py:20) — inserting the raw cloud
+                    # request id here would raise sqlite3.IntegrityError. Skip the row
+                    # instead, same as every other orphan guard in pull_workspace().
+                    continue
                 conn.execute(
                     "INSERT INTO api_request_results (id, collection_run_id, api_request_id, "
                     "request_name, method, url, order_index, status, status_code, response_body, "
                     "response_headers, duration_ms, assertion_results, error_message, started_at, finished_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (generate_id("arreq"), run_summary["id"],
-                     local_request_id["id"] if local_request_id else r["cli_request_id"],
+                    (generate_id("arreq"), local_run_id, local_request_row["id"],
                      r["request_name"], r.get("method"), r.get("url"), r["order_index"],
                      r["status"].upper(), r.get("status_code"), r.get("response_body"),
                      json.dumps(r["response_headers"]) if r.get("response_headers") else None,
@@ -2145,3 +2157,5 @@ Expected: push response shows `remaining > 0`; the queue row for `api_collection
 - No placeholders — every step shows the actual diff/code, not a description of one. Field names and endpoint paths are copied verbatim from the approved server plan (Sections 1-3 of `docs/superpowers/plans/2026-07-13-qaclan-server-api-testing-sync-plan.md`).
 - Type/signature consistency checked: `sync_run_to_cloud`'s new `api_results` parameter (Task 10) is called with a matching keyword argument in both its callers (`sync_all` in Task 10, `_dispatch_run` in Task 11) — no positional-vs-keyword mismatch.
 - Task 13's `reorder_tree` handling is a deliberate simplification (re-enqueue everything in the collection rather than diffing exactly what moved) — flagged inline as a conscious trade-off, not an oversight.
+- **Post-review fix:** Task 18's `pull_api_run_history` originally used the server's cloud run `id` as the local primary key with no de-dup against a run this same machine had already pushed — since `api_collection_runs` has no `cloud_id` column, pulling after pushing would have inserted a second, duplicate local row for the same run. Fixed to match on `cli_collection_run_id` first (added to the server plan's `/api/pull/api-runs` response in the same fix), falling back to the cloud id only for runs this machine never pushed.
+- **Post-review fix:** the same task's request-results loop originally fell back to storing the raw cloud `cli_request_id` as `api_request_id` when the parent request wasn't found locally — that column is `NOT NULL` + FK-enforced (`PRAGMA foreign_keys = ON`), so this would have raised `sqlite3.IntegrityError` and aborted the whole pull the first time a run referenced a request the local machine hadn't pulled yet. Fixed to skip that result row instead, matching every other orphan guard in `pull_workspace()`.

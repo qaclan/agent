@@ -521,6 +521,7 @@ Standalone collection-run history, parallel to `pull_runs`/`pull_run_detail`.
   "runs": [
     {
       "id": "<cloud run uuid>",
+      "cli_collection_run_id": "apirun_mno345",
       "collection_id": "<cloud collection uuid>",
       "collection_name": "Billing API",
       "env_name": "staging",
@@ -532,8 +533,9 @@ Standalone collection-run history, parallel to `pull_runs`/`pull_run_detail`.
   "page": 1, "per_page": 50, "total": 12
 }
 ```
+`cli_collection_run_id` (the original pushing client's local id, stored as `cloud_api_collection_runs.cli_collection_run_id` — Section 1 table 6) is required on every row, not just the `id`. Without it, a client that pushed this exact run has no way to recognize its own data on pull and will insert a second, duplicate local copy under the server's `id`. Every other pulled entity in this plan carries its `cli_*_id` for the same reason (see `api_requests`'s `cli_request_id` isn't repeated in the pull payload only because `api_requests` has a local `cloud_id` column to match on instead — `api_collection_runs` deliberately has no `cloud_id` column, so `cli_collection_run_id` is the *only* way to match).
 
-`GET /api/pull/api-runs/<run_id>` — response: the run header fields above plus `"request_results": [ /* same shape as POST /api/sync/api-collection-run's request_results */ ]`.
+`GET /api/pull/api-runs/<run_id>` — response: the run header fields above (including `cli_collection_run_id`) plus `"request_results": [ /* same shape as POST /api/sync/api-collection-run's request_results */ ]`.
 
 ### 3.3 New: `GET /api/pull/api-docs?project_id=<cloud_project_id>`
 
