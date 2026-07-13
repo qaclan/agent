@@ -413,6 +413,66 @@ def sync_api_request_example_to_cloud(example_id):
     return result
 
 
+def sync_api_collection_run_to_cloud(run_id):
+    """Sync a finished standalone collection run with all its request results.
+    Ensures the parent collection is synced first. Append-only — no cloud_id
+    stored locally, same as suite runs."""
+    key = get_auth_key()
+    if not key:
+        return None
+    from cli.db import get_conn
+    conn = get_conn()
+    run = conn.execute(
+        "SELECT collection_id, collection_name, env_name, status, total, passed, failed, "
+        "error_count, started_at, finished_at FROM api_collection_runs WHERE id = ?", (run_id,)
+    ).fetchone()
+    if not run:
+        return None
+    cloud_collection_id = _ensure_api_collection_synced(run["collection_id"])
+    if not cloud_collection_id:
+        return None
+    results = conn.execute(
+        "SELECT api_request_id, request_name, method, url, order_index, status, status_code, "
+        "response_body, response_headers, duration_ms, assertion_results, error_message, "
+        "started_at, finished_at FROM api_request_results "
+        "WHERE collection_run_id = ? ORDER BY order_index", (run_id,)
+    ).fetchall()
+    payload = {
+        "cli_collection_run_id": run_id,
+        "collection_id": cloud_collection_id,
+        "collection_name": run["collection_name"],
+        "env_name": run["env_name"],
+        "status": (run["status"] or "error").lower(),
+        "total": run["total"],
+        "passed": run["passed"],
+        "failed": run["failed"],
+        "error_count": run["error_count"],
+        "started_at": run["started_at"],
+        "completed_at": run["finished_at"],
+        "duration_ms": 0,
+        "request_results": [
+            {
+                "cli_request_id": r["api_request_id"],
+                "request_name": r["request_name"],
+                "method": r["method"],
+                "url": r["url"],
+                "order_index": r["order_index"],
+                "status": (r["status"] or "error").lower(),
+                "status_code": r["status_code"],
+                "duration_ms": r["duration_ms"],
+                "response_body": r["response_body"],
+                "response_headers": json.loads(r["response_headers"]) if r["response_headers"] else None,
+                "assertion_results": json.loads(r["assertion_results"]) if r["assertion_results"] else None,
+                "error_message": r["error_message"],
+                "started_at": r["started_at"],
+                "finished_at": r["finished_at"],
+            }
+            for r in results
+        ],
+    }
+    return _try_sync("api collection run", lambda: api.sync_api_collection_run(key, payload))
+
+
 # --- Delete operations ---
 
 def delete_project_from_cloud(project_id):
