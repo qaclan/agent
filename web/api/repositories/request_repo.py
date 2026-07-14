@@ -12,6 +12,7 @@ _DEFAULTS = {
     "headers": "[]",
     "params": "[]",
     "path_params": "[]",
+    "folder_id": None,
     "body_type": None,
     "body": None,
     "auth_type": "inherit",
@@ -64,12 +65,12 @@ class RequestRepo:
         conn = get_conn()
         if collection_id:
             rows = conn.execute(
-                "SELECT * FROM api_requests WHERE project_id = ? AND collection_id = ? ORDER BY created_at",
+                "SELECT * FROM api_requests WHERE project_id = ? AND collection_id = ? ORDER BY order_index, created_at",
                 (project_id, collection_id),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM api_requests WHERE project_id = ? ORDER BY created_at",
+                "SELECT * FROM api_requests WHERE project_id = ? ORDER BY order_index, created_at",
                 (project_id,),
             ).fetchall()
         return [_deserialize(dict(r)) for r in rows]
@@ -87,14 +88,32 @@ class RequestRepo:
         rid = generate_id("apireq")
         now = datetime.now(timezone.utc).isoformat()
         merged = {**_DEFAULTS, **_serialize(data)}
+
+        collection_id = merged.get("collection_id")
+        folder_id = merged.get("folder_id")
+        if collection_id:
+            if folder_id:
+                max_order = conn.execute(
+                    "SELECT COALESCE(MAX(order_index), -1) FROM api_requests WHERE collection_id = ? AND folder_id = ?",
+                    (collection_id, folder_id),
+                ).fetchone()[0]
+            else:
+                max_order = conn.execute(
+                    "SELECT COALESCE(MAX(order_index), -1) FROM api_requests WHERE collection_id = ? AND folder_id IS NULL",
+                    (collection_id,),
+                ).fetchone()[0]
+            order_index = max_order + 1
+        else:
+            order_index = 0
+
         conn.execute(
-            "INSERT INTO api_requests (id, project_id, feature_id, collection_id, name, method, url, "
+            "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, order_index, name, method, url, "
             "headers, params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
             "post_script, post_lang, post_extractor, request_schema, response_schema, "
             "assertions, follow_redirects, timeout_ms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, project_id,
-             merged.get("feature_id"), merged.get("collection_id"),
+             merged.get("feature_id"), collection_id, folder_id, order_index,
              merged.get("name", "Unnamed"), merged["method"], merged["url"],
              merged["headers"], merged["params"], merged["path_params"],
              merged["body_type"], merged["body"],
@@ -116,7 +135,7 @@ class RequestRepo:
                   "auth_type", "auth_config", "pre_script", "pre_lang", "pre_extractor", "post_script",
                   "post_lang", "post_extractor", "request_schema", "response_schema",
                   "assertions", "follow_redirects", "timeout_ms",
-                  "feature_id", "collection_id"]
+                  "feature_id", "collection_id", "folder_id"]
         updates = {f: s[f] for f in fields if f in s}
         if not updates:
             return False
@@ -137,3 +156,18 @@ class RequestRepo:
         cur = conn.execute("DELETE FROM api_requests WHERE collection_id = ?", (collection_id,))
         conn.commit()
         return cur.rowcount
+
+    def set_order(self, id: str, collection_id: str, folder_id: str | None, order_index: int) -> bool:
+        conn = get_conn()
+        if folder_id:
+            cur = conn.execute(
+                "UPDATE api_requests SET order_index = ? WHERE id = ? AND collection_id = ? AND folder_id = ?",
+                (order_index, id, collection_id, folder_id),
+            )
+        else:
+            cur = conn.execute(
+                "UPDATE api_requests SET order_index = ? WHERE id = ? AND collection_id = ? AND folder_id IS NULL",
+                (order_index, id, collection_id),
+            )
+        conn.commit()
+        return cur.rowcount > 0

@@ -1,9 +1,9 @@
 /**
- * createResponsePanel(opts?) → { el, show(result) }
+ * createResponsePanel(opts?) → { el, show(result, meta?) }
  * opts.schema: response_schema dict from stored request (shown read-only in Schema tab)
  */
 export function createResponsePanel(opts = {}) {
-  const _storedSchema = opts.schema || null;
+  let _storedSchema = opts.schema || null;
 
   const panel = document.createElement('div');
   panel.className = 'response-panel';
@@ -94,7 +94,6 @@ export function createResponsePanel(opts = {}) {
     return ul;
   }
 
-  let _bodyView = 'body';   // 'body' | 'schema'
   let _schemaView = 'tree'; // 'tree' | 'json'
 
   function _mkPillGroup(items, activeKey, onClick) {
@@ -142,43 +141,15 @@ export function createResponsePanel(opts = {}) {
     contentArea.appendChild(body);
   }
 
-  function _renderBodyOrSchema() {
+  function _renderBody() {
     if (!_currentResult) return;
     const r = _currentResult;
     contentArea.innerHTML = '';
 
-    const schema = r._responseSchema || _storedSchema;
-    const hasSchema = schema && typeof schema === 'object' && Object.keys(schema).length;
-
-    // Body/Schema pill toggle row (only when schema exists)
-    if (hasSchema) {
-      const row = document.createElement('div');
-      row.style.cssText = 'display:flex;justify-content:flex-end;padding:4px 8px 0;';
-      row.appendChild(_mkPillGroup([['Body','body'],['Schema','schema']], _bodyView, v => { _bodyView = v; _renderBodyOrSchema(); }));
-      contentArea.appendChild(row);
-    }
-
-    if (_bodyView === 'schema' && hasSchema) {
-      const schemaHeader = document.createElement('div');
-      schemaHeader.style.cssText = 'display:flex;align-items:center;justify-content:flex-end;padding:4px 8px 2px;';
-      schemaHeader.appendChild(_mkPillGroup([['Tree','tree'],['JSON','json']], _schemaView, v => { _schemaView = v; _renderBodyOrSchema(); }));
-      contentArea.appendChild(schemaHeader);
-      const schemaBody = document.createElement('div');
-      schemaBody.style.cssText = 'padding:8px 10px;font-size:12px;overflow:auto;';
-      if (_schemaView === 'json') {
-        const pre = document.createElement('pre');
-        pre.className = 'response-body-pre';
-        pre.style.margin = '0';
-        pre.textContent = JSON.stringify(schema, null, 2);
-        schemaBody.appendChild(pre);
-      } else {
-        schemaBody.appendChild(_renderSchemaTree(schema, ''));
-      }
-      contentArea.appendChild(schemaBody);
+    if (!r.status_code && !r.error_message) {
+      contentArea.innerHTML = '<p class="text-muted text-sm" style="padding:10px">Not yet run.</p>';
       return;
     }
-
-    // Body view
     if (!r.status_code && r.error_message) {
       const errDiv = document.createElement('div');
       errDiv.className = 'response-error-message';
@@ -206,12 +177,11 @@ export function createResponsePanel(opts = {}) {
     contentArea.innerHTML = '';
 
     if (tab === 'body') {
-      _bodyView = 'body';
-      _renderBodyOrSchema();
+      _renderBody();
       return;
 
     } else if (tab === 'response-schema') {
-      const schema = r._responseSchema || _storedSchema;
+      const schema = r.response_schema || _storedSchema;
       if (schema) _renderSchemaSection(schema);
       return;
 
@@ -260,11 +230,20 @@ export function createResponsePanel(opts = {}) {
         const row = document.createElement('div');
         row.className = 'assertion-result-row ' + (ar.passed ? 'assertion-pass' : 'assertion-fail');
         const icon = ar.passed ? '✓' : '✗';
-        const detail = ar.path ? `${ar.path} ` : ar.key ? `${ar.key} ` : '';
+        let desc;
+        if (ar.type === 'script') {
+          desc = _esc(ar.name || 'script assertion');
+        } else {
+          const detail = ar.path ? `${ar.path} ` : ar.key ? `${ar.key} ` : '';
+          desc = `${_esc(ar.type)} ${detail}${_esc(ar.op)} ${_esc(String(ar.value ?? ''))}`;
+        }
+        if (!ar.passed && ar.error) desc += ` — ${_esc(String(ar.error).slice(0,120))}`;
+        const actualStr = typeof ar.actual === 'object' && ar.actual !== null
+          ? JSON.stringify(ar.actual) : String(ar.actual);
         const actual = ar.actual !== undefined && ar.actual !== null
-          ? ` (actual: ${_esc(String(ar.actual).slice(0,80))})` : '';
+          ? ` (actual: ${_esc(actualStr.slice(0,80))})` : '';
         row.innerHTML = `<span class="assertion-icon">${icon}</span>
-          <span class="assertion-desc">${_esc(ar.type)} ${detail}${_esc(ar.op)} ${_esc(String(ar.value ?? ''))}</span>
+          <span class="assertion-desc">${desc}</span>
           <span class="assertion-actual">${actual}</span>`;
         contentArea.appendChild(row);
       });
@@ -272,10 +251,14 @@ export function createResponsePanel(opts = {}) {
     }
   }
 
-  function show(result) {
+  // meta.idle: no run has happened yet — used to pre-render a stored schema
+  // (e.g. from discovery) with a "Not yet run" pill instead of a status code.
+  function show(result, meta = null) {
     _currentResult = result;
+    if (result.response_schema) _storedSchema = result.response_schema;
     panel.style.display = '';
 
+    const idle = !!meta?.idle;
     const statusCode = result.status_code;
     const duration = result.duration_ms;
     const assertCount = (result.assertion_results || []).length;
@@ -286,32 +269,36 @@ export function createResponsePanel(opts = {}) {
     tabBar.innerHTML = '';
 
     const statusSpan = document.createElement('span');
-    statusSpan.className = `response-status ${statusClass}`;
-    statusSpan.textContent = statusCode ? `${statusCode} · ${duration}ms` : `ERROR · ${duration}ms`;
+    if (idle) {
+      statusSpan.className = 'response-status';
+      statusSpan.textContent = 'Not yet run';
+      statusSpan.style.cssText = 'color:var(--text-muted);font-size:11px;padding:4px 8px;';
+    } else if (meta?.captured) {
+      statusSpan.className = 'response-status response-status-warn';
+      statusSpan.textContent = `⚠ Captured example · not live${meta.label ? ' · ' + meta.label : ''}`;
+      statusSpan.title = statusCode ? `${statusCode} · ${duration}ms at capture time` : 'No status captured';
+    } else {
+      statusSpan.className = `response-status ${statusClass}`;
+      statusSpan.textContent = statusCode ? `${statusCode} · ${duration}ms` : `ERROR · ${duration}ms`;
+    }
     tabBar.appendChild(statusSpan);
 
-    tabBar.appendChild(_renderTab('Body', 'body', true));
+    const schema = result.response_schema || _storedSchema;
+    const hasSchema = schema && typeof schema === 'object' && Object.keys(schema).length;
+    const defaultTab = idle && hasSchema ? 'response-schema' : 'body';
+
+    tabBar.appendChild(_renderTab('Body', 'body', defaultTab === 'body'));
     tabBar.appendChild(_renderTab('Headers', 'headers', false));
     tabBar.appendChild(_renderTab(`Assertions (${assertPass}/${assertCount})`, 'assertions', false));
+    if (hasSchema) tabBar.appendChild(_renderTab('Schema', 'response-schema', defaultTab === 'response-schema'));
     const _varCount = Object.keys(result.state_updates || {}).length;
     if (_varCount) tabBar.appendChild(_renderTab(`Variables (${_varCount})`, 'vars', false));
 
-    _renderContent('body');
+    _renderContent(defaultTab);
   }
 
-  // Show Response Schema tab before a run if stored schema exists
-  if (_storedSchema) {
-    panel.style.display = '';
-    tabBar.innerHTML = '';
-    const statusSpan = document.createElement('span');
-    statusSpan.className = 'response-status';
-    statusSpan.textContent = 'Not yet run';
-    statusSpan.style.cssText = 'color:var(--text-muted);font-size:11px;padding:4px 8px;';
-    tabBar.appendChild(statusSpan);
-    tabBar.appendChild(_renderTab('Response Schema', 'response-schema', true));
-    _currentResult = {};
-    _renderSchemaSection(_storedSchema);
-  }
+  // Pre-render the stored schema before any run happens (e.g. requests saved via discovery).
+  if (_storedSchema) show({}, { idle: true });
 
   return { el: panel, show };
 }

@@ -151,3 +151,102 @@ def sync_env_vars(auth_key, payload):
     r = requests.post(f"{get_server_url()}/api/sync/env-vars", json=payload, headers=_headers(auth_key))
     _raise_with_body(r)
     return r.json()
+
+
+def sync_api_collection(auth_key, payload):
+    """POST /api/sync/api-collection — push API collection metadata."""
+    r = requests.post(f"{get_server_url()}/api/sync/api-collection", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def delete_api_collection(auth_key, cli_collection_id):
+    """DELETE /api/sync/api-collection/<id> — delete API collection from cloud."""
+    r = requests.delete(f"{get_server_url()}/api/sync/api-collection/{cli_collection_id}", headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def sync_api_folder(auth_key, payload):
+    """POST /api/sync/api-folder — push API folder metadata."""
+    r = requests.post(f"{get_server_url()}/api/sync/api-folder", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def delete_api_folder(auth_key, cli_folder_id):
+    """DELETE /api/sync/api-folder/<id> — delete API folder from cloud."""
+    r = requests.delete(f"{get_server_url()}/api/sync/api-folder/{cli_folder_id}", headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def sync_api_request(auth_key, payload):
+    """POST /api/sync/api-request — push API request metadata."""
+    r = requests.post(f"{get_server_url()}/api/sync/api-request", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def delete_api_request(auth_key, cli_request_id):
+    """DELETE /api/sync/api-request/<id> — delete API request from cloud."""
+    r = requests.delete(f"{get_server_url()}/api/sync/api-request/{cli_request_id}", headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def sync_collection_vars(auth_key, payload):
+    """POST /api/sync/collection-vars — push collection-scoped variables (full replace)."""
+    r = requests.post(f"{get_server_url()}/api/sync/collection-vars", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def sync_api_request_example(auth_key, payload):
+    """POST /api/sync/api-request-example — push a variant-library example."""
+    r = requests.post(f"{get_server_url()}/api/sync/api-request-example", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def delete_api_request_example(auth_key, cli_example_id):
+    """DELETE /api/sync/api-request-example/<id> — delete example from cloud."""
+    r = requests.delete(f"{get_server_url()}/api/sync/api-request-example/{cli_example_id}", headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def sync_api_collection_run(auth_key, payload):
+    """POST /api/sync/api-collection-run — push standalone collection run history."""
+    r = requests.post(f"{get_server_url()}/api/sync/api-collection-run", json=payload, headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def pull_api_runs(auth_key, page=1, per_page=50):
+    """GET /api/pull/api-runs — fetch standalone collection-run history."""
+    r = requests.get(
+        f"{get_server_url()}/api/pull/api-runs",
+        params={"page": page, "per_page": per_page},
+        headers=_headers(auth_key),
+    )
+    _raise_with_body(r)
+    return r.json()
+
+
+def pull_api_run_detail(auth_key, run_id):
+    """GET /api/pull/api-runs/<run_id> — fetch single collection run with request results."""
+    r = requests.get(f"{get_server_url()}/api/pull/api-runs/{run_id}", headers=_headers(auth_key))
+    _raise_with_body(r)
+    return r.json()
+
+
+def pull_api_docs(auth_key, project_id):
+    """GET /api/pull/api-docs?project_id=<id> — fetch server-computed docs cache for a project."""
+    r = requests.get(
+        f"{get_server_url()}/api/pull/api-docs",
+        params={"project_id": project_id},
+        headers=_headers(auth_key),
+    )
+    _raise_with_body(r)
+    return r.json()

@@ -149,6 +149,9 @@ def init_db():
     _migrate_api_collection_runs(conn)
     _migrate_pre_extractor(conn)
     _migrate_collection_run_progress(conn)
+    _migrate_api_request_examples(conn)
+    _migrate_nested_folders(conn)
+    _migrate_api_cloud_id(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -163,6 +166,58 @@ def _migrate_collection_run_progress(conn):
         conn.execute(
             "ALTER TABLE api_collection_runs ADD COLUMN stop_requested INTEGER DEFAULT 0"
         )
+    except Exception:
+        pass  # already exists
+    conn.commit()
+
+
+def _migrate_api_request_examples(conn):
+    """Create api_request_examples — non-default variants preserved when a Save-as-Library
+    merge collapses several captured requests into one {{var}}-templated api_requests row.
+    See docs/superpowers/specs/2026-07-05-api-variant-library-design.md Section 4."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_request_examples (
+            id              TEXT PRIMARY KEY,
+            api_request_id  TEXT NOT NULL REFERENCES api_requests(id) ON DELETE CASCADE,
+            label           TEXT NOT NULL,
+            params          TEXT NOT NULL DEFAULT '[]',
+            body            TEXT DEFAULT NULL,
+            response_status INTEGER,
+            response_headers TEXT,
+            response_body   TEXT,
+            created_at      TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+
+
+def _migrate_nested_folders(conn):
+    """Create api_folders (unlimited-depth folder tree inside a collection) and add
+    folder_id/order_index to api_requests, order_index to api_collections.
+    See docs/superpowers/specs/2026-07-11-nested-folders-drag-drop-design.md."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS api_folders (
+            id               TEXT PRIMARY KEY,
+            project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            collection_id    TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            parent_folder_id TEXT REFERENCES api_folders(id) ON DELETE CASCADE,
+            name             TEXT NOT NULL,
+            order_index      INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL
+        )
+    """)
+    try:
+        conn.execute(
+            "ALTER TABLE api_requests ADD COLUMN folder_id TEXT REFERENCES api_folders(id) ON DELETE CASCADE"
+        )
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass  # already exists
     conn.commit()
@@ -476,6 +531,19 @@ def _migrate_cloud_id(conn):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
         except Exception:
             pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_api_cloud_id(conn):
+    """Add cloud_id column to the API-testing tables that get individually
+    upserted to the cloud (collections/folders/requests/variant-library
+    examples). collection_vars/api_collection_runs/api_request_results don't
+    need it — full-replace-list or append-only, same as env_vars/suite_runs."""
+    for table in ("api_collections", "api_folders", "api_requests", "api_request_examples"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
+        except Exception:
+            pass  # already exists
     conn.commit()
 
 

@@ -1,3 +1,7 @@
+import { createInlineVarDrop } from '../components/inline-var-drop.js';
+import { attachTokenOverlay } from '../components/var-token-overlay.js';
+import { applyVarStyle } from '../components/var-style.js';
+
 /**
  * renderCollectionDetailView(container, col, runId, onViewRun, onBack)
  * Shows collection detail with Environment selector, Auth + Variables tabs.
@@ -8,6 +12,36 @@
 export function renderCollectionDetailView(container, col, runId, onViewRun, onBack) {
   let _pollTimer = null;
   let _destroyed = false;
+
+  // Env (col.env_name) + Collection vars — feeds the {{ }} suggestion dropdown
+  // and existence-based coloring on the Auth tab fields.
+  let _knownVarNames = null;
+  let _allVarsList = null;
+  let _authFieldInputs = [];
+  let _authFieldOverlays = [];
+
+  async function getAllVars() {
+    const results = [];
+    if (col.env_name) {
+      try {
+        const res = await window.api('GET', `/envs/${encodeURIComponent(col.env_name)}`);
+        (res.variables || []).forEach(v => results.push({ key: v.key, value: v.value, is_secret: !!v.is_secret, group: 'Environment' }));
+      } catch(e) { /* no env */ }
+    }
+    try {
+      const res = await window.api('GET', `/collections/${col.id}/vars`);
+      (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: false, group: 'Collection' }));
+    } catch(e) { /* no collection vars */ }
+    return results;
+  }
+
+  async function _refreshKnownVarNames() {
+    const vars = await getAllVars();
+    _knownVarNames = new Set(vars.map(v => v.key));
+    _allVarsList = vars;
+    _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
+    _authFieldOverlays.forEach(o => o.refresh());
+  }
 
   function _destroy() {
     _destroyed = true;
@@ -101,6 +135,8 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     let _colAuthConfig = {};
     try { _colAuthConfig = JSON.parse(col.auth_config || '{}'); } catch(e) { _colAuthConfig = {}; }
 
+    const _authInlineDrop = createInlineVarDrop(getAllVars);
+
     function _colAuthField(label, placeholder, key) {
       const fw = document.createElement('div');
       fw.style.cssText = 'display:flex;flex-direction:column;gap:5px;';
@@ -113,18 +149,27 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
       inp.style.cssText = 'font-size:13px;width:100%;font-family:var(--font-mono);';
       inp.placeholder = placeholder;
       inp.value = _colAuthConfig[key] || '';
+      inp.addEventListener('input', () => applyVarStyle(inp, _knownVarNames));
       inp.addEventListener('blur', async () => {
         _colAuthConfig[key] = inp.value;
         col.auth_config = JSON.stringify(_colAuthConfig);
         await window.api('PATCH', `/collections/${col.id}`, { auth_type: authTypeSel.value, auth_config: col.auth_config });
       });
+      applyVarStyle(inp, _knownVarNames);
+      _authInlineDrop.watchInput(inp);
+      _authFieldInputs.push(inp);
+      const overlay = attachTokenOverlay(inp, () => _allVarsList);
+      _authFieldOverlays.push(overlay);
       fw.appendChild(lbl);
-      fw.appendChild(inp);
+      fw.appendChild(overlay.el);
       return fw;
     }
 
     function _renderColAuthFields(type) {
+      _authInlineDrop.close();
       authFieldsWrap.innerHTML = '';
+      _authFieldInputs = [];
+      _authFieldOverlays = [];
       if (type === 'none') {
         const hint = document.createElement('div');
         hint.style.cssText = 'font-size:12px;color:var(--text-muted);padding:10px 14px;background:var(--bg-elevated);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);';
@@ -154,6 +199,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     });
 
     _renderColAuthFields(col.auth_type || 'none');
+    _refreshKnownVarNames();
 
     // Divider + bulk action
     const divider = document.createElement('div');
@@ -251,11 +297,13 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
         const key = keyInp.value.trim();
         if (!key) return;
         await window.api('PUT', `/collections/${col.id}/vars/${encodeURIComponent(key)}`, { initial_value: valInp.value });
+        _refreshKnownVarNames();
       }
       async function _deleteRow() {
         const key = keyInp.value.trim();
         if (key) await window.api('DELETE', `/collections/${col.id}/vars/${encodeURIComponent(key)}`);
         tr.remove();
+        _refreshKnownVarNames();
       }
 
       keyInp.addEventListener('blur', _saveRow);
@@ -331,6 +379,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     envSel.addEventListener('change', async () => {
       col.env_name = envSel.value || null;
       await window.api('PATCH', `/collections/${col.id}`, { env_name: col.env_name });
+      _refreshKnownVarNames();
     });
 
     // Tabs

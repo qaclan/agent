@@ -23,15 +23,31 @@ ENTITY_ORDER = (
     "feature",
     "suite",
     "script",
+    "api_collection",
+    "api_folder",
+    "api_request",
+    "collection_vars",
+    "api_request_example",
     "environment",
     "env_vars",
     "suite_items",
+    "api_collection_run",
     "run",
 )
 
 _wake = threading.Event()
 _worker_started = False
 _lock = threading.Lock()
+# Serializes drain_once() across the background worker thread and any
+# request thread calling flush_sync() directly (e.g. POST /api/sync/push).
+# Without this, both can concurrently _fetch_batch() the same not-yet-deleted
+# queue rows and double-dispatch the same entity to the cloud — reproduced via
+# manual testing (Task 19): api_collection/collection_vars/api_request_example
+# each fired twice in a single push when the worker and the request thread
+# raced, while entities the worker had already fully processed by the time the
+# request thread's SELECT ran were unaffected (hence a partial, timing-
+# dependent duplicate pattern rather than a clean doubling of every row).
+_drain_lock = threading.Lock()
 
 IDLE_SLEEP = 30
 OFFLINE_BACKOFFS = (30, 60, 300, 900)
@@ -116,6 +132,10 @@ def _dispatch(row):
                 "suite": sync.delete_suite_from_cloud,
                 "script": sync.delete_script_from_cloud,
                 "environment": sync.delete_environment_from_cloud,
+                "api_collection": sync.delete_api_collection_from_cloud,
+                "api_folder": sync.delete_api_folder_from_cloud,
+                "api_request": sync.delete_api_request_from_cloud,
+                "api_request_example": sync.delete_api_request_example_from_cloud,
             }[et](eid)
             return
 
@@ -166,6 +186,18 @@ def _dispatch(row):
                     language=r["language"],
                     wait_timeout=r["wait_timeout"],
                 )
+        elif et == "api_collection":
+            sync.sync_api_collection_to_cloud(eid)
+        elif et == "api_folder":
+            sync.sync_api_folder_to_cloud(eid)
+        elif et == "api_request":
+            sync.sync_api_request_to_cloud(eid)
+        elif et == "collection_vars":
+            sync.sync_collection_vars_to_cloud(eid)
+        elif et == "api_request_example":
+            sync.sync_api_request_example_to_cloud(eid)
+        elif et == "api_collection_run":
+            sync.sync_api_collection_run_to_cloud(eid)
         elif et == "environment":
             r = conn.execute(
                 "SELECT name, project_id FROM environments WHERE id = ?", (eid,)
@@ -212,6 +244,7 @@ def _dispatch_run(run_id, conn, sync):
         browser=run["browser"],
         resolution=run["resolution"],
         headless=bool(run["headless"]) if run["headless"] is not None else None,
+        api_results=sync._gather_api_run_results(run_id),
         script_results=[
             {
                 "script_id": r["script_id"],
@@ -233,34 +266,40 @@ def _dispatch_run(run_id, conn, sync):
 
 
 def drain_once(max_items=BATCH_SIZE):
-    """Drain up to max_items from the queue. Returns (synced, failed, offline)."""
+    """Drain up to max_items from the queue. Returns (synced, failed, offline).
+
+    Holds _drain_lock for the whole fetch-dispatch-delete cycle — see that
+    lock's docstring for why: without it, the background worker and a
+    request thread's flush_sync() can both fetch and re-dispatch the same
+    not-yet-deleted row."""
     if not get_auth_key():
         return (0, 0, False)
     if not _is_online():
         return (0, 0, True)
 
-    from cli.db import get_conn
-    conn = get_conn()
-    rows = _fetch_batch(conn, max_items)
-    synced = 0
-    failed = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
+    with _drain_lock:
+        from cli.db import get_conn
+        conn = get_conn()
+        rows = _fetch_batch(conn, max_items)
+        synced = 0
+        failed = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
 
-    for row in rows:
-        try:
-            _dispatch(row)
-            conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
-            conn.commit()
-            synced += 1
-        except Exception as e:
-            failed += 1
-            conn.execute(
-                "UPDATE sync_queue SET attempts = attempts + 1, "
-                "last_error = ?, last_attempt_at = ? WHERE id = ?",
-                (str(e)[:500], now_iso, row["id"]),
-            )
-            conn.commit()
-            logger.debug("sync_queue: failed %s %s %s: %s", row["entity_type"], row["entity_id"], row["op"], e)
+        for row in rows:
+            try:
+                _dispatch(row)
+                conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
+                conn.commit()
+                synced += 1
+            except Exception as e:
+                failed += 1
+                conn.execute(
+                    "UPDATE sync_queue SET attempts = attempts + 1, "
+                    "last_error = ?, last_attempt_at = ? WHERE id = ?",
+                    (str(e)[:500], now_iso, row["id"]),
+                )
+                conn.commit()
+                logger.debug("sync_queue: failed %s %s %s: %s", row["entity_type"], row["entity_id"], row["op"], e)
     return (synced, failed, False)
 
 
@@ -329,11 +368,24 @@ def enqueue_all(project_ids=None):
             enqueue("suite_items", s["id"], "upsert")
         for sc in conn.execute("SELECT id FROM scripts WHERE project_id = ?", (pid,)).fetchall():
             enqueue("script", sc["id"], "upsert")
+        for col in conn.execute("SELECT id FROM api_collections WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_collection", col["id"], "upsert")
+            enqueue("collection_vars", col["id"], "upsert")
+        for fold in conn.execute("SELECT id FROM api_folders WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_folder", fold["id"], "upsert")
+        for req in conn.execute("SELECT id FROM api_requests WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_request", req["id"], "upsert")
+            for ex in conn.execute(
+                "SELECT id FROM api_request_examples WHERE api_request_id = ?", (req["id"],)
+            ).fetchall():
+                enqueue("api_request_example", ex["id"], "upsert")
         for env in conn.execute("SELECT id FROM environments WHERE project_id = ?", (pid,)).fetchall():
             enqueue("environment", env["id"], "upsert")
             enqueue("env_vars", env["id"], "upsert")
         for run in conn.execute("SELECT id FROM suite_runs WHERE project_id = ?", (pid,)).fetchall():
             enqueue("run", run["id"], "upsert")
+        for arun in conn.execute("SELECT id FROM api_collection_runs WHERE project_id = ?", (pid,)).fetchall():
+            enqueue("api_collection_run", arun["id"], "upsert")
     after = queue_depth()
     return (after - before, after)
 

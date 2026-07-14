@@ -3,27 +3,11 @@ import base64
 import json
 import logging
 import re
+from urllib.parse import parse_qsl
+
+from cli.schema_infer import infer_schema as _infer_schema
 
 logger = logging.getLogger("qaclan.har_parser")
-
-
-def _infer_schema(value, _depth=0):
-    """Recursively replace JSON values with their type names. Max depth 4."""
-    if _depth > 4:
-        return "..."
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, (int, float)):
-        return "number"
-    if isinstance(value, str):
-        return "string"
-    if isinstance(value, list):
-        return [_infer_schema(value[0], _depth + 1)] if value else ["?"]
-    if isinstance(value, dict):
-        return {k: _infer_schema(v, _depth + 1) for k, v in value.items()}
-    return "unknown"
 
 _STATIC_EXT_RE = re.compile(r"\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|ttf|svg|webp|map)$", re.IGNORECASE)
 _STATIC_PATH_RE = re.compile(r"/static/|/assets/|/_next/|/favicon")
@@ -102,6 +86,7 @@ def parse_multipart_text(mime: str, text: str) -> list[dict]:
         return []
     delimiter = "--" + m.group(2)
     fields = []
+    file_index = 0
     for chunk in text.split(delimiter):
         # Strip exactly one leading newline (right after the boundary marker
         # line) and one trailing newline (mandatory framing before the next
@@ -131,12 +116,23 @@ def parse_multipart_text(mime: str, text: str) -> list[dict]:
         value = value.rstrip("\r\n")
         filename_m = re.search(r'filename="([^"]*)"', header_blob)
         if filename_m:
+            file_index += 1
             # File-part content is stored base64-encoded so it round-trips
             # identically whether it came from a capture (this path) or a
             # real file attached later in the request editor — the runner
-            # decodes base64 for any field marked is_file.
-            encoded = base64.b64encode(value.encode("utf-8", errors="surrogateescape")).decode("ascii")
-            field = {"key": name, "value": encoded, "enabled": True, "filename": filename_m.group(1), "is_file": True}
+            # decodes base64 for any field marked is_file. Disk-backed file
+            # inputs (as opposed to in-memory Blobs) never reach here with
+            # real bytes — Chromium doesn't expose their content via CDP at
+            # all — so an empty value falls back to a `{{file_N}}` var
+            # placeholder instead of a silently-empty upload.
+            encoded = base64.b64encode(value.encode("utf-8", errors="surrogateescape")).decode("ascii") if value else ""
+            field = {
+                "key": name,
+                "value": encoded or f"{{{{file_{file_index}}}}}",
+                "enabled": True,
+                "filename": filename_m.group(1),
+                "is_file": True,
+            }
             ct_m = re.search(r'Content-Type:\s*([^\r\n]+)', header_blob, re.IGNORECASE)
             if ct_m:
                 field["content_type"] = ct_m.group(1).strip()
@@ -146,23 +142,91 @@ def parse_multipart_text(mime: str, text: str) -> list[dict]:
     return fields
 
 
+def parse_multipart_bytes(mime: str, data: bytes) -> list[dict]:
+    """Byte-safe counterpart to parse_multipart_text, for multipart bodies
+    captured as raw bytes (Request.post_data_buffer) rather than decoded
+    text. File-part values are base64-encoded directly from their original
+    bytes with no intermediate text decode, so binary uploads (images,
+    PDFs, etc.) round-trip exactly instead of being corrupted by a lossy
+    UTF-8 conversion.
+    """
+    m = re.search(r'boundary=("?)([^;"]+)\1', mime)
+    if not m or not data:
+        return []
+    delimiter = b"--" + m.group(2).encode("ascii", errors="ignore")
+    fields = []
+    file_index = 0
+    for chunk in data.split(delimiter):
+        if chunk.startswith(b"\r\n"):
+            chunk = chunk[2:]
+        elif chunk.startswith(b"\n"):
+            chunk = chunk[1:]
+        if chunk.endswith(b"\r\n"):
+            chunk = chunk[:-2]
+        elif chunk.endswith(b"\n"):
+            chunk = chunk[:-1]
+        if not chunk or chunk.startswith(b"--"):
+            continue
+        if b"\r\n\r\n" in chunk:
+            header_blob, value = chunk.split(b"\r\n\r\n", 1)
+        elif b"\n\n" in chunk:
+            header_blob, value = chunk.split(b"\n\n", 1)
+        else:
+            continue
+        header_text = header_blob.decode("ascii", errors="replace")
+        name_m = re.search(r'name="([^"]*)"', header_text)
+        if not name_m:
+            continue
+        name = name_m.group(1)
+        value = value.rstrip(b"\r\n")
+        filename_m = re.search(r'filename="([^"]*)"', header_text)
+        if filename_m:
+            file_index += 1
+            # Disk-backed file inputs (as opposed to in-memory Blobs) never
+            # reach here with real bytes — Chromium doesn't expose their
+            # content via CDP at all — so an empty value falls back to a
+            # `{{file_N}}` var placeholder instead of a silently-empty upload.
+            encoded = base64.b64encode(value).decode("ascii") if value else ""
+            field = {
+                "key": name,
+                "value": encoded or f"{{{{file_{file_index}}}}}",
+                "enabled": True,
+                "filename": filename_m.group(1),
+                "is_file": True,
+            }
+            ct_m = re.search(r'Content-Type:\s*([^\r\n]+)', header_text, re.IGNORECASE)
+            if ct_m:
+                field["content_type"] = ct_m.group(1).strip()
+        else:
+            text_value = value.decode("utf-8", errors="replace")
+            field = {"key": name, "value": _redact_sensitive(name, text_value), "enabled": True}
+        fields.append(field)
+    return fields
+
+
 def merge_multipart_postdata(har_json: dict, sidecar_entries: list[dict]) -> None:
-    """Patch HAR entries in place with postData captured out-of-band via CDP
-    Network.getRequestPostData.
+    """Patch HAR entries in place with postData captured out-of-band via
+    Request.post_data_buffer.
 
     Playwright's HAR export never populates postData for multipart/form-data
     request bodies — Chrome's Network.requestWillBeSent omits it for
-    multipart requests, and Playwright's HAR writer doesn't fall back to the
-    CDP Network.getRequestPostData command that can actually fetch it. Our
-    recording harness captures that separately into `sidecar_entries`; this
-    matches each one back to its HAR entry by (method, url), in the order
-    both occurred, since HAR carries no CDP requestId to correlate on.
+    multipart requests. Our recording harness captures the raw body bytes
+    separately (via each request's post_data_buffer, not the lossy
+    CDP Network.getRequestPostData text channel — that command has Chromium
+    encode the body as a UTF-8 string before it ever reaches Python, which
+    corrupts binary file uploads) into `sidecar_entries`, base64-encoded for
+    JSON transport. This matches each one back to its HAR entry by
+    (method, url), in the order both occurred, since HAR carries no request
+    id to correlate on, and stashes the decoded raw bytes under `_raw_bytes`
+    so parse_har can split the multipart body without any further text
+    round trip.
     """
     if not sidecar_entries:
         return
     queues: dict = {}
     for item in sidecar_entries:
-        if item.get("postData") is None:
+        b64 = item.get("postData_b64")
+        if not b64:
             continue
         key = (item.get("method"), item.get("url"))
         queues.setdefault(key, []).append(item)
@@ -176,7 +240,12 @@ def merge_multipart_postdata(har_json: dict, sidecar_entries: list[dict]) -> Non
         if not queue:
             continue
         item = queue.pop(0)
-        req["postData"] = {"mimeType": item.get("mimeType", ""), "text": item.get("postData", ""), "params": []}
+        req["postData"] = {
+            "mimeType": item.get("mimeType", ""),
+            "text": "",
+            "params": [],
+            "_raw_bytes": base64.b64decode(item["postData_b64"]),
+        }
 
 
 def parse_har(har_json: dict) -> list[dict]:
@@ -244,7 +313,11 @@ def parse_har(har_json: dict) -> list[dict]:
                         field = {"key": name, "value": _redact_sensitive(name, p.get("value", "")), "enabled": True}
                     params_list.append(field)
                 if not params_list:
-                    params_list = parse_multipart_text(mime, text)
+                    raw_bytes = post_data.get("_raw_bytes")
+                    if raw_bytes is not None:
+                        params_list = parse_multipart_bytes(mime, raw_bytes)
+                    else:
+                        params_list = parse_multipart_text(mime, text)
                 body = json.dumps(params_list)
             elif "form" in mime:
                 body_type = "form"
@@ -253,6 +326,14 @@ def parse_har(har_json: dict) -> list[dict]:
                     k = p.get("name", "")
                     v = _redact_sensitive(k, p.get("value", ""))
                     params_list.append({"key": k, "value": v, "enabled": True})
+                if not params_list and text:
+                    # Playwright's HAR recorder leaves postData.params empty for
+                    # urlencoded bodies too (not just multipart) — fall back to
+                    # decoding the raw text, same as the multipart branch above.
+                    params_list = [
+                        {"key": k, "value": _redact_sensitive(k, v), "enabled": True}
+                        for k, v in parse_qsl(text, keep_blank_values=True)
+                    ]
                 body = json.dumps(params_list)
             else:
                 body_type = "raw"
@@ -272,26 +353,41 @@ def parse_har(har_json: dict) -> list[dict]:
             except (ValueError, TypeError):
                 pass
 
-        # Infer response schema from response body
-        response_schema = None
+        # Response snapshot — status/headers/body/duration are only meaningful for
+        # HAR-based paths (HAR import + Record APIs mode, which also produces a HAR
+        # under the hood and reuses this same parser). Spec-derived imports
+        # (OpenAPI/Postman/Bruno/cURL) have no live traffic, so these stay None there.
         resp = entry.get("response", {})
         resp_content = resp.get("content", {})
-        # mimeType may be in content or fall back to response headers
         resp_mime = resp_content.get("mimeType", "")
         if not resp_mime:
             for h in resp.get("headers", []):
                 if h.get("name", "").lower() == "content-type":
                     resp_mime = h.get("value", "")
                     break
-        if "json" in resp_mime:
-            resp_text = resp_content.get("text", "")
-            if resp_text:
-                try:
-                    if resp_content.get("encoding") == "base64":
-                        resp_text = base64.b64decode(resp_text).decode("utf-8", errors="replace")
-                    response_schema = _infer_schema(json.loads(resp_text))
-                except Exception:
-                    logger.debug("parse_har: could not infer response schema for %s", url)
+
+        resp_text = resp_content.get("text", "")
+        if resp_text and resp_content.get("encoding") == "base64":
+            try:
+                resp_text = base64.b64decode(resp_text).decode("utf-8", errors="replace")
+            except Exception:
+                resp_text = ""
+
+        response_schema = None
+        if "json" in resp_mime and resp_text:
+            try:
+                response_schema = _infer_schema(json.loads(resp_text))
+            except Exception:
+                logger.debug("parse_har: could not infer response schema for %s", url)
+
+        response_status = resp.get("status") or None
+        response_headers = {}
+        for h in resp.get("headers", []):
+            rh_name = h.get("name", "")
+            if rh_name.lower() in skip_headers or rh_name.startswith(":"):
+                continue
+            response_headers[rh_name] = h.get("value", "")
+        duration_ms = int(entry.get("time", 0) or 0)
 
         results.append({
             "name": name,
@@ -306,6 +402,10 @@ def parse_har(har_json: dict) -> list[dict]:
             "assertions": "[]",
             "request_schema": request_schema,
             "response_schema": response_schema,
+            "response_status": response_status,
+            "response_headers": response_headers,
+            "response_body": resp_text or None,
+            "duration_ms": duration_ms,
         })
 
     logger.info("parse_har: extracted %d requests from %d entries", len(results), len(entries))

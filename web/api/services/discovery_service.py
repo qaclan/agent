@@ -3,6 +3,7 @@ import json
 import logging
 from web.api.repositories.collection_repo import CollectionRepo
 from web.api.repositories.request_repo import RequestRepo
+from cli.sync_queue import enqueue
 
 logger = logging.getLogger("qaclan.discovery_service")
 
@@ -10,34 +11,53 @@ _col_repo = CollectionRepo()
 _req_repo = RequestRepo()
 
 # Embedded (as literal source, not imported) in the generated recording
+# harnesses below. Chromium only fills in Request.post_data_buffer from CDP's
+# postDataEntries, and postDataEntries is only populated on requestWillBeSent
+# when Fetch-domain interception is armed — with no route() handler
+# registered it's always None for multipart bodies (verified empirically;
+# JSON/urlencoded bodies don't need it, Chromium fills those via the plain
+# postData text field regardless of interception). So a no-op route handler
+# must be installed purely to arm interception before postData is readable.
+_ROUTE_ARM_SRC = (
+    "async def _arm_interception(ctx):\n"
+    "    async def _route_handler(route):\n"
+    "        try:\n"
+    "            await route.continue_()\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    await ctx.route('**/*', _route_handler)\n"
+)
+
+# Embedded (as literal source, not imported) in the generated recording
 # harnesses below. Playwright's own HAR export never captures postData for
-# multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it,
-# and Playwright's HAR writer doesn't fall back to the CDP command that can
-# actually fetch it (Network.getRequestPostData). This installs that fallback
-# via a raw CDP session and stashes results in a sidecar file next to the HAR,
-# merged back in by cli.api_discovery.har_parser.merge_multipart_postdata.
-_MULTIPART_CDP_CAPTURE_SRC = (
-    "async def _install_multipart_capture(ctx, page):\n"
-    "    cdp = await ctx.new_cdp_session(page)\n"
-    "    await cdp.send('Network.enable')\n"
+# multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it.
+# A raw CDP Network.getRequestPostData call can fetch it, but that command
+# hands the body back as a JSON string — Chromium encodes it UTF-8 before
+# Python ever sees it, which corrupts binary file uploads (images, PDFs,
+# etc.) since arbitrary bytes aren't valid UTF-8. Request.post_data_buffer
+# gives the same body as raw bytes with no such round trip, so this listens
+# on the page's native 'request' event and reads that instead. Results are
+# stashed in a sidecar file next to the HAR, merged back in by
+# cli.api_discovery.har_parser.merge_multipart_postdata. Requires
+# _arm_interception (above) to have run first, or post_data_buffer is always
+# None for multipart — see its docstring.
+_MULTIPART_CAPTURE_SRC = (
+    "def _install_multipart_capture(ctx):\n"
     "    captured = []\n"
-    "    def on_request(event):\n"
-    "        req = event.get('request', {})\n"
-    "        ct = ''\n"
-    "        for k, v in (req.get('headers') or {}).items():\n"
-    "            if k.lower() == 'content-type':\n"
-    "                ct = v\n"
-    "                break\n"
-    "        if req.get('hasPostData') and 'multipart/form-data' in ct.lower():\n"
-    "            request_id = event.get('requestId')\n"
-    "            async def fetch_body():\n"
-    "                try:\n"
-    "                    res = await cdp.send('Network.getRequestPostData', {'requestId': request_id})\n"
-    "                    captured.append({'url': req.get('url'), 'method': req.get('method'), 'postData': res.get('postData'), 'mimeType': ct})\n"
-    "                except Exception:\n"
-    "                    pass\n"
-    "            asyncio.create_task(fetch_body())\n"
-    "    cdp.on('Network.requestWillBeSent', on_request)\n"
+    "    def on_request(req):\n"
+    "        ct = req.headers.get('content-type', '') or ''\n"
+    "        if 'multipart/form-data' not in ct.lower():\n"
+    "            return\n"
+    "        buf = req.post_data_buffer\n"
+    "        if not buf:\n"
+    "            return\n"
+    "        captured.append({\n"
+    "            'url': req.url,\n"
+    "            'method': req.method,\n"
+    "            'mimeType': ct,\n"
+    "            'postData_b64': base64.b64encode(buf).decode('ascii'),\n"
+    "        })\n"
+    "    ctx.on('request', on_request)\n"
     "    return captured\n"
     "\n"
     "def _write_multipart_sidecar(captured):\n"
@@ -80,6 +100,7 @@ def _save_requests(project_id: str, requests: list[dict], collection_id: str | N
                 data["auth_config"] = {}
 
         saved_req = _req_repo.create(project_id, data)
+        enqueue("api_request", saved_req["id"], "upsert")
 
         # Sync to API docs if flagged (default: include)
         try:
@@ -89,6 +110,86 @@ def _save_requests(project_id: str, requests: list[dict], collection_id: str | N
 
         saved += 1
     return saved
+
+
+def group_requests(requests: list[dict]) -> list[dict]:
+    """Preview grouping for Save-as-Library. Pure computation — nothing persisted."""
+    from cli.api_discovery.variant_grouper import group_requests as _group
+    return _group(requests)
+
+
+def save_library(project_id: str, groups: list[dict], collection_name: str, include_in_docs: int = 1) -> dict:
+    """Persist the user's resolved per-group choices from the Save-as-Library
+    comparison UI. See docs/superpowers/specs/2026-07-05-api-variant-library-design.md
+    Sections 2, 4, 5.
+
+    groups: [{action: "separate"|"merge", checked_fields: [field_key, ...],
+              variants: [{request: {...}, included: bool, name_override: str|None}, ...]}]
+    """
+    from cli.api_discovery.schema_merger import merge_schemas
+    from cli.api_discovery.variant_grouper import compute_diff_fields, suggest_label, templatize_request
+    from web.api.repositories.request_example_repo import RequestExampleRepo
+    from web.api.services.doc_service import sync_doc_entry
+
+    col = _col_repo.create(project_id, collection_name)
+    enqueue("api_collection", col["id"], "upsert")
+    example_repo = RequestExampleRepo()
+    saved = 0
+
+    for group in groups:
+        included = [v for v in group.get("variants", []) if v.get("included", True)]
+        if not included:
+            continue
+
+        if group.get("action") == "merge" and len(included) > 1:
+            checked_keys = set(group.get("checked_fields", []))
+            default_req = dict(included[0]["request"])
+            merged_req = templatize_request(default_req, checked_keys)
+            merged_req["collection_id"] = col["id"]
+            merged_req["include_in_docs"] = include_in_docs
+            for k in ("response_status", "response_headers", "response_body", "duration_ms"):
+                merged_req.pop(k, None)
+
+            req_schema = None
+            resp_schema = None
+            for v in included:
+                req_schema = merge_schemas(req_schema, v["request"].get("request_schema"))
+                resp_schema = merge_schemas(resp_schema, v["request"].get("response_schema"))
+            merged_req["request_schema"] = req_schema
+            merged_req["response_schema"] = resp_schema
+
+            saved_req = _req_repo.create(project_id, merged_req)
+            enqueue("api_request", saved_req["id"], "upsert")
+            try:
+                sync_doc_entry(project_id, {**merged_req, "id": saved_req["id"]})
+            except Exception as e:
+                logger.warning("sync_doc_entry failed for merged request %s: %s", saved_req["id"], e)
+
+            included_requests = [v["request"] for v in included]
+            diff_fields = compute_diff_fields(included_requests)
+            for i, v in enumerate(included[1:], start=1):
+                r = v["request"]
+                example = example_repo.create(saved_req["id"], {
+                    "label": suggest_label(r, diff_fields, i),
+                    "params": r.get("params", []),
+                    "body": r.get("body"),
+                    "response_status": r.get("response_status"),
+                    "response_headers": r.get("response_headers"),
+                    "response_body": r.get("response_body"),
+                })
+                enqueue("api_request_example", example["id"], "upsert")
+            saved += 1
+        else:
+            reqs = []
+            for v in included:
+                r = dict(v["request"])
+                if v.get("name_override"):
+                    r["name"] = v["name_override"]
+                r["include_in_docs"] = include_in_docs
+                reqs.append(r)
+            saved += _save_requests(project_id, reqs, collection_id=col["id"])
+
+    return {"imported": saved, "collection_id": col["id"]}
 
 
 class DiscoveryService:
@@ -195,15 +296,17 @@ class DiscoveryService:
         import os, tempfile, uuid
         stop_file = os.path.join(tempfile.gettempdir(), f"qaclan_stop_{uuid.uuid4().hex}.flag")
         harness = (
-            "import asyncio, json, os, signal, sys, traceback\n"
+            "import asyncio, base64, json, os, signal, sys, traceback\n"
             "from playwright.async_api import async_playwright\n"
-            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
+            f"{_MULTIPART_CAPTURE_SRC}\n"
+            f"{_ROUTE_ARM_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
-            "        captured = await _install_multipart_capture(ctx, page)\n"
+            "        captured = _install_multipart_capture(ctx)\n"
+            "        await _arm_interception(ctx)\n"
             # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
             "        if sys.platform != 'win32':\n"
             "            stop = asyncio.Event()\n"
@@ -218,7 +321,6 @@ class DiscoveryService:
             "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
             "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
             "                await asyncio.sleep(0.3)\n"
-            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        try:\n"
             "            await ctx.close()\n"
             "        except Exception:\n"
@@ -238,18 +340,19 @@ class DiscoveryService:
     def record_sync(self, url: str, har_path: str) -> None:
         """Blocking. Returns when user closes browser. HAR flushed via ctx.close()."""
         harness = (
-            "import asyncio, json, os\n"
+            "import asyncio, base64, json, os\n"
             "from playwright.async_api import async_playwright\n"
-            f"{_MULTIPART_CDP_CAPTURE_SRC}\n"
+            f"{_MULTIPART_CAPTURE_SRC}\n"
+            f"{_ROUTE_ARM_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
-            "        captured = await _install_multipart_capture(ctx, page)\n"
+            "        captured = _install_multipart_capture(ctx)\n"
+            "        await _arm_interception(ctx)\n"
             "        await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        await browser.wait_for_event('disconnected')\n"
-            "        await asyncio.sleep(0.2)\n"  # let in-flight getRequestPostData calls finish
             "        await ctx.close()\n"
             "        _write_multipart_sidecar(captured)\n"
             "asyncio.run(main())\n"

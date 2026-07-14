@@ -4,8 +4,28 @@ import logging
 from cli.db import get_conn
 from cli.config import get_active_project_id
 from cli.env_loader import load_env_vars
+from cli.schema_infer import infer_schema
 
 logger = logging.getLogger("qaclan.runner_service")
+
+
+def _infer_response_schema(response_headers: dict | None, response_body: str | None):
+    """Best-effort schema inference from a JSON response body. Returns None
+    when the response isn't JSON or can't be parsed — callers must leave any
+    already-stored schema untouched in that case, not clear it."""
+    if not response_body:
+        return None
+    content_type = ""
+    for k, v in (response_headers or {}).items():
+        if k.lower() == "content-type":
+            content_type = v or ""
+            break
+    if "json" not in content_type:
+        return None
+    try:
+        return infer_schema(json.loads(response_body))
+    except Exception:
+        return None
 
 
 def _resolve_auth(req: dict, col: dict | None) -> dict:
@@ -54,6 +74,14 @@ class RunnerService:
             vars_repo = CollectionVarsRepo()
             for key, value in result["state_updates"].items():
                 vars_repo.upsert(req["collection_id"], key, str(value))
+
+        # Refresh the stored response_schema from every successful run with a
+        # JSON body, so it self-corrects if the API shape changes. Leaves the
+        # existing stored schema alone when the response isn't JSON.
+        schema = _infer_response_schema(result.get("response_headers"), result.get("response_body"))
+        if schema is not None:
+            RequestRepo().update(request_id, {"response_schema": schema})
+            result["response_schema"] = schema
 
         return result
 
@@ -167,6 +195,8 @@ class RunnerService:
                 error_count=err_c,
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
+            from cli.sync_queue import enqueue
+            enqueue("api_collection_run", run_id, "upsert")
             logger.info("_execute_collection: run %s → %s", run_id, final_status)
 
     def run_collection(self, collection_id: str, project_id: str,
@@ -225,6 +255,8 @@ class RunnerService:
                 error_count=error_count,
                 finished_at=finished_at,
             )
+            from cli.sync_queue import enqueue
+            enqueue("api_collection_run", run_id, "upsert")
 
         return {
             "run_id": run_id,

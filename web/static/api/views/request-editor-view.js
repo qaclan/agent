@@ -5,26 +5,41 @@ import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
-import { applyVarStyle } from '../components/var-style.js';
+import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
+import { attachTokenOverlay } from '../components/var-token-overlay.js';
 
 /**
- * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName)
+ * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId)
  * requestId: string|null  (null = new request)
  * defaultCollectionId: string|null  (pre-select collection when creating new)
  * collectionId: string|null  (resolved collection for var loading)
  * collectionEnvName: string|null  (env bound to the collection)
+ * defaultFolderId: string|null  (pre-select the folder a new request is created into)
  */
-export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null) {
+// Module-level — survives across calls, so a stale in-flight render (e.g. an
+// earlier sidebar click whose fetch resolves after a later one, from rapid
+// clicking through the list) can tell it's been superseded and bail instead
+// of overwriting the newer editor's DOM and dirty-tracking hooks out from
+// under it.
+let _renderGen = 0;
+
+export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null, defaultFolderId = null) {
+  const myGen = ++_renderGen;
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
+  let examples = [];
   if (requestId) {
     const res = await window.api('GET', `/api-requests/${requestId}`);
+    if (myGen !== _renderGen) return; // superseded while this fetch was in flight
     if (res.ok === false) {
       container.innerHTML = `<div class="empty-state"><p style="color:var(--danger)">${res.error}</p></div>`;
       return;
     }
     existing = res.request;
+    const exRes = await window.api('GET', `/api-requests/${requestId}/examples`);
+    if (myGen !== _renderGen) return; // superseded while this fetch was in flight
+    if (exRes.ok !== false) examples = exRes.examples || [];
   }
 
   const r = existing || {};
@@ -49,21 +64,52 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   let _knownVarNames = null;
+  let _allVarsList = null;
   let _authFieldInputs = [];
+  let _authFieldOverlays = [];
+  let _scriptTextareaOverlays = [];
+  let _bodyFallbackOverlay = null;
+  let _extractorNameInputs = [];
+
+  // Extractor "Variable Name" fields hold a bare name (no {{ }}), so they're
+  // styled by exact match against known var names rather than token scanning.
+  function _styleExtractorNameInput(inp) {
+    inp.classList.remove('kv-value--var-ok', 'kv-value--var-missing');
+    const name = inp.value.trim();
+    if (!name || !_knownVarNames) return;
+    inp.classList.add(_knownVarNames.has(name) ? 'kv-value--var-ok' : 'kv-value--var-missing');
+  }
 
   async function _refreshKnownVarNames() {
     const vars = await getAllVars();
     _knownVarNames = new Set(vars.map(v => v.key));
+    _allVarsList = vars;
     paramsTable.restyleAll();
     headersTable.restyleAll();
     pathVarsTable.restyleAll();
+    formBodyTable.restyleAll();
+    multipartBodyTable.restyleAll();
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
+    _authFieldOverlays.forEach(o => o.refresh());
+    _renderUrlTokens();
+    _scriptTextareaOverlays.forEach(o => o.refresh());
+    _bodyFallbackOverlay?.refresh();
+    _extractorNameInputs.forEach(inp => _styleExtractorNameInput(inp));
+    assertionBuilder.restyleAll();
+    _cmEditor?.refresh?.();
   }
 
   container.innerHTML = '';
 
   const editor = document.createElement('div');
   editor.className = 'request-editor';
+
+  // Dirty tracking is event-driven (see the `input`/`change` listeners wired
+  // to `editor` near the end of this function) — declared here since a few
+  // non-input actions below (body-type switch, curl paste-import) need to
+  // call it explicitly.
+  let _dirty = false;
+  function _markDirty() { _dirty = true; }
 
   // ── Header: name + save ──
   const header = document.createElement('div');
@@ -100,16 +146,99 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   methodSelect.onchange = _applyMethodColor;
   urlBar.appendChild(methodSelect);
 
-  const urlInput = document.createElement('input');
-  urlInput.type = 'text';
+  // contenteditable, not <input> — no overlay here (see git history). Chrome's
+  // autofill paints its own text via -webkit-text-fill-color, which bypasses
+  // the color:transparent trick the overlay technique depends on, and Chrome
+  // ignores autocomplete=off for this field's autofill heuristic. contenteditable
+  // isn't an autofill target at all, and lets {{var}} tokens be colored inline
+  // (as real child <span>s) without a second stacked element.
+  const urlInput = document.createElement('div');
+  urlInput.contentEditable = 'true';
+  urlInput.spellcheck = false;
   urlInput.className = 'req-url-input';
-  urlInput.placeholder = 'https://api.example.com/endpoint';
-  urlInput.value = r.url || '';
+  urlInput.dataset.placeholder = 'https://api.example.com/endpoint';
   urlBar.appendChild(urlInput);
+
+  function _urlCaretOffset() {
+    const sel = window.getSelection();
+    if (!sel.rangeCount || !urlInput.contains(sel.anchorNode)) return null;
+    const range = sel.getRangeAt(0);
+    const pre = range.cloneRange();
+    pre.selectNodeContents(urlInput);
+    pre.setEnd(range.endContainer, range.endOffset);
+    return pre.toString().length;
+  }
+
+  function _setUrlCaretOffset(offset) {
+    if (offset == null) return;
+    const walker = document.createTreeWalker(urlInput, NodeFilter.SHOW_TEXT);
+    let remaining = offset;
+    let target = null;
+    let targetOffset = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+      const len = node.textContent.length;
+      if (remaining <= len) { target = node; targetOffset = remaining; break; }
+      remaining -= len;
+    }
+    const range = document.createRange();
+    if (target) {
+      range.setStart(target, targetOffset);
+      range.collapse(true);
+    } else {
+      range.selectNodeContents(urlInput);
+      range.collapse(false);
+    }
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  // Renders {{var}} tokens as colored, individually-hoverable (native title
+  // tooltip) spans — preserves caret position across the innerHTML rebuild so
+  // typing doesn't jump the cursor to the start every keystroke.
+  function _renderUrlTokens() {
+    const value = urlInput.textContent;
+    const caret = document.activeElement === urlInput ? _urlCaretOffset() : null;
+    const list = _allVarsList || [];
+    let html = '';
+    let last = 0;
+    tokenSpansIn(value).forEach(({ name, start, end }) => {
+      html += escapeHtml(value.slice(last, start));
+      const entry = list.find(v => v.key === name);
+      const known = _knownVarNames ? _knownVarNames.has(name) : null;
+      const cls = known == null ? 'var-tok' : known ? 'var-tok var-tok--ok' : 'var-tok var-tok--missing';
+      const title = entry ? `{{${name}}} = ${entry.value}` : `{{${name}}} — not defined`;
+      html += `<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(value.slice(start, end))}</span>`;
+      last = end;
+    });
+    html += escapeHtml(value.slice(last));
+    urlInput.innerHTML = html;
+    if (caret != null) _setUrlCaretOffset(caret);
+  }
+
+  // .value shim — the rest of this file reads/writes urlInput.value like a
+  // normal <input>; keep that working unchanged for a contenteditable div.
+  Object.defineProperty(urlInput, 'value', {
+    get() { return urlInput.textContent; },
+    set(v) { urlInput.textContent = v || ''; _renderUrlTokens(); },
+  });
+  urlInput.value = r.url || '';
+
+  urlInput.addEventListener('input', _renderUrlTokens);
+  urlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') e.preventDefault(); // single-line field, no inserted linebreaks
+  });
 
   urlInput.addEventListener('paste', async (e) => {
     const text = (e.clipboardData || window.clipboardData).getData('text');
-    if (!/^\s*curl(\.exe)?\s/i.test(text)) return; // not a curl command — let normal paste happen
+    if (!/^\s*curl(\.exe)?\s/i.test(text)) {
+      // Not a curl command — still force plain-text insertion (contenteditable
+      // would otherwise paste the clipboard's HTML formatting).
+      e.preventDefault();
+      document.execCommand('insertText', false, text.replace(/[\r\n]+/g, ''));
+      return;
+    }
 
     e.preventDefault();
 
@@ -146,6 +275,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _setBodyType(parsed.body_type || 'none');
 
     _syncPathVars();
+    _syncUrlFromQueryParams();
+    _markDirty(); // programmatic field fills below don't fire input/change events
     window._toast(`Imported from curl${res.requests.length > 1 ? ` (1 of ${res.requests.length} commands — use Import cURL dialog for the rest)` : ''}`);
   });
 
@@ -153,6 +284,50 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   sendBtn.className = 'btn btn-sm btn-primary req-send-btn';
   sendBtn.textContent = 'Send';
   urlBar.appendChild(sendBtn);
+
+  let examplesSelect = null;
+  if (examples.length) {
+    examplesSelect = document.createElement('select');
+    examplesSelect.className = 'req-examples-select';
+    examplesSelect.style.cssText = 'font-size:12px;max-width:160px;';
+    examplesSelect.title = 'Load a previously captured example';
+
+    const defaultOpt = document.createElement('option');
+    defaultOpt.value = '';
+    defaultOpt.textContent = 'Default values';
+    examplesSelect.appendChild(defaultOpt);
+
+    examples.forEach(ex => {
+      const opt = document.createElement('option');
+      opt.value = ex.id;
+      opt.textContent = ex.label;
+      examplesSelect.appendChild(opt);
+    });
+    urlBar.appendChild(examplesSelect);
+
+    // paramsTable, responsePanel, and _setBodyValue are declared further down in this
+    // function; this listener only ever runs after the user interacts with the
+    // dropdown, by which point the whole function body (and those consts) has run.
+    examplesSelect.onchange = () => {
+      const chosen = examples.find(ex => ex.id === examplesSelect.value);
+      if (!chosen) {
+        paramsTable.setRows(r.params || []);
+        _setBodyValue(r.body || '');
+        responsePanel.el.style.display = 'none';
+        return;
+      }
+      paramsTable.setRows(chosen.params || []);
+      _setBodyValue(chosen.body || '');
+      responsePanel.show({
+        status_code: chosen.response_status,
+        duration_ms: null,
+        response_body: chosen.response_body,
+        response_headers: chosen.response_headers || {},
+        assertion_results: [],
+        state_updates: {},
+      }, { captured: true, label: chosen.label });
+    };
+  }
 
   const copyCurlBtn = document.createElement('button');
   copyCurlBtn.type = 'button';
@@ -179,11 +354,65 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(tabBar);
   editor.appendChild(sectionContent);
 
+  // ── URL helpers: split into path / query / hash, shared by param + path-var sync ──
+  function _splitUrl(raw) {
+    const hashIdx = raw.indexOf('#');
+    const hash = hashIdx >= 0 ? raw.slice(hashIdx) : '';
+    const beforeHash = hashIdx >= 0 ? raw.slice(0, hashIdx) : raw;
+    const qIdx = beforeHash.indexOf('?');
+    const query = qIdx >= 0 ? beforeHash.slice(qIdx) : '';
+    const path = qIdx >= 0 ? beforeHash.slice(0, qIdx) : beforeHash;
+    return { path, query, hash };
+  }
+
+  function _stripQuery(raw) {
+    const { path, hash } = _splitUrl(raw);
+    return path + hash;
+  }
+
+  // Query string in the URL bar is a display convenience, not a wire value —
+  // the resolved request is built server-side from the params table. Only
+  // escape the chars that are structurally significant to our own & / =
+  // splitting, so {{VAR}} tokens stay readable instead of percent-encoded.
+  function _decodeQueryPart(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
+  function _encodeQueryPart(s) { return String(s).replace(/[&=#%]/g, c => encodeURIComponent(c)); }
+
+  function _parseQueryString(qs) {
+    if (!qs) return [];
+    return qs.split('&').filter(Boolean).map(pair => {
+      const eq = pair.indexOf('=');
+      const rawKey = eq >= 0 ? pair.slice(0, eq) : pair;
+      const rawVal = eq >= 0 ? pair.slice(eq + 1) : '';
+      return { key: _decodeQueryPart(rawKey), value: _decodeQueryPart(rawVal), enabled: true };
+    });
+  }
+
+  function _buildQueryString(rows) {
+    return rows.filter(r => r.key && r.enabled !== false)
+      .map(r => `${_encodeQueryPart(r.key)}=${_encodeQueryPart(r.value || '')}`)
+      .join('&');
+  }
+
   // ── KV components ──
-  const paramsTable = createKeyValueTable({ placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const paramsTable = createKeyValueTable({
+    placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    getVarsList: () => _allVarsList,
+    onChange: () => _syncUrlFromQueryParams(),
+  });
   paramsTable.setRows(r.params || []);
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  function _syncQueryParamsFromUrl() {
+    const { query } = _splitUrl(urlInput.value);
+    paramsTable.setRows(_parseQueryString(query.startsWith('?') ? query.slice(1) : query));
+  }
+
+  function _syncUrlFromQueryParams() {
+    const { path, hash } = _splitUrl(urlInput.value);
+    const qs = _buildQueryString(paramsTable.getRows());
+    urlInput.value = path + (qs ? '?' + qs : '') + hash;
+  }
+
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList });
   headersTable.setRows(r.headers || []);
 
   const authBanner = document.createElement('div');
@@ -195,7 +424,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _collectionAuth = null;
 
   // ── Path Variables ──
-  const pathVarsTable = createKeyValueTable({ placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames });
+  const pathVarsTable = createKeyValueTable({
+    placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    getVarsList: () => _allVarsList,
+    onChange: () => _syncUrlFromPathVars(),
+  });
   const pathVarsSection = document.createElement('div');
   {
     const hdr = document.createElement('div');
@@ -203,12 +436,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     hdr.textContent = 'Path Variables';
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = 'Values for {param} segments in the URL. Supports {{VAR}} syntax.';
+    hint.textContent = 'Synced with {param} segments in the URL — renaming/adding/removing a row updates the URL too. Values support {{VAR}} syntax.';
     pathVarsSection.appendChild(hdr);
     pathVarsSection.appendChild(hint);
     pathVarsSection.appendChild(pathVarsTable.el);
   }
-  pathVarsSection.style.display = 'none';
 
   const queryParamsHdr = document.createElement('div');
   queryParamsHdr.style.cssText = 'font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:12px 0 4px;';
@@ -221,11 +453,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const _storedPathParams = r.path_params || [];
 
+  // Matches single-brace {param} segments, excluding any brace that's part of
+  // a {{VAR}} token (even a malformed one missing its closing brace) — the
+  // lookbehind rejects an opening `{` immediately preceded by another `{`.
+  const PATH_VAR_RE = /(?<!\{)\{(?!\{)([^{}]+)\}(?!\})/g;
+  let _lastPathKeys = [];
+
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(/\{(?!\{)([^{}]+)\}(?!\})/g)].map(m => m[1]);
+    const matches = [...urlInput.value.matchAll(PATH_VAR_RE)].map(m => m[1]);
     const keys = [...new Set(matches)];
-    if (!keys.length) { pathVarsSection.style.display = 'none'; return; }
-    pathVarsSection.style.display = '';
+    _lastPathKeys = keys;
     const current = {};
     pathVarsTable.getRows().forEach(row => { current[row.key] = row.value; });
     const stored = {};
@@ -233,10 +470,35 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     pathVarsTable.setRows(keys.map(key => ({ key, value: current[key] ?? stored[key] ?? '', enabled: true })));
   }
 
-  urlInput.addEventListener('input', _syncPathVars);
-  _syncPathVars();
+  function _syncUrlFromPathVars() {
+    const newKeys = pathVarsTable.getRows().filter(row => row.key).map(row => row.key);
+    const { path, query, hash } = _splitUrl(urlInput.value);
+    let newPath = path;
 
-  const assertionBuilder = createAssertionBuilder();
+    if (newKeys.length === _lastPathKeys.length) {
+      _lastPathKeys.forEach((oldKey, i) => {
+        const newKey = newKeys[i];
+        if (newKey && newKey !== oldKey) newPath = newPath.replace(`{${oldKey}}`, `{${newKey}}`);
+      });
+    } else if (newKeys.length < _lastPathKeys.length) {
+      _lastPathKeys.filter(oldKey => !newKeys.includes(oldKey)).forEach(oldKey => {
+        newPath = newPath.includes(`/{${oldKey}}`) ? newPath.replace(`/{${oldKey}}`, '') : newPath.replace(`{${oldKey}}`, '');
+      });
+    } else {
+      newKeys.filter(key => !_lastPathKeys.includes(key)).forEach(key => {
+        if (!newPath.includes(`{${key}}`)) newPath += (newPath.endsWith('/') ? '' : '/') + `{${key}}`;
+      });
+    }
+
+    if (newPath !== path) urlInput.value = newPath + query + hash;
+    _lastPathKeys = [...new Set([...newPath.matchAll(PATH_VAR_RE)].map(m => m[1]))];
+  }
+
+  urlInput.addEventListener('input', () => { _syncPathVars(); _syncQueryParamsFromUrl(); });
+  _syncPathVars();
+  _syncUrlFromQueryParams(); // reflect params loaded from the saved request in the URL bar
+
+  const assertionBuilder = createAssertionBuilder({ getVarsList: () => _allVarsList });
   assertionBuilder.setAssertions(r.assertions || []);
 
   // ── Body section ──
@@ -255,7 +517,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     btn.className = 'req-body-type-btn';
     btn.textContent = BODY_TYPE_LABELS[t] || t;
     btn.dataset.type = t;
-    btn.onclick = () => _setBodyType(t);
+    btn.onclick = () => {
+      if (t === activeBodyType) return; // reselecting the current type is a no-op, not an edit
+      _markDirty();
+      _setBodyType(t);
+    };
     bodyTypeGroup.appendChild(btn);
   });
 
@@ -300,8 +566,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // Fallback textarea — shown when CM unavailable (offline)
   const bodyFallback = document.createElement('textarea');
   bodyFallback.className = 'input-sm body-json-editor';
-  bodyFallback.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;display:none;';
+  bodyFallback.style.cssText = 'width:100%;min-height:180px;font-family:var(--font-mono);font-size:12px;line-height:1.6;margin-top:4px;resize:vertical;tab-size:2;';
   bodyFallback.spellcheck = false;
+  _bodyFallbackOverlay = attachTokenOverlay(bodyFallback, () => _allVarsList);
+  _bodyFallbackOverlay.el.style.display = 'none';
 
   const jsonErrorEl = document.createElement('div');
   jsonErrorEl.style.cssText = 'display:none;font-size:11px;color:var(--danger,#e53e3e);padding:3px 6px;margin-top:2px;font-family:var(--font-mono);background:color-mix(in srgb,var(--danger,#e53e3e) 6%,transparent);border-radius:4px;';
@@ -311,7 +579,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   function _parseBodyWithVarSub(text) {
     const vars = [];
-    const subbed = text.replace(/\{\{([^}]+)\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
+    const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
     return { parsed: JSON.parse(subbed), vars };
   }
 
@@ -424,12 +692,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       value: val,
       isDark,
       onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+      getVarsList: () => _allVarsList,
     });
     if (!_cmEditor) {
       // CM unavailable — show fallback textarea instead
       cmWrap.style.display = 'none';
       bodyFallback.value = val;
-      bodyFallback.style.display = '';
+      _bodyFallbackOverlay.el.style.display = '';
       jsonErrorEl.style.display = 'none';
     }
   }
@@ -446,13 +715,22 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       else if (r.body_type === 'form') _formRows = parsed;
     }
   } catch(e) { /* leave both empty */ }
-  const formBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars });
-  const multipartBodyTable = createKeyValueTable({ placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true });
+  const formBodyTable = createKeyValueTable({
+    placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars,
+    getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+  });
+  const multipartBodyTable = createKeyValueTable({
+    placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true,
+    getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+  });
   formBodyTable.setRows(_formRows);
   multipartBodyTable.setRows(_multipartRows);
   formBodyTable.el.style.display = 'none';
   multipartBodyTable.el.style.display = 'none';
 
+  // Called once unconditionally at load (line below) to mount the editor for
+  // whatever type is already saved, and from the type-button click handler
+  // for genuine switches — never called redundantly with the same type.
   function _setBodyType(type) {
     const prevType = activeBodyType;
     if (prevType === 'form') _formRows = formBodyTable.getRows();
@@ -470,7 +748,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmEditor.destroy();
       _cmEditor = null;
       cmWrap.style.display = 'none';
-      bodyFallback.style.display = 'none';
+      _bodyFallbackOverlay.el.style.display = 'none';
       _cmActive = false;
     }
 
@@ -486,7 +764,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     if (isText) {
       _cmActive = true;
       cmWrap.style.display = '';
-      bodyFallback.style.display = 'none';
+      _bodyFallbackOverlay.el.style.display = 'none';
       _activateCmEditor(bodyTextarea.value);
       if (type === 'graphql') bodyFallback.placeholder = '{ "query": "{ users { id name } }" }';
       else bodyFallback.placeholder = '{\n  "key": "value"\n}';
@@ -498,7 +776,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(bodyTypeGroup);
   bodySection.appendChild(bodyTextarea);   // hidden — source of truth for _save()
   bodySection.appendChild(cmWrap);
-  bodySection.appendChild(bodyFallback);
+  bodySection.appendChild(_bodyFallbackOverlay.el);
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
   bodySection.appendChild(multipartBodyTable.el);
@@ -539,7 +817,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const lbl = document.createElement('label');
     lbl.textContent = labelText;
     const inp = document.createElement('input');
-    inp.type = /password|secret/i.test(labelText) ? 'password' : 'text';
+    const isSecret = /password|secret/i.test(labelText);
+    inp.type = isSecret ? 'password' : 'text';
+    // Chrome ignores autocomplete="off" on password fields and pairs them with the
+    // nearest preceding text field as a guessed "username" (no <form> needed for
+    // this heuristic) — forcing a save-credentials suggestion onto that field.
+    // "new-password" is the one value Chrome actually respects to suppress it.
+    inp.autocomplete = isSecret ? 'new-password' : 'off';
     inp.className = 'input-sm';
     inp.placeholder = placeholder;
     inp.value = getValue() || '';
@@ -547,8 +831,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     applyVarStyle(inp, _knownVarNames);
     _authInlineDrop.watchInput(inp);
     _authFieldInputs.push(inp);
+    const overlay = attachTokenOverlay(inp, () => _allVarsList);
+    _authFieldOverlays.push(overlay);
     wrap.appendChild(lbl);
-    wrap.appendChild(inp);
+    wrap.appendChild(overlay.el);
     return wrap;
   }
 
@@ -774,7 +1060,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const effectiveAuth = await _resolveEffectiveAuth();
     const curl = buildCurlCommand({
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       bodyType: activeBodyType,
@@ -841,7 +1127,9 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     textarea.placeholder = _ph(lang || 'js');
     langSelect.onchange = () => { textarea.placeholder = _ph(langSelect.value); };
     textarea.value = code || '';
-    div.appendChild(textarea);
+    const scriptOverlay = attachTokenOverlay(textarea, () => _allVarsList);
+    _scriptTextareaOverlays.push(scriptOverlay);
+    div.appendChild(scriptOverlay.el);
     _scriptInlineDrop.watchInput(textarea);
 
     div._getLang = () => langSelect.value;
@@ -930,7 +1218,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     );
     const scriptPane = makeScriptSection(
       lang, code,
-      'Runs before the request. Use qc.set("var", value) to inject variables into URL/headers/body.'
+      'Runs before the request. Use qc.set("var", value) to inject variables, qc.setHeader/setParam plus qc.getHeader/getParam to read/write, env for active environment vars, and qc.expect/qc.test to assert.'
     );
 
     const paneArea = document.createElement('div');
@@ -975,7 +1263,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const extractorPane = _buildExtractorPane(extractorRules || [], responseSchema || null);
     const scriptPane = makeScriptSection(
       lang, code,
-      'Runs after the response. Access response.json(), response.status, response.headers. Use qc.set("VAR", val) to save variables.'
+      'Runs after the response. Access response.json(), response.text(), response.status, response.headers. Use qc.set("VAR", val) to save variables, qc.getHeader/getParam to read the request that ran, and qc.expect/qc.test to assert.'
     );
 
     let activePane = extractorPane;
@@ -1015,6 +1303,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   function _buildExtractorPane(initialRules, responseSchema, hintText) {
     const div = document.createElement('div');
     const _namePicker = createVarPicker({ getVars: getAllVars });
+    const _nameDrop = createInlineVarDrop(getAllVars);
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
@@ -1072,6 +1361,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       const mk = (ph, val, mono) => {
         const inp = document.createElement('input');
         inp.type = 'text';
+        inp.autocomplete = 'off';
         inp.className = 'input-sm';
         inp.placeholder = ph;
         inp.value = val || '';
@@ -1081,6 +1371,20 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
       const pathInp = mk('data.access_token', rule.path, true);
       const nameInp = mk('access_token', rule.name, false);
+
+      function _pickExtractorVar(varToken) {
+        nameInp.value = varToken.replace(/^\{\{|\}\}$/g, '');
+        _styleExtractorNameInput(nameInp);
+        nameInp.focus();
+      }
+      nameInp.addEventListener('focus', () => _nameDrop.open(nameInp, _pickExtractorVar, nameInp.value));
+      nameInp.addEventListener('input', () => {
+        _styleExtractorNameInput(nameInp);
+        _nameDrop.open(nameInp, _pickExtractorVar, nameInp.value);
+      });
+      nameInp.addEventListener('keydown', _nameDrop.handleKeydown);
+      _extractorNameInputs.push(nameInp);
+      _styleExtractorNameInput(nameInp);
 
       const nameWrap = document.createElement('div');
       nameWrap.style.cssText = 'display:flex;align-items:center;gap:3px;min-width:0;';
@@ -1188,14 +1492,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   };
 
   // ── Save ──
-  async function _save() {
+  // Builds the wire payload from current field state — also used (unsaved)
+  // as a dirty-check snapshot, so it must stay side-effect-free.
+  function _buildPayload() {
     let parsedAuth = {};
     try { parsedAuth = JSON.parse(_authConfigCache); } catch(e) { parsedAuth = {}; }
 
     const payload = {
       name: nameInput.value.trim() || 'Unnamed Request',
       method: methodSelect.value,
-      url: urlInput.value.trim(),
+      url: _stripQuery(urlInput.value.trim()),
       params: paramsTable.getRows(),
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
@@ -1214,12 +1520,24 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       assertions: assertionBuilder.getAssertions(),
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
+    if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;
+    return payload;
+  }
 
+  async function _save() {
+    if (assertionBuilder.hasInvalidAssertions()) {
+      await window._alertDialog('One or more assertions is missing its expected value.');
+      return null;
+    }
+
+    const payload = _buildPayload();
     const res = requestId
       ? await window.api('PUT', `/api-requests/${requestId}`, payload)
       : await window.api('POST', '/api-requests', payload);
 
     if (res.ok === false) { await window._alertDialog('Save failed: ' + res.error); return null; }
+    _dirty = false;
+    window.__qaclanApi?.refresh?.(res.request?.id || requestId);
     return res.request?.id || requestId;
   }
 
@@ -1235,4 +1553,17 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       setTimeout(() => { saveBtn.textContent = 'Save'; }, 2000);
     }
   };
+
+  // ── Dirty tracking — event-driven, not a payload diff. A diff was fragile:
+  // any lazily-mounted widget (the CodeMirror body editor, tab remounts that
+  // detach/reattach a whole section) could shift the computed payload with
+  // zero real edits and falsely flag dirty. A real user edit always fires a
+  // native input/change event on the field the user touched, so delegating
+  // both at the editor root catches every field without per-widget wiring —
+  // and a remount alone never fires either event.
+  editor.addEventListener('input', _markDirty);
+  editor.addEventListener('change', _markDirty);
+  window.__qaclanApi = window.__qaclanApi || {};
+  window.__qaclanApi.isCurrentEditorDirty = () => _dirty;
+  window.__qaclanApi.getCurrentEditorRequestId = () => requestId;
 }

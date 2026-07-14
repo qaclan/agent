@@ -1,6 +1,7 @@
 import { createVarPicker } from './var-picker.js';
 import { createInlineVarDrop } from './inline-var-drop.js';
 import { applyVarStyle } from './var-style.js';
+import { attachTokenOverlay } from './var-token-overlay.js';
 
 /**
  * createKeyValueTable(options) → { el, getRows, setRows }
@@ -11,6 +12,9 @@ import { applyVarStyle } from './var-style.js';
  *   getVars?: async () => [{key, value, is_secret?, group?}]
  *   fileFieldsEnabled?: bool — adds a per-row "attach file" control; rows with
  *     an attached file report {filename, content_type, is_file: true, value: base64}
+ *   onChange?: () => void — fired after a user-driven row mutation (key/value
+ *     edit, enable toggle, add, delete). NOT fired by setRows() — callers use
+ *     setRows() to reflect external state without re-triggering their own sync.
  */
 export function createKeyValueTable(options = {}) {
   const {
@@ -20,6 +24,8 @@ export function createKeyValueTable(options = {}) {
     getVars = async () => [],
     fileFieldsEnabled = false,
     getKnownVarNames = null,
+    getVarsList = null,
+    onChange = null,
   } = options;
 
   function _fileToBase64(file) {
@@ -39,6 +45,7 @@ export function createKeyValueTable(options = {}) {
 
   const _picker = varPickerEnabled ? createVarPicker({ getVars }) : null;
   const _inlineDrop = varPickerEnabled ? createInlineVarDrop(getVars) : null;
+  const _overlays = [];
 
   const wrapper = document.createElement('div');
   wrapper.className = 'kv-table-wrapper';
@@ -63,7 +70,7 @@ export function createKeyValueTable(options = {}) {
     addBtn.className = 'btn btn-xs btn-ghost';
     addBtn.style.marginTop = '6px';
     addBtn.textContent = '+ Add Row';
-    addBtn.onclick = () => _addRow({});
+    addBtn.onclick = () => { _addRow({}); if (onChange) onChange(); };
     wrapper.appendChild(addBtn);
   }
 
@@ -79,15 +86,33 @@ export function createKeyValueTable(options = {}) {
   }
 
   function _setFileState(tr, valInput, meta) {
-    tr._fileMeta = meta; // null, or {filename, content_type, base64, size}
-    if (meta) {
+    tr._fileMeta = meta; // null, or {filename, content_type, base64, size, empty?}
+    if (meta && meta.empty) {
+      // Captured-but-empty file (e.g. discovery record couldn't read a
+      // disk-backed upload's bytes): keep _fileMeta so is_file/filename/
+      // content_type round-trip on save, but leave the value input showing
+      // its `{{file_N}}` placeholder (already set at row creation) instead
+      // of a "📎 filename" chip indistinguishable from a real capture.
+      valInput.readOnly = readOnly;
+      valInput.classList.remove('kv-value--file');
+    } else if (meta) {
       valInput.value = meta.size != null ? `📎 ${meta.filename} (${_formatSize(meta.size)})` : `📎 ${meta.filename}`;
       valInput.readOnly = true;
       valInput.classList.add('kv-value--file');
+      // The token overlay (see var-token-overlay.js) only re-renders on the
+      // input event — programmatic .value writes don't fire one natively.
+      // Without this, its stale highlighted `{{file_N}}` span keeps painting
+      // over the real (deliberately transparent-text) input, which now
+      // holds the new "📎 filename" text underneath, invisible except
+      // through selection highlighting.
+      valInput.dispatchEvent(new Event('input'));
     } else {
       valInput.readOnly = readOnly;
       valInput.classList.remove('kv-value--file');
-      if (valInput.value.startsWith('📎 ')) valInput.value = '';
+      if (valInput.value.startsWith('📎 ')) {
+        valInput.value = '';
+        valInput.dispatchEvent(new Event('input'));
+      }
     }
   }
 
@@ -101,6 +126,7 @@ export function createKeyValueTable(options = {}) {
       cb.type = 'checkbox';
       cb.checked = data.enabled !== false;
       cb.className = 'kv-enabled';
+      if (onChange) cb.addEventListener('change', onChange);
       enabledTd.appendChild(cb);
     }
     tr.appendChild(enabledTd);
@@ -108,26 +134,36 @@ export function createKeyValueTable(options = {}) {
     const keyTd = document.createElement('td');
     const keyInput = document.createElement('input');
     keyInput.type = 'text';
+    keyInput.autocomplete = 'off';
     keyInput.className = 'kv-key input-sm';
     keyInput.placeholder = placeholder.key;
     keyInput.value = data.key || '';
     keyInput.readOnly = readOnly;
+    if (!readOnly && onChange) keyInput.addEventListener('input', onChange);
     keyTd.appendChild(keyInput);
     tr.appendChild(keyTd);
 
     const valTd = document.createElement('td');
     const valInput = document.createElement('input');
     valInput.type = 'text';
+    valInput.autocomplete = 'off';
     valInput.className = 'kv-value input-sm';
     valInput.placeholder = placeholder.value;
     valInput.value = data.value || '';
     valInput.readOnly = readOnly;
     _styleValueInput(valInput);
-    valTd.appendChild(valInput);
+    if (getVarsList) {
+      const overlay = attachTokenOverlay(valInput, getVarsList);
+      _overlays.push(overlay);
+      valTd.appendChild(overlay.el);
+    } else {
+      valTd.appendChild(valInput);
+    }
     tr.appendChild(valTd);
 
     if (!readOnly) {
       valInput.addEventListener('input', () => _styleValueInput(valInput));
+      if (onChange) valInput.addEventListener('input', onChange);
       if (varPickerEnabled) _inlineDrop.watchInput(valInput);
     }
 
@@ -161,13 +197,13 @@ export function createKeyValueTable(options = {}) {
       fileBtn.style.cssText = 'background:none;border:1px solid var(--border-default);border-radius:4px;padding:1px 5px;cursor:pointer;font-size:11px;color:var(--text-muted);line-height:1.4;';
 
       function _refreshFileBtn() {
-        const attached = !!tr._fileMeta;
+        const attached = !!tr._fileMeta && !tr._fileMeta.empty;
         fileBtn.textContent = attached ? '✕' : '📎';
         fileBtn.title = attached ? 'Remove attached file' : 'Attach file';
       }
 
       fileBtn.onclick = () => {
-        if (tr._fileMeta) {
+        if (tr._fileMeta && !tr._fileMeta.empty) {
           _setFileState(tr, valInput, null);
           _refreshFileBtn();
         } else {
@@ -189,11 +225,17 @@ export function createKeyValueTable(options = {}) {
       });
 
       if (data.is_file && data.filename) {
+        // Backend fills unrecoverable file content with a literal
+        // `{{file_N}}` var placeholder (see har_parser.py) rather than
+        // leaving value empty — detect that exact shape here to fall back
+        // to the "needs attaching" display instead of a real-content chip.
+        const isPlaceholder = /^\{\{file_\d+\}\}$/.test(data.value || '');
         _setFileState(tr, valInput, {
           filename: data.filename,
           content_type: data.content_type,
           base64: data.value || '',
           size: null,
+          empty: !data.value || isPlaceholder,
         });
       }
       _refreshFileBtn();
@@ -209,7 +251,7 @@ export function createKeyValueTable(options = {}) {
       delBtn.type = 'button';
       delBtn.className = 'btn btn-xs btn-ghost btn-icon-danger';
       delBtn.textContent = '×';
-      delBtn.onclick = () => tr.remove();
+      delBtn.onclick = () => { tr.remove(); if (onChange) onChange(); };
       delTd.appendChild(delBtn);
       tr.appendChild(delTd);
     }
@@ -244,11 +286,13 @@ export function createKeyValueTable(options = {}) {
 
   function setRows(rows = []) {
     tbody.innerHTML = '';
+    _overlays.length = 0;
     rows.forEach(r => _addRow(r));
   }
 
   function restyleAll() {
     tbody.querySelectorAll('.kv-value').forEach(_styleValueInput);
+    _overlays.forEach(o => o.refresh());
   }
 
   return { el: wrapper, getRows, setRows, restyleAll };

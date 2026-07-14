@@ -1,22 +1,32 @@
 /**
- * createJsonEditor({ parent, value, isDark, onChange }) → Promise<editor|null>
+ * createJsonEditor({ parent, value, isDark, onChange, getVarsList }) → Promise<editor|null>
  * Uses the bundled CM6 from window.CM6 (vendor/codemirror/cm6.js).
  * Returns null if CM6 unavailable.
- * editor: { getValue(), setValue(str), focus(), destroy() }
+ * getVarsList?: () => Array<{key, value, group?}>|null — when provided AND
+ * the vendor bundle exposes Decoration/ViewPlugin/RangeSetBuilder/
+ * StateEffect/hoverTooltip, {{name}} tokens in the doc get colored
+ * (var-tok--ok/--missing) and a hover tooltip shows the current value or
+ * "not defined". When the bundle also exposes autocompletion/completionKeymap,
+ * typing "{{" pops a suggestion list of known var names. Both are silently
+ * skipped on older bundles (see REBUILD.md).
+ * editor: { getValue(), setValue(str), refresh(), focus(), destroy() }
  */
+import { tokenSpansIn, escapeHtml } from './var-style.js';
 
-export async function createJsonEditor({ parent, value = '', isDark = true, onChange }) {
+export async function createJsonEditor({ parent, value = '', isDark = true, onChange, getVarsList }) {
   try {
     const CM = window.CM6;
     if (!CM) throw new Error('CM6 vendor bundle not loaded');
 
     const { EditorView, EditorState, basicSetup, json, jsonParseLinter, linter, lintGutter, oneDark } = CM;
+    const { Decoration, ViewPlugin, RangeSetBuilder, StateEffect, hoverTooltip } = CM;
+    const { autocompletion, completionKeymap, keymap } = CM;
 
     // Custom linter that understands {{VAR}} template syntax
     const varAwareLinter = linter((view) => {
       const text = view.state.doc.toString().trim();
       if (!text) return [];
-      const subbed = text.replace(/\{\{[^}]+\}\}/g, '"__QCVAR__"');
+      const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, '"__QCVAR__"');
       try { JSON.parse(subbed); return []; }
       catch (e) {
         const m = /at position (\d+)/i.exec(e.message) || /position (\d+)/i.exec(e.message);
@@ -57,6 +67,88 @@ export async function createJsonEditor({ parent, value = '', isDark = true, onCh
     const extensions = [basicSetup(), json(), lintGutter(), varAwareLinter, baseTheme];
     if (isDark) extensions.push(oneDark);
 
+    // {{var}} name suggestions while typing — only when the vendor bundle has
+    // the autocomplete module (older bundles built before REBUILD.md pulled
+    // it in won't have it) and a var list getter was passed in.
+    if (autocompletion && getVarsList) {
+      function varCompletions(context) {
+        const word = context.matchBefore(/\{\{[\w.-]*/);
+        if (!word) return null;
+        const list = getVarsList() || [];
+        if (!list.length) return null;
+        return {
+          from: word.from + 2,
+          options: list.map(v => ({
+            label: v.key,
+            type: 'variable',
+            detail: v.group || undefined,
+            info: () => document.createTextNode(String(v.value ?? '')),
+            apply: (view, completion, from, to) => {
+              const alreadyClosed = view.state.sliceDoc(to, to + 2) === '}}';
+              const insert = completion.label + (alreadyClosed ? '' : '}}');
+              view.dispatch({
+                changes: { from, to, insert },
+                selection: { anchor: from + insert.length },
+              });
+            },
+          })),
+          validFor: /^[\w.-]*$/,
+        };
+      }
+      extensions.push(autocompletion({ override: [varCompletions] }));
+      if (keymap && completionKeymap) extensions.push(keymap.of(completionKeymap));
+    }
+
+    let forceRedecorate = null;
+    const hasTokenSupport = !!(Decoration && ViewPlugin && RangeSetBuilder && StateEffect && hoverTooltip && getVarsList);
+
+    if (hasTokenSupport) {
+      forceRedecorate = StateEffect.define();
+
+      function buildDecorations(view) {
+        const builder = new RangeSetBuilder();
+        const list = getVarsList();
+        if (list) {
+          tokenSpansIn(view.state.doc.toString()).forEach(({ name, start, end }) => {
+            const known = list.some(v => v.key === name);
+            builder.add(start, end, Decoration.mark({ class: known ? 'var-tok--ok' : 'var-tok--missing' }));
+          });
+        }
+        return builder.finish();
+      }
+
+      const tokenDecorationPlugin = ViewPlugin.fromClass(class {
+        constructor(view) { this.decorations = buildDecorations(view); }
+        update(u) {
+          const forced = u.transactions.some(tr => tr.effects.some(e => e.is(forceRedecorate)));
+          if (u.docChanged || forced) this.decorations = buildDecorations(u.view);
+        }
+      }, { decorations: v => v.decorations });
+
+      const tokenHoverTooltip = hoverTooltip((view, pos) => {
+        const hit = tokenSpansIn(view.state.doc.toString()).find(s => pos >= s.start && pos < s.end);
+        if (!hit) return null;
+        const list = getVarsList() || [];
+        const entry = list.find(v => v.key === hit.name);
+        return {
+          pos: hit.start,
+          end: hit.end,
+          above: true,
+          create() {
+            const dom = document.createElement('div');
+            dom.className = 'var-tooltip';
+            dom.innerHTML = entry
+              ? `<strong>{{${escapeHtml(hit.name)}}}</strong><div class="var-tooltip-value">${escapeHtml(String(entry.value ?? ''))}</div>` +
+                (entry.group ? `<div class="var-tooltip-group">${escapeHtml(entry.group)}</div>` : '')
+              : `<strong>{{${escapeHtml(hit.name)}}}</strong><div class="var-tooltip-missing">Not defined in environment or collection</div>`;
+            return { dom };
+          },
+        };
+      });
+
+      extensions.push(tokenDecorationPlugin, tokenHoverTooltip);
+    }
+
     if (onChange) {
       extensions.push(EditorView.updateListener.of(u => {
         if (u.docChanged) onChange(u.state.doc.toString());
@@ -73,6 +165,7 @@ export async function createJsonEditor({ parent, value = '', isDark = true, onCh
       setValue: (val) => {
         view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: val } });
       },
+      refresh: () => { if (forceRedecorate) view.dispatch({ effects: forceRedecorate.of(null) }); },
       focus: () => view.focus(),
       destroy: () => view.destroy(),
     };
