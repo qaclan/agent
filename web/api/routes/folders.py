@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from flask import Blueprint, request, jsonify
 from cli.config import get_active_project_id
+from cli.sync_queue import enqueue
 from web.api.services.folder_service import FolderService
 
 logger = logging.getLogger("qaclan.routes.folders")
@@ -34,6 +35,7 @@ def create_folder(col_id):
     try:
         data = request.get_json(force=True) or {}
         folder = _svc.create(_project_id(), col_id, data.get("name", ""), data.get("parent_folder_id"))
+        enqueue("api_folder", folder["id"], "upsert")
         return jsonify({"ok": True, "folder": folder}), 201
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -49,6 +51,7 @@ def update_folder(folder_id):
     try:
         data = request.get_json(force=True) or {}
         folder = _svc.update(folder_id, _project_id(), data)
+        enqueue("api_folder", folder_id, "upsert")
         return jsonify({"ok": True, "folder": folder})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -63,6 +66,7 @@ def update_folder(folder_id):
 def delete_folder(folder_id):
     try:
         _svc.delete(folder_id, _project_id())
+        enqueue("api_folder", folder_id, "delete")
         return jsonify({"ok": True})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -81,6 +85,12 @@ def reorder_tree(col_id):
         if not items:
             return jsonify({"ok": False, "error": "items array is required"}), 400
         _svc.reorder(col_id, _project_id(), data.get("parent_folder_id"), items)
+        from cli.db import get_conn
+        conn = get_conn()
+        for row in conn.execute("SELECT id FROM api_folders WHERE collection_id = ?", (col_id,)).fetchall():
+            enqueue("api_folder", row["id"], "upsert")
+        for row in conn.execute("SELECT id FROM api_requests WHERE collection_id = ?", (col_id,)).fetchall():
+            enqueue("api_request", row["id"], "upsert")
         return jsonify({"ok": True})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404

@@ -62,6 +62,20 @@ def stop_api_collection_run(run_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/api-collection-runs/pull-team", methods=["POST"])
+def pull_team_api_runs():
+    try:
+        from cli.commands.pull import pull_api_run_history
+        pid = _project_id()
+        inserted = pull_api_run_history(pid)
+        return jsonify({"ok": True, "inserted": inserted})
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("pull_team_api_runs")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/api-collection-runs/<run_id>/report", methods=["GET"])
 def download_api_report(run_id):
     try:

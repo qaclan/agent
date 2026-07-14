@@ -4,6 +4,7 @@ import logging
 import zipfile
 from flask import Blueprint, request, jsonify, send_file
 from cli.config import get_active_project_id
+from cli.sync_queue import enqueue
 from web.api.repositories.collection_repo import CollectionRepo
 from web.api.repositories.collection_vars_repo import CollectionVarsRepo
 from web.api.services.collection_service import CollectionService
@@ -38,6 +39,7 @@ def create_collection():
     try:
         data = request.get_json(force=True)
         col = _svc.create(_project_id(), data.get("name", ""), data.get("description"))
+        enqueue("api_collection", col["id"], "upsert")
         return jsonify({"ok": True, "collection": col}), 201
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -64,6 +66,7 @@ def update_collection(col_id):
     try:
         data = request.get_json(force=True)
         col = _svc.update(col_id, _project_id(), data.get("name", ""), data.get("description"))
+        enqueue("api_collection", col_id, "upsert")
         return jsonify({"ok": True, "collection": col})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -78,6 +81,7 @@ def update_collection(col_id):
 def delete_collection(col_id):
     try:
         _svc.delete(col_id, _project_id())
+        enqueue("api_collection", col_id, "delete")
         return jsonify({"ok": True})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -104,6 +108,7 @@ def patch_collection(col_id):
             body.get("auth_type", col.get("auth_type", "none")),
             body.get("auth_config", col.get("auth_config", "{}")),
         )
+        enqueue("api_collection", col_id, "upsert")
         return jsonify({"ok": True, "collection": CollectionRepo().get(col_id, pid)})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -155,6 +160,7 @@ def upsert_collection_var(col_id, key):
             return jsonify({"ok": False, "error": "Not found"}), 404
         body = request.get_json(force=True) or {}
         result = CollectionVarsRepo().upsert(col_id, key, body.get("initial_value", ""))
+        enqueue("collection_vars", col_id, "upsert")
         return jsonify({"ok": True, "var": result})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -170,6 +176,7 @@ def delete_collection_var(col_id, key):
         if not CollectionRepo().get(col_id, pid):
             return jsonify({"ok": False, "error": "Not found"}), 404
         CollectionVarsRepo().delete(col_id, key)
+        enqueue("collection_vars", col_id, "upsert")
         return jsonify({"ok": True})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -215,6 +222,8 @@ def reorder_collections():
         if not ids:
             return jsonify({"ok": False, "error": "collection_ids array is required"}), 400
         _svc.reorder(_project_id(), ids)
+        for cid in ids:
+            enqueue("api_collection", cid, "upsert")
         return jsonify({"ok": True})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400

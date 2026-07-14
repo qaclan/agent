@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from flask import Blueprint, request, jsonify
 from cli.config import get_active_project_id
+from cli.sync_queue import enqueue
 from web.api.services.request_service import RequestService
 from web.api.services.runner_service import RunnerService
 
@@ -35,6 +36,7 @@ def create_request():
     try:
         data = request.get_json(force=True)
         req = _svc.create(_project_id(), data)
+        enqueue("api_request", req["id"], "upsert")
         return jsonify({"ok": True, "request": req}), 201
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
@@ -61,6 +63,7 @@ def update_request(req_id):
     try:
         data = request.get_json(force=True)
         req = _svc.update(req_id, _project_id(), data)
+        enqueue("api_request", req_id, "upsert")
         return jsonify({"ok": True, "request": req})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -79,6 +82,7 @@ def patch_request(req_id):
         patch = request.get_json(force=True) or {}
         merged = {**existing, **patch}
         req = _svc.update(req_id, pid, merged)
+        enqueue("api_request", req_id, "upsert")
         return jsonify({"ok": True, "request": req})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404
@@ -91,6 +95,7 @@ def patch_request(req_id):
 def delete_request(req_id):
     try:
         _svc.delete(req_id, _project_id())
+        enqueue("api_request", req_id, "delete")
         return jsonify({"ok": True})
     except LookupError as e:
         return jsonify({"ok": False, "error": str(e)}), 404

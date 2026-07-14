@@ -195,6 +195,8 @@ class RunnerService:
                 error_count=err_c,
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
+            from cli.sync_queue import enqueue
+            enqueue("api_collection_run", run_id, "upsert")
             logger.info("_execute_collection: run %s → %s", run_id, final_status)
 
     def run_collection(self, collection_id: str, project_id: str,
@@ -253,6 +255,8 @@ class RunnerService:
                 error_count=error_count,
                 finished_at=finished_at,
             )
+            from cli.sync_queue import enqueue
+            enqueue("api_collection_run", run_id, "upsert")
 
         return {
             "run_id": run_id,

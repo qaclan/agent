@@ -94,6 +94,20 @@ def delete_all_docs():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/docs/pull-team", methods=["POST"])
+def pull_team_docs():
+    try:
+        from cli.commands.pull import pull_api_docs_overlay
+        pid = _project_id()
+        changed = pull_api_docs_overlay(pid)
+        return jsonify({"ok": True, "changed": changed})
+    except (ValueError, RuntimeError) as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("pull_team_docs")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/docs/export/openapi", methods=["GET"])
 def export_openapi():
     try:
