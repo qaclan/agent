@@ -117,6 +117,25 @@ Cleanup:
 - `qaclan reset-runtime` — wipe just the runtime so `qaclan setup --runtime-only` can rebuild it (keeps DB, scripts, config, binary).
 - `qaclan uninstall` — wipe everything (binary, runtime, data).
 
+## Uninstalling
+
+```bash
+qaclan uninstall          # prompts, then removes everything below
+qaclan uninstall --yes    # skip the prompt
+```
+
+This permanently removes:
+- The `qaclan` binary (from `/usr/local/bin` on Linux/macOS, or `~/.qaclan/bin` on Windows).
+- PATH entries — the shell rc export on Linux/macOS, the user PATH registry entry on Windows.
+- `qaclan` entries from your shell history (Linux/macOS only).
+- The entire `~/.qaclan/` data directory — database, scripts, run artifacts, the isolated runtime (Node deps, venv, Chromium), config, and auth credentials.
+
+If `qaclan` itself isn't runnable, use the standalone scripts instead (`uninstall.sh` / `uninstall.ps1` — same binary+data removal, without the shell-history/rc scrubbing). Full breakdown of what each does: [docs/cli-reference.md](docs/cli-reference.md#uninstall).
+
+## CLI Reference
+
+Every command, flag, and what it does: **[docs/cli-reference.md](docs/cli-reference.md)**.
+
 ## Upgrading from older releases
 
 If you previously installed QAClan with global `npm install -g playwright` / `pip install playwright`, run:
