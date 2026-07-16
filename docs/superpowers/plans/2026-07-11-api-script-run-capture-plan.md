@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** During any script run (Run button or suite run), passively record the XHR/fetch traffic the browser makes, redact sensitive values the same way the other three Discovery paths do, surface it as a "Captured Requests" section on the run-detail view with checkboxes, and let the user save selected entries through the existing shared Discovery save flow (Save as Flow / Save as Library, with folder suggestion) — with zero new backend save endpoints.
+> **Revision 2026-07-17:** Spec changed capture from always-on to **opt-in, off by default** (see spec's Section 0 and revision note). This plan now includes a new Task 1.5 (DB column + route + UI checkbox wiring) before the harness tasks, and Tasks 3-6 gate their capture branch behind `QACLAN_CAPTURE_REQUESTS` plus truncate bodies at 200KB. Also fixes a gap in the original plan: `web/routes/scripts.py:run_script_solo` is a second call site that sets harness env vars independently of `execute_run` and was not covered by Task 7 — Task 1.5 now covers it too.
 
-**Architecture:** Each of the 4 language harness templates (`python_strategy.py`, `javascript_strategy.py`, `javascript_test_strategy.py`, `typescript_test_strategy.py` — `typescript_strategy.py` inherits `javascript_strategy.py`'s template verbatim, so it needs no direct edit) gets a capture buffer bolted onto its existing `_track_network`/`_trackNetwork` handlers, capped at 200 entries, filtered to the same resource types the other Discovery paths hide by default. On run completion the harness writes the raw capture into the same `*.artifacts.json` file it already writes `console_errors`/`network_failures` to (no new `QACLAN_*` env var, no new file). `web/routes/runs.py` reads that file (as it already does), converts the raw capture through a new adapter — `cli/api_discovery/captured_request_parser.py` — that wraps each entry as a synthetic HAR entry and calls the **existing** `parse_har()`, so redaction (`_redact_sensitive`), the browser-header skip-list, query-param splitting, and body/schema inference are reused, not duplicated. The already-redacted, already-shaped array is stored in a new `script_runs.captured_requests` column exactly the way `console_log`/`network_log` are stored today, and rendered in `app.js`'s existing per-script run-detail card via a new collapsible section that mirrors the existing "Diagnostics" toggle. "Save Selected" opens the **existing** `showRequestReviewModal()` (`request-review-modal.js`) with zero changes to it — the redacted array already matches the HAR-import request shape that modal (and its already-shipped Flow/Library radio + folder-suggestion checkbox from the variant-library and nested-folders specs) already consumes.
+**Goal:** During a suite run, when the user opts in via a checkbox, passively record the XHR/fetch traffic the browser makes, redact sensitive values the same way the other three Discovery paths do, surface it as a "Captured Requests" section on the run-detail view with checkboxes, and let the user save selected entries through the existing shared Discovery save flow (Save as Flow / Save as Library, with folder suggestion) — with zero new backend save endpoints.
+
+**Architecture:** Each of the 4 language harness templates (`python_strategy.py`, `javascript_strategy.py`, `javascript_test_strategy.py`, `typescript_test_strategy.py` — `typescript_strategy.py` inherits `javascript_strategy.py`'s template verbatim, so it needs no direct edit) gets a capture buffer bolted onto its existing `_track_network`/`_trackNetwork` handlers, gated behind a new `QACLAN_CAPTURE_REQUESTS` env var so opted-out runs do zero extra per-request work, capped at 200 entries with each body truncated at 200KB, filtered to the same resource types the other Discovery paths hide by default. On run completion the harness writes the raw capture into the same `*.artifacts.json` file it already writes `console_errors`/`network_failures` to (no new file — one new env var to gate it, per Task 1.5). `web/routes/runs.py` reads that file (as it already does), converts the raw capture through a new adapter — `cli/api_discovery/captured_request_parser.py` — that wraps each entry as a synthetic HAR entry and calls the **existing** `parse_har()`, so redaction (`_redact_sensitive`), the browser-header skip-list, query-param splitting, and body/schema inference are reused, not duplicated. The already-redacted, already-shaped array is stored in a new `script_runs.captured_requests` column exactly the way `console_log`/`network_log` are stored today, and rendered in `app.js`'s existing per-script run-detail card via a new collapsible section that mirrors the existing "Diagnostics" toggle. "Save Selected" opens the **existing** `showRequestReviewModal()` (`request-review-modal.js`) with zero changes to it — the redacted array already matches the HAR-import request shape that modal (and its already-shipped Flow/Library radio + folder-suggestion checkbox from the variant-library and nested-folders specs) already consumes.
 
 **Tech Stack:** Flask (`web/routes/runs.py`, existing per-route pattern — this route predates the routes/services/repos 3-layer split used in `web/api/`), raw `sqlite3` via `cli/db.py`, Python/JS/TS Playwright harness templates, vanilla JS (`web/static/app.js`, no build step).
 
@@ -19,7 +21,9 @@
 - **No new Discovery save endpoint, no new save-modal code.** The adapter's output must match the exact dict shape `cli/api_discovery/har_parser.py:parse_har()` already returns (`method, url, headers[], params[], body, body_type, name, request_schema, response_schema, response_status, response_headers, response_body, duration_ms`, headers/params as `{key,value,enabled}` arrays) so `showRequestReviewModal()` (`web/static/api/views/request-review-modal.js:90`) and the `/discover/save-requests` / `/discover/group-requests` / `/discover/save-library` routes it already posts to need zero changes.
 - Every new/modified harness capture step is wrapped so a capture failure never fails the run (spec decision: "A capture failure on one request is swallowed; never fails the run").
 - Cap is exactly 200 captured entries per run; entries past the cap are silently dropped, no warning surfaced (spec: "Out of Scope — Surfacing a warning when the 200-entry cap is hit").
+- Each entry's `request_body`/`response_body` is independently truncated at 200KB (`_CAPTURE_BODY_CAP_BYTES = 200_000`), silently, same convention as the count cap.
 - Filter out `resourceType` in `document`, `stylesheet`, `image`, `font`, `script` at harness capture time — same convention the spec calls out as already used by the other three discovery paths.
+- **Capture is opt-in, off by default.** Every harness reads `QACLAN_CAPTURE_REQUESTS` ("1"/"0", default "0") once at startup; when off, the capture branch returns immediately as its first statement, before any per-request work. Both env-var-setting call sites — `web/routes/runs.py:execute_run` and `web/routes/scripts.py:run_script_solo` — must set it (Task 1.5).
 - `window.api()` never throws — it returns `{ok: false, error}` on failure. Always check `res.ok === false`.
 
 ---
@@ -28,14 +32,15 @@
 
 | File | Change | Responsibility |
 |---|---|---|
-| `cli/db.py` | Modify | New `_migrate_captured_requests` migration — adds `captured_requests`/`captured_requests_count` columns to `script_runs` |
+| `cli/db.py` | Modify | New `_migrate_captured_requests` migration — adds `captured_requests`/`captured_requests_count` to `script_runs` AND `capture_requests` to `suite_runs` |
+| `web/routes/runs.py` | Modify | Task 1.5: read `capture_requests` from request body, persist on `suite_runs`, set `QACLAN_CAPTURE_REQUESTS` child env. Task 7: read raw capture from artifacts JSON, redact/shape via the new adapter, persist to DB, include in `get_run()` and `execute_run()` responses |
+| `web/routes/scripts.py` | Modify | Task 1.5: `run_script_solo` hardcodes `QACLAN_CAPTURE_REQUESTS=0` — second call site the original plan missed |
 | `cli/api_discovery/captured_request_parser.py` | Create | `parse_captured_requests()` — wraps raw harness capture as synthetic HAR entries, reuses `parse_har()` for redaction/shaping |
-| `cli/script_strategies/python_strategy.py` | Modify | Capture buffer + resource-type filter wired into `_track_network`; emitted in `_write_artifacts` |
+| `cli/script_strategies/python_strategy.py` | Modify | Capture buffer + resource-type filter + `QACLAN_CAPTURE_REQUESTS` gate + body truncation wired into `_track_network`; emitted in `_write_artifacts` |
 | `cli/script_strategies/javascript_strategy.py` | Modify | Same, JS harness (manual lifecycle); also owns the shared `_QACLAN_JS_NAMES` collision list used by JS-test/TS-test |
 | `cli/script_strategies/javascript_test_strategy.py` | Modify | Same, `@playwright/test` fixture harness |
 | `cli/script_strategies/typescript_test_strategy.py` | Modify | Same, TS-typed `@playwright/test` fixture harness |
-| `web/routes/runs.py` | Modify | Read raw capture from artifacts JSON, redact/shape via the new adapter, persist to DB, include in `get_run()` and `execute_run()` responses |
-| `web/static/app.js` | Modify | New collapsible "Captured Requests" section per script-result card in `showRunResults()`; selection state; "Save Selected" wired to the existing `showRequestReviewModal()` |
+| `web/static/app.js` | Modify | Task 1.5: "Capture API Requests" checkbox on the suite-run modal, wired into `POST /runs`. Task 8: new collapsible "Captured Requests" section per script-result card in `showRunResults()`; selection state; "Save Selected" wired to the existing `showRequestReviewModal()` |
 | `web/static/style.css` | Modify | Styling for the new captured-request rows, reusing existing `.diag-*`/`.method-badge`/`.btn-ghost.btn-sm` classes |
 
 No changes needed to: `typescript_strategy.py` (inherits `javascript_strategy.py`'s template), `request-review-modal.js`, `variant-comparison-modal.js`, any `web/api/routes/discovery.py` route, `cli/api_discovery/folder_suggester.py`, `cli/db.py`'s `api_folders`/`api_request_examples` tables — the entire Save as Flow / Save as Library / folder-suggestion pipeline already exists and is reused unmodified.
@@ -48,7 +53,8 @@ No changes needed to: `typescript_strategy.py` (inherits `javascript_strategy.py
 - Modify: `cli/db.py:153` (append call), after `_migrate_nested_folders(conn)` at line 220-222 (append function)
 
 **Interfaces:**
-- Produces: `script_runs.captured_requests` (TEXT, nullable — JSON array, already-redacted, review-modal-shaped) and `script_runs.captured_requests_count` (INTEGER DEFAULT 0), consumed by Task 6 (`runs.py` INSERT/SELECT).
+- Produces: `script_runs.captured_requests` (TEXT, nullable — JSON array, already-redacted, review-modal-shaped) and `script_runs.captured_requests_count` (INTEGER DEFAULT 0), consumed by Task 7 (`runs.py` INSERT/SELECT).
+- Produces: `suite_runs.capture_requests` (INTEGER DEFAULT 0 — the opt-in flag chosen for the run, same pattern as the existing `suite_runs.headless` column), consumed by Task 1.5 (`runs.py`'s `execute_run` INSERT) and `get_run()`'s response.
 
 - [ ] **Step 1: Write the failing verification script**
 
@@ -69,7 +75,11 @@ init_db(conn)
 cols = {row["name"] for row in conn.execute("PRAGMA table_info(script_runs)")}
 assert "captured_requests" in cols, f"captured_requests column missing: {cols}"
 assert "captured_requests_count" in cols, f"captured_requests_count column missing: {cols}"
-print("OK: script_runs has captured_requests + captured_requests_count")
+
+suite_cols = {row["name"] for row in conn.execute("PRAGMA table_info(suite_runs)")}
+assert "capture_requests" in suite_cols, f"suite_runs.capture_requests column missing: {suite_cols}"
+
+print("OK: script_runs has captured_requests + captured_requests_count, suite_runs has capture_requests")
 EOF
 python3 /tmp/qaclan_plan_verify/test_migration.py
 ```
@@ -77,7 +87,7 @@ python3 /tmp/qaclan_plan_verify/test_migration.py
 - [ ] **Step 2: Run it to confirm it fails**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_migration.py`
-Expected: `AssertionError: captured_requests column missing: {...}`
+Expected: `AssertionError: captured_requests column missing: {...}` (whichever assert hits first)
 
 - [ ] **Step 3: Implement the migration**
 
@@ -95,7 +105,8 @@ Then add the function definition right after `_migrate_nested_folders` (after it
 def _migrate_captured_requests(conn):
     """Add captured_requests (JSON array, already redacted/shaped via
     cli.api_discovery.captured_request_parser.parse_captured_requests) and
-    captured_requests_count to script_runs.
+    captured_requests_count to script_runs, and the opt-in capture_requests
+    flag to suite_runs (same pattern as suite_runs.headless).
     See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md."""
     for col, coltype in [
         ("captured_requests", "TEXT"),
@@ -105,13 +116,17 @@ def _migrate_captured_requests(conn):
             conn.execute(f"ALTER TABLE script_runs ADD COLUMN {col} {coltype}")
         except Exception:
             pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE suite_runs ADD COLUMN capture_requests INTEGER DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
     conn.commit()
 ```
 
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_migration.py`
-Expected: `OK: script_runs has captured_requests + captured_requests_count`
+Expected: `OK: script_runs has captured_requests + captured_requests_count, suite_runs has capture_requests`
 
 - [ ] **Step 5: Verify the real local DB migrates cleanly too**
 
@@ -127,6 +142,125 @@ git commit -m "feat(db): add captured_requests columns to script_runs"
 
 ---
 
+## Task 1.5: Opt-in wiring — checkbox → `POST /runs` → `suite_runs.capture_requests` → `QACLAN_CAPTURE_REQUESTS`
+
+**Files:**
+- Modify: `web/routes/runs.py` — `execute_run` (`capture_requests = data.get(...)` alongside the existing `headless = data.get("headless", False)` at line 239; child env at line 555 alongside `QACLAN_HEADLESS`; `suite_runs` INSERT at line 326-328; `get_run()`'s `sr.headless` select list at line 151)
+- Modify: `web/routes/scripts.py` — `run_script_solo` (child env, alongside its own `QACLAN_HEADLESS` setting)
+- Modify: `web/static/app.js` — suite-run modal (checkbox HTML near line 3990-3998, alongside `run-headless`/`run-stop-on-fail`; read + POST near line 4006/4017)
+
+**Interfaces:**
+- Consumes: `suite_runs.capture_requests` column (Task 1).
+- Produces: `QACLAN_CAPTURE_REQUESTS` env var ("1"/"0") on the harness subprocess — consumed by Tasks 3-6 (all 4 harness templates gate their capture branch on this).
+- Produces: `capture_requests` field on `get_run()`'s response (mirrors `headless`) so the run-detail view could show it was on/off (not required for this plan's UI, but keeps the row symmetric with the other run-config columns already selected there).
+
+This must land before Tasks 3-6, since those tasks' harness capture branches check for this env var's presence.
+
+- [ ] **Step 1: `runs.py` — read, persist, and pass through the flag**
+
+At line 239, alongside `headless = data.get("headless", False)`:
+
+```python
+        capture_requests = bool(data.get("capture_requests", False))
+```
+
+Extend the `suite_runs` INSERT (lines 326-328) to add the column:
+
+```python
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless, capture_requests) "
+            "VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?)",
+            (run_id, suite_id, project_id, environment_id, len(items), now, browser_type, resolution,
+             1 if headless else 0, 1 if capture_requests else 0),
+```
+
+(Adjust the literal status/placeholder count to match whatever the real statement looks like at edit time — the point is one new column, one new placeholder, one new bound value, appended at the end.)
+
+At line 555, alongside `child_env["QACLAN_HEADLESS"] = "1" if headless else "0"`:
+
+```python
+                child_env["QACLAN_CAPTURE_REQUESTS"] = "1" if capture_requests else "0"
+```
+
+Add `sr.capture_requests` to the `get_run()` select list at line 151, alongside `sr.headless`.
+
+- [ ] **Step 2: `scripts.py` — hardcode off for the solo-run path**
+
+In `run_script_solo`, alongside wherever `QACLAN_HEADLESS` is set on `child_env` (this function builds its own env dict inline rather than calling `execute_run`):
+
+```python
+        child_env["QACLAN_CAPTURE_REQUESTS"] = "0"
+```
+
+No request-body param added here — per spec Section 0, the solo quick-run path has no options UI at all and stays capture-off. A comment should note why, so a future editor doesn't assume this was an oversight:
+
+```python
+        # Solo quick-run has no options UI (browser/resolution/headless are also
+        # hardcoded here) — capture is opt-in via the suite-run modal only.
+        # See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md Section 0.
+        child_env["QACLAN_CAPTURE_REQUESTS"] = "0"
+```
+
+- [ ] **Step 3: Verify the env var reaches the child process**
+
+```bash
+python3 -c "
+import re
+runs_src = open('web/routes/runs.py').read()
+scripts_src = open('web/routes/scripts.py').read()
+assert 'QACLAN_CAPTURE_REQUESTS' in runs_src, 'runs.py missing QACLAN_CAPTURE_REQUESTS'
+assert 'QACLAN_CAPTURE_REQUESTS' in scripts_src, 'scripts.py missing QACLAN_CAPTURE_REQUESTS'
+assert 'capture_requests' in runs_src, 'runs.py missing capture_requests param/column'
+print('OK: both run call sites set QACLAN_CAPTURE_REQUESTS')
+"
+```
+
+- [ ] **Step 4: Add the checkbox to `app.js`'s suite-run modal**
+
+Alongside the existing `run-headless`/`run-stop-on-fail` checkboxes (~line 3990-3998):
+
+```js
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="run-capture-requests">
+        Capture API Requests
+      </label>
+```
+
+Alongside where `headless` is read and posted (~line 4006/4017):
+
+```js
+      const capture_requests = document.getElementById('run-capture-requests').checked
+      // ...
+      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, capture_requests, wait_timeout })
+```
+
+Unchecked by default (no `checked` attribute) — matches the spec's off-by-default decision.
+
+- [ ] **Step 5: Syntax-check and manual verification**
+
+Run: `node --check web/static/app.js` — expect exit code 0.
+
+Run: `python qaclan.py serve --port 7823`. Open a suite's "Run Suite" modal, confirm "Capture API Requests" appears unchecked alongside Headless/Stop on first failure. Run once with it unchecked, once checked; after each, inspect the DB:
+
+```bash
+python3 -c "
+from cli.db import get_conn
+conn = get_conn()
+row = conn.execute('SELECT capture_requests FROM suite_runs ORDER BY started_at DESC LIMIT 1').fetchone()
+print('capture_requests:', row['capture_requests'])
+"
+```
+
+Expected: `0` after the unchecked run, `1` after the checked run.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add web/routes/runs.py web/routes/scripts.py web/static/app.js
+git commit -m "feat(runs): add opt-in Capture API Requests checkbox, wire QACLAN_CAPTURE_REQUESTS to both run call sites"
+```
+
+---
+
 ## Task 2: `captured_request_parser.py` — redact/shape adapter
 
 **Files:**
@@ -135,7 +269,7 @@ git commit -m "feat(db): add captured_requests columns to script_runs"
 **Interfaces:**
 - Consumes: raw harness capture dicts, spec shape — `{method, url, request_headers: dict, request_body: str|None, status_code: int|None, response_headers: dict, response_body: str|None, duration_ms: int|None}` (one per entry, see spec Section 1 JSON example).
 - Consumes internally: `cli.api_discovery.har_parser.parse_har(har_json: dict) -> list[dict]` (existing, unchanged).
-- Produces: `parse_captured_requests(captured: list[dict]) -> list[dict]`, returning the exact `parse_har()` output shape — consumed by Task 6 (`runs.py`).
+- Produces: `parse_captured_requests(captured: list[dict]) -> list[dict]`, returning the exact `parse_har()` output shape — consumed by Task 7 (`runs.py`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -287,7 +421,8 @@ git commit -m "feat(api-discovery): add captured-request-to-HAR-shape adapter"
 - Modify: `cli/script_strategies/python_strategy.py:75-90` (`_write_artifacts`), `:110-129` (`_track_network`), `:389-394` (scaffold collision list)
 
 **Interfaces:**
-- Produces: `captured_requests` key in the JSON written to `QACLAN_ARTIFACTS_PATH`, consumed by Task 6 (`runs.py`'s extended `_read_artifacts`).
+- Produces: `captured_requests` key in the JSON written to `QACLAN_ARTIFACTS_PATH`, consumed by Task 7 (`runs.py`'s extended `_read_artifacts`).
+- Consumes: `QACLAN_CAPTURE_REQUESTS` env var (Task 1.5) — the capture branch is a no-op unless it's `"1"`.
 
 - [ ] **Step 1: Write the failing verification script**
 
@@ -330,13 +465,13 @@ env = os.environ.copy()
 env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
 env["QACLAN_HEADLESS"] = "1"
 env["QACLAN_BROWSER"] = "chromium"
+env["QACLAN_CAPTURE_REQUESTS"] = "1"  # opt-in flag — must be set or the capture branch never runs
 env["PLAYWRIGHT_BROWSERS_PATH"] = str(runtime_dir / "browsers")
 
 result = subprocess.run(
     [str(runtime_dir / "venv" / "bin" / "python"), str(script_path)],
     env=env, capture_output=True, text=True, timeout=30,
 )
-httpd.shutdown()
 assert result.returncode == 0, f"harness failed: {result.stdout}\n{result.stderr}"
 
 data = json.loads(artifacts_path.read_text())
@@ -350,6 +485,22 @@ assert entry["status_code"] == 200
 assert entry["duration_ms"] is not None
 assert '"ok": true' in entry["response_body"].lower()
 print("OK: python harness captured the fetch() call")
+
+# --- confirm the opt-in gate actually gates: capture OFF must yield an empty list ---
+# (fixture server stays up for this run — only shut down after, so the gate is
+# proven by the flag, not by the fetch having nothing to hit)
+env["QACLAN_CAPTURE_REQUESTS"] = "0"
+artifacts_path_off = Path(tempfile.mktemp(suffix=".json"))
+env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path_off)
+result_off = subprocess.run(
+    [str(runtime_dir / "venv" / "bin" / "python"), str(script_path)],
+    env=env, capture_output=True, text=True, timeout=30,
+)
+httpd.shutdown()
+assert result_off.returncode == 0, f"harness failed (capture off): {result_off.stdout}\n{result_off.stderr}"
+data_off = json.loads(artifacts_path_off.read_text())
+assert data_off.get("captured_requests") == [], f"capture ran despite QACLAN_CAPTURE_REQUESTS=0: {data_off['captured_requests']}"
+print("OK: python harness does not capture when QACLAN_CAPTURE_REQUESTS=0")
 EOF
 python3 /tmp/qaclan_plan_verify/test_python_harness.py
 ```
@@ -372,14 +523,29 @@ _in_flight = 0
 # --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
 # Records XHR/fetch traffic as a passive side effect of the run so it can be
 # saved as API requests afterward. Never fails the run — every capture step
-# is wrapped in a swallowed try/except.
+# is wrapped in a swallowed try/except. Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1,
+# checked once at startup so _capture_request() no-ops before touching anything
+# when the run didn't ask for capture.
+_CAPTURE_ENABLED = os.environ.get("QACLAN_CAPTURE_REQUESTS") == "1"
 _captured_requests = []
 _capture_starts = {}
 _CAPTURE_CAP = 200
+_CAPTURE_BODY_CAP_BYTES = 200_000
 _CAPTURE_SKIP_TYPES = {"document", "stylesheet", "image", "font", "script"}
 
 
+def _truncate_body(text):
+    if text is None:
+        return None
+    encoded = text.encode("utf-8", errors="ignore")
+    if len(encoded) <= _CAPTURE_BODY_CAP_BYTES:
+        return text
+    return encoded[:_CAPTURE_BODY_CAP_BYTES].decode("utf-8", errors="ignore")
+
+
 def _capture_request(req):
+    if not _CAPTURE_ENABLED:
+        return
     if req.resource_type in _CAPTURE_SKIP_TYPES:
         return
     start = _capture_starts.pop(id(req), None)
@@ -396,7 +562,7 @@ def _capture_request(req):
             "method": req.method,
             "url": req.url,
             "request_headers": dict(req.headers),
-            "request_body": req.post_data,
+            "request_body": _truncate_body(req.post_data),
             "status_code": resp.status if resp else None,
             "response_headers": dict(resp.headers) if resp else {},
             "response_body": None,
@@ -404,7 +570,7 @@ def _capture_request(req):
         }
         if resp is not None:
             try:
-                entry["response_body"] = resp.text()
+                entry["response_body"] = _truncate_body(resp.text())
             except Exception:
                 pass
         _captured_requests.append(entry)
@@ -417,7 +583,7 @@ def _track_network(page):
         global _in_flight
         if req.resource_type in ("xhr", "fetch"):
             _in_flight += 1
-        if req.resource_type not in _CAPTURE_SKIP_TYPES:
+        if _CAPTURE_ENABLED and req.resource_type not in _CAPTURE_SKIP_TYPES:
             _capture_starts[id(req)] = time.monotonic()
 
     def _on_done(req):
@@ -430,6 +596,8 @@ def _track_network(page):
     page.on("requestfinished", _on_done)
     page.on("requestfailed", _on_done)
 ```
+
+`os` is already imported at the top of the rendered harness (used elsewhere for env var reads like `QACLAN_HEADLESS`) — no new import needed.
 
 Then extend `_write_artifacts` (lines 75-90) to include the capture buffer:
 
@@ -461,13 +629,19 @@ Finally, extend the scaffold collision list (lines 389-394) so an action body ca
             "_SCREENSHOT", "_console_errors", "_network_failures", "_context_opts",
             "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
             "_in_flight", "_captured_requests", "_capture_starts", "_capture_request",
+            "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
+            "_CAPTURE_SKIP_TYPES", "_truncate_body",
         ):
 ```
 
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_python_harness.py`
-Expected: `OK: python harness captured the fetch() call`
+Expected both lines print:
+```
+OK: python harness captured the fetch() call
+OK: python harness does not capture when QACLAN_CAPTURE_REQUESTS=0
+```
 
 - [ ] **Step 5: Commit**
 
@@ -485,6 +659,7 @@ git commit -m "feat(harness): capture XHR/fetch traffic in the Python strategy"
 
 **Interfaces:**
 - Produces: `captured_requests` key in the JSON written to `QACLAN_ARTIFACTS_PATH`, same shape as Task 3.
+- Consumes: `QACLAN_CAPTURE_REQUESTS` env var (Task 1.5) — same gate as Task 3.
 - Note: unlike Python's fully-synchronous `sync_playwright` API, JS event handlers are not awaited by Playwright — `_captureRequest` is async, so every call is pushed onto a `_capturePending` array and awaited with `Promise.allSettled` before `run()` returns, otherwise the last in-flight capture could race the process exit and never make it into `_capturedRequests`.
 
 - [ ] **Step 1: Write the failing verification script**
@@ -526,13 +701,13 @@ env = os.environ.copy()
 env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
 env["QACLAN_HEADLESS"] = "1"
 env["QACLAN_BROWSER"] = "chromium"
+env["QACLAN_CAPTURE_REQUESTS"] = "1"  # opt-in flag — must be set or the capture branch never runs
 env["PLAYWRIGHT_BROWSERS_PATH"] = str(runtime_dir / "browsers")
 env["NODE_PATH"] = str(runtime_dir / "node_modules")
 
 result = subprocess.run(
     ["node", str(script_path)], env=env, capture_output=True, text=True, timeout=30,
 )
-httpd.shutdown()
 assert result.returncode == 0, f"harness failed: {result.stdout}\n{result.stderr}"
 
 data = json.loads(artifacts_path.read_text())
@@ -545,6 +720,19 @@ assert entry["status_code"] == 200
 assert entry["duration_ms"] is not None
 assert '"ok": true' in entry["response_body"].lower()
 print("OK: javascript harness captured the fetch() call")
+
+# --- confirm the opt-in gate actually gates ---
+env["QACLAN_CAPTURE_REQUESTS"] = "0"
+artifacts_path_off = Path(tempfile.mktemp(suffix=".json"))
+env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path_off)
+result_off = subprocess.run(
+    ["node", str(script_path)], env=env, capture_output=True, text=True, timeout=30,
+)
+httpd.shutdown()
+assert result_off.returncode == 0, f"harness failed (capture off): {result_off.stdout}\n{result_off.stderr}"
+data_off = json.loads(artifacts_path_off.read_text())
+assert data_off.get("captured_requests") == [], f"capture ran despite QACLAN_CAPTURE_REQUESTS=0: {data_off['captured_requests']}"
+print("OK: javascript harness does not capture when QACLAN_CAPTURE_REQUESTS=0")
 EOF
 python3 /tmp/qaclan_plan_verify/test_js_harness.py
 ```
@@ -571,13 +759,24 @@ let _inFlight = 0;
 // page.on() handlers, so every _captureRequest() call is tracked in
 // _capturePending and awaited before run() returns (see the finally block
 // below) — otherwise the last in-flight capture can race process exit.
+// Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1, checked once at startup.
+const _CAPTURE_ENABLED = process.env.QACLAN_CAPTURE_REQUESTS === '1';
 const _capturedRequests = [];
 const _captureStarts = new Map();
 const _capturePending = [];
 const _CAPTURE_CAP = 200;
+const _CAPTURE_BODY_CAP_BYTES = 200000;
 const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
 
+function _truncateBody(text) {
+  if (text == null) return text;
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= _CAPTURE_BODY_CAP_BYTES) return text;
+  return buf.subarray(0, _CAPTURE_BODY_CAP_BYTES).toString('utf-8');
+}
+
 async function _captureRequest(req) {
+  if (!_CAPTURE_ENABLED) return;
   if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
   const start = _captureStarts.get(req);
   _captureStarts.delete(req);
@@ -588,14 +787,14 @@ async function _captureRequest(req) {
       method: req.method(),
       url: req.url(),
       request_headers: await req.allHeaders(),
-      request_body: req.postData(),
+      request_body: _truncateBody(req.postData()),
       status_code: resp ? resp.status() : null,
       response_headers: resp ? await resp.allHeaders() : {},
       response_body: null,
       duration_ms: start != null ? Date.now() - start : null,
     };
     if (resp) {
-      try { entry.response_body = await resp.text(); } catch (_) {}
+      try { entry.response_body = _truncateBody(await resp.text()); } catch (_) {}
     }
     _capturedRequests.push(entry);
   } catch (_) {}
@@ -605,7 +804,7 @@ function _trackNetwork(page) {
   page.on('request', req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
-    if (!_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
+    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = req => {
     const t = req.resourceType();
@@ -658,13 +857,19 @@ _QACLAN_JS_NAMES = (
     "_SCREENSHOT", "_consoleErrors", "_networkFailures", "_contextOpts",
     "_writeArtifacts", "_browsers", "_browserType", "_inFlight",
     "_capturedRequests", "_captureStarts", "_capturePending",
+    "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
+    "_CAPTURE_SKIP_TYPES", "_truncateBody",
 )
 ```
 
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_js_harness.py`
-Expected: `OK: javascript harness captured the fetch() call`
+Expected both lines print:
+```
+OK: javascript harness captured the fetch() call
+OK: javascript harness does not capture when QACLAN_CAPTURE_REQUESTS=0
+```
 
 - [ ] **Step 5: Commit**
 
@@ -681,8 +886,8 @@ git commit -m "feat(harness): capture XHR/fetch traffic in the JavaScript strate
 - Modify: `cli/script_strategies/javascript_test_strategy.py:45-58` (`_trackNetwork`), `:84-113` (`test('qaclan', ...)` body + `finally`), `:115-128` (`test.afterAll`)
 
 **Interfaces:**
-- Produces: same as Task 3/4.
-- Consumes: `_QACLAN_JS_NAMES` from Task 4 (already covers this file via its existing `_js_body_warnings` import — no separate collision-list edit needed here).
+- Produces: same as Task 3/4, including the `QACLAN_CAPTURE_REQUESTS` gate.
+- Consumes: `_QACLAN_JS_NAMES` from Task 4 (already covers this file via its existing `_js_body_warnings` import, including the new `_CAPTURE_ENABLED`/`_CAPTURE_BODY_CAP_BYTES`/`_truncateBody` names — no separate collision-list edit needed here).
 
 - [ ] **Step 1: Write the failing verification script**
 
@@ -727,6 +932,7 @@ artifacts_path = Path(tempfile.mktemp(suffix=".json"))
 runtime_dir = Path.home() / ".qaclan" / "runtime"
 env = os.environ.copy()
 env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
+env["QACLAN_CAPTURE_REQUESTS"] = "1"  # opt-in flag — must be set or the capture branch never runs
 env["PLAYWRIGHT_BROWSERS_PATH"] = str(runtime_dir / "browsers")
 env["NODE_PATH"] = str(runtime_dir / "node_modules")
 
@@ -734,7 +940,6 @@ result = subprocess.run(
     ["npx", "playwright", "test", str(script_path), "--config", str(run_dir / "playwright.config.js")],
     env=env, capture_output=True, text=True, timeout=60, cwd=str(runtime_dir),
 )
-httpd.shutdown()
 assert result.returncode == 0, f"harness failed: {result.stdout}\n{result.stderr}"
 
 data = json.loads(artifacts_path.read_text())
@@ -745,6 +950,20 @@ entry = matches[0]
 assert entry["method"] == "GET"
 assert entry["status_code"] == 200
 print("OK: javascript_test harness captured the fetch() call")
+
+# --- confirm the opt-in gate actually gates ---
+env["QACLAN_CAPTURE_REQUESTS"] = "0"
+artifacts_path_off = Path(tempfile.mktemp(suffix=".json"))
+env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path_off)
+result_off = subprocess.run(
+    ["npx", "playwright", "test", str(script_path), "--config", str(run_dir / "playwright.config.js")],
+    env=env, capture_output=True, text=True, timeout=60, cwd=str(runtime_dir),
+)
+httpd.shutdown()
+assert result_off.returncode == 0, f"harness failed (capture off): {result_off.stdout}\n{result_off.stderr}"
+data_off = json.loads(artifacts_path_off.read_text())
+assert data_off.get("captured_requests") == [], f"capture ran despite QACLAN_CAPTURE_REQUESTS=0: {data_off['captured_requests']}"
+print("OK: javascript_test harness does not capture when QACLAN_CAPTURE_REQUESTS=0")
 EOF
 python3 /tmp/qaclan_plan_verify/test_jstest_harness.py
 ```
@@ -764,13 +983,24 @@ let _inFlight = 0;
 
 // --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
 // See javascript_strategy.py for the race-safety rationale on _capturePending.
+// Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1, checked once at startup.
+const _CAPTURE_ENABLED = process.env.QACLAN_CAPTURE_REQUESTS === '1';
 const _capturedRequests = [];
 const _captureStarts = new Map();
 const _capturePending = [];
 const _CAPTURE_CAP = 200;
+const _CAPTURE_BODY_CAP_BYTES = 200000;
 const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
 
+function _truncateBody(text) {
+  if (text == null) return text;
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= _CAPTURE_BODY_CAP_BYTES) return text;
+  return buf.subarray(0, _CAPTURE_BODY_CAP_BYTES).toString('utf-8');
+}
+
 async function _captureRequest(req) {
+  if (!_CAPTURE_ENABLED) return;
   if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
   const start = _captureStarts.get(req);
   _captureStarts.delete(req);
@@ -781,14 +1011,14 @@ async function _captureRequest(req) {
       method: req.method(),
       url: req.url(),
       request_headers: await req.allHeaders(),
-      request_body: req.postData(),
+      request_body: _truncateBody(req.postData()),
       status_code: resp ? resp.status() : null,
       response_headers: resp ? await resp.allHeaders() : {},
       response_body: null,
       duration_ms: start != null ? Date.now() - start : null,
     };
     if (resp) {
-      try { entry.response_body = await resp.text(); } catch (_) {}
+      try { entry.response_body = _truncateBody(await resp.text()); } catch (_) {}
     }
     _capturedRequests.push(entry);
   } catch (_) {}
@@ -798,7 +1028,7 @@ function _trackNetwork(page) {
   page.on('request', req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
-    if (!_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
+    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = req => {
     const t = req.resourceType();
@@ -844,7 +1074,11 @@ test.afterAll(() => {
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_jstest_harness.py`
-Expected: `OK: javascript_test harness captured the fetch() call`
+Expected both lines print:
+```
+OK: javascript_test harness captured the fetch() call
+OK: javascript_test harness does not capture when QACLAN_CAPTURE_REQUESTS=0
+```
 
 - [ ] **Step 5: Commit**
 
@@ -861,7 +1095,7 @@ git commit -m "feat(harness): capture XHR/fetch traffic in the JavaScript-test s
 - Modify: `cli/script_strategies/typescript_test_strategy.py:37-50` (`_trackNetwork`), `:76-105` (`test('qaclan', ...)` body + `finally`), `:107-120` (`test.afterAll`)
 
 **Interfaces:**
-- Produces: same as Task 3/4/5. This is the last harness template — `typescript_strategy.py` (non-test TS) needs no edit, it inherits `javascript_strategy.py`'s already-capturing template.
+- Produces: same as Task 3/4/5, including the `QACLAN_CAPTURE_REQUESTS` gate. This is the last harness template — `typescript_strategy.py` (non-test TS) needs no edit, it inherits `javascript_strategy.py`'s already-capturing template.
 
 - [ ] **Step 1: Write the failing verification script**
 
@@ -904,6 +1138,7 @@ artifacts_path = Path(tempfile.mktemp(suffix=".json"))
 runtime_dir = Path.home() / ".qaclan" / "runtime"
 env = os.environ.copy()
 env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path)
+env["QACLAN_CAPTURE_REQUESTS"] = "1"  # opt-in flag — must be set or the capture branch never runs
 env["PLAYWRIGHT_BROWSERS_PATH"] = str(runtime_dir / "browsers")
 env["NODE_PATH"] = str(runtime_dir / "node_modules")
 
@@ -911,7 +1146,6 @@ result = subprocess.run(
     ["npx", "playwright", "test", str(script_path), "--config", str(run_dir / "playwright.config.js")],
     env=env, capture_output=True, text=True, timeout=60, cwd=str(runtime_dir),
 )
-httpd.shutdown()
 assert result.returncode == 0, f"harness failed: {result.stdout}\n{result.stderr}"
 
 data = json.loads(artifacts_path.read_text())
@@ -922,6 +1156,20 @@ entry = matches[0]
 assert entry["method"] == "GET"
 assert entry["status_code"] == 200
 print("OK: typescript_test harness captured the fetch() call")
+
+# --- confirm the opt-in gate actually gates ---
+env["QACLAN_CAPTURE_REQUESTS"] = "0"
+artifacts_path_off = Path(tempfile.mktemp(suffix=".json"))
+env["QACLAN_ARTIFACTS_PATH"] = str(artifacts_path_off)
+result_off = subprocess.run(
+    ["npx", "playwright", "test", str(script_path), "--config", str(run_dir / "playwright.config.js")],
+    env=env, capture_output=True, text=True, timeout=60, cwd=str(runtime_dir),
+)
+httpd.shutdown()
+assert result_off.returncode == 0, f"harness failed (capture off): {result_off.stdout}\n{result_off.stderr}"
+data_off = json.loads(artifacts_path_off.read_text())
+assert data_off.get("captured_requests") == [], f"capture ran despite QACLAN_CAPTURE_REQUESTS=0: {data_off['captured_requests']}"
+print("OK: typescript_test harness does not capture when QACLAN_CAPTURE_REQUESTS=0")
 EOF
 python3 /tmp/qaclan_plan_verify/test_tstest_harness.py
 ```
@@ -941,6 +1189,8 @@ let _inFlight = 0;
 
 // --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
 // See javascript_strategy.py for the race-safety rationale on _capturePending.
+// Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1, checked once at startup.
+const _CAPTURE_ENABLED = process.env.QACLAN_CAPTURE_REQUESTS === '1';
 const _capturedRequests: Array<{
   method: string;
   url: string;
@@ -954,9 +1204,18 @@ const _capturedRequests: Array<{
 const _captureStarts = new Map<any, number>();
 const _capturePending: Promise<void>[] = [];
 const _CAPTURE_CAP = 200;
+const _CAPTURE_BODY_CAP_BYTES = 200000;
 const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
 
+function _truncateBody(text: string | null): string | null {
+  if (text == null) return text;
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= _CAPTURE_BODY_CAP_BYTES) return text;
+  return buf.subarray(0, _CAPTURE_BODY_CAP_BYTES).toString('utf-8');
+}
+
 async function _captureRequest(req: any): Promise<void> {
+  if (!_CAPTURE_ENABLED) return;
   if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
   const start = _captureStarts.get(req);
   _captureStarts.delete(req);
@@ -967,14 +1226,14 @@ async function _captureRequest(req: any): Promise<void> {
       method: req.method(),
       url: req.url(),
       request_headers: await req.allHeaders(),
-      request_body: req.postData(),
+      request_body: _truncateBody(req.postData()),
       status_code: resp ? resp.status() : null,
       response_headers: resp ? await resp.allHeaders() : {},
       response_body: null as string | null,
       duration_ms: start != null ? Date.now() - start : null,
     };
     if (resp) {
-      try { entry.response_body = await resp.text(); } catch (_) {}
+      try { entry.response_body = _truncateBody(await resp.text()); } catch (_) {}
     }
     _capturedRequests.push(entry);
   } catch (_) {}
@@ -984,7 +1243,7 @@ function _trackNetwork(page: any) {
   page.on('request', (req: any) => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
-    if (!_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
+    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = (req: any) => {
     const t = req.resourceType();
@@ -1030,7 +1289,11 @@ test.afterAll(() => {
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_tstest_harness.py`
-Expected: `OK: typescript_test harness captured the fetch() call`
+Expected both lines print:
+```
+OK: typescript_test harness captured the fetch() call
+OK: typescript_test harness does not capture when QACLAN_CAPTURE_REQUESTS=0
+```
 
 - [ ] **Step 5: Commit**
 
@@ -1048,6 +1311,7 @@ git commit -m "feat(harness): capture XHR/fetch traffic in the TypeScript-test s
 
 **Interfaces:**
 - Consumes: `cli.api_discovery.captured_request_parser.parse_captured_requests` (Task 2).
+- Consumes: `capture_requests`/`QACLAN_CAPTURE_REQUESTS` wiring already done in Task 1.5 — this task doesn't branch on the flag itself; when it's off, the harness just never populates `captured_requests` in the artifacts JSON, so `_read_artifacts` naturally returns `[]` and `parse_captured_requests([])` short-circuits to `[]` (see Task 2's `if not captured: return []`).
 - Produces: `captured_requests` (JSON text, already redacted) and `captured_requests_count` (int) on both the `get_run()` response and the immediate `execute_run()` response, matching how `console_log`/`network_log`/`console_errors`/`network_failures` are already exposed.
 
 - [ ] **Step 1: Add the import**
@@ -1432,21 +1696,27 @@ git commit -m "style(run-detail): add captured-request row styling"
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Full happy-path walkthrough**
+- [ ] **Step 1: Opt-in default-off walkthrough**
 
 Run: `python qaclan.py serve --port 7823`
 
+1. Run a suite **without** checking "Capture API Requests" (the checkbox's default state) — confirm the run-detail card shows no "Captured Requests" toggle at all, even though the script made XHR/fetch calls. Check the DB: `suite_runs.capture_requests` is `0`, `script_runs.captured_requests_count` is `0`/`NULL`.
+2. Run the same suite from the ▶ Run Script solo quick-action — confirm no Captured Requests section appears there either (solo run always hardcodes capture off, Task 1.5 Step 2).
+3. Re-run the suite **with** "Capture API Requests" checked — confirm the section now appears with the expected rows, and `suite_runs.capture_requests` is `1` in the DB.
+
+- [ ] **Step 2: Full happy-path walkthrough (capture ON)**
+
 1. Create/run a script that hits 2+ distinct endpoints, including at least one whose header or JSON field name matches the sensitive pattern (e.g. a request with an `Authorization` header) — confirm the Captured Requests list shows `{{AUTHORIZATION}}` in place of the raw value when a row is expanded/saved into the review modal (the review modal only shows header/param details on row-expand — verify via the modal's row detail view, not the collapsed list).
 2. Confirm static-asset requests (any `<img>`/`<link rel=stylesheet>` the test page loads) never appear in the Captured Requests list.
-3. Confirm the section is entirely absent (no empty toggle) for a script that made zero XHR/fetch calls.
+3. Confirm the section is entirely absent (no empty toggle) for a script that made zero XHR/fetch calls, same as when capture is off — both cases collapse to the same "nothing to show" state.
 4. Save via "Save as Flow" with "Organize into folders by endpoint" checked — confirm the saved request lands inside an auto-created folder (nested-folders feature, unmodified, already wired through `organize_into_folders`).
 5. Re-run the same script twice into the same collection, this time save via "Save as Library" — confirm the variant-comparison modal correctly groups the two runs' identical-endpoint requests.
 
-- [ ] **Step 2: Regression-check unrelated flows**
+- [ ] **Step 3: Regression-check unrelated flows**
 
-Confirm HAR import, OpenAPI import, and Record APIs mode (the three pre-existing Discovery paths) still work end to end — this plan added no code to `har_parser.py`'s existing call sites and no code to `discovery_service.py`, so this is a quick smoke check, not a deep regression pass.
+Confirm HAR import, OpenAPI import, and Record APIs mode (the three pre-existing Discovery paths) still work end to end — this plan added no code to `har_parser.py`'s existing call sites and no code to `discovery_service.py`, so this is a quick smoke check, not a deep regression pass. Also confirm an ordinary UI-only script (no API calls of interest, capture left off) runs and reports results exactly as before this plan — no new columns/UI visible, no behavior change for the default path.
 
-- [ ] **Step 3: Clean up verification artifacts**
+- [ ] **Step 4: Clean up verification artifacts**
 
 ```bash
 rm -rf /tmp/qaclan_plan_verify
