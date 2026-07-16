@@ -552,6 +552,9 @@ function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
   ).join('')
 
   const sizeClass = size ? ` modal-${size}` : ''
+  // Size #modal-root itself directly (not via CSS `:has()`, which needs Safari
+  // 15.4+) — mirrors showOverlayModal's inline-style approach below.
+  root.className = size ? `modal-${size}` : ''
   root.innerHTML = `
     <div class="modal-card${sizeClass}">
       <div class="modal-header">

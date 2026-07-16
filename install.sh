@@ -68,6 +68,16 @@ fi
 
 chmod +x "$TMP_FILE"
 
+# Ensure install dir exists (e.g. fresh macOS may lack /usr/local/bin)
+if [ ! -d "$INSTALL_DIR" ]; then
+    if [ -w "$(dirname "$INSTALL_DIR")" ]; then
+        mkdir -p "$INSTALL_DIR"
+    else
+        info "Creating ${INSTALL_DIR} requires sudo..."
+        sudo mkdir -p "$INSTALL_DIR"
+    fi
+fi
+
 # Install — use sudo if needed
 if [ -w "$INSTALL_DIR" ]; then
     mv "$TMP_FILE" "${INSTALL_DIR}/${BINARY_NAME}"

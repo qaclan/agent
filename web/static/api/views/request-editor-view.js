@@ -454,13 +454,23 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const _storedPathParams = r.path_params || [];
 
   // Matches single-brace {param} segments, excluding any brace that's part of
-  // a {{VAR}} token (even a malformed one missing its closing brace) — the
-  // lookbehind rejects an opening `{` immediately preceded by another `{`.
-  const PATH_VAR_RE = /(?<!\{)\{(?!\{)([^{}]+)\}(?!\})/g;
+  // a {{VAR}} token (even a malformed one missing its closing brace). Safari
+  // <16.4 has no lookbehind support, so adjacency is checked manually below
+  // instead of via `(?<!\{)`.
+  const PATH_VAR_RE = /\{([^{}]+)\}/g;
   let _lastPathKeys = [];
 
+  function _extractPathVarKeys(str) {
+    const keys = [];
+    for (const m of str.matchAll(PATH_VAR_RE)) {
+      if (str[m.index - 1] === '{' || str[m.index + m[0].length] === '}') continue;
+      keys.push(m[1]);
+    }
+    return keys;
+  }
+
   function _syncPathVars() {
-    const matches = [...urlInput.value.matchAll(PATH_VAR_RE)].map(m => m[1]);
+    const matches = _extractPathVarKeys(urlInput.value);
     const keys = [...new Set(matches)];
     _lastPathKeys = keys;
     const current = {};
@@ -491,7 +501,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     }
 
     if (newPath !== path) urlInput.value = newPath + query + hash;
-    _lastPathKeys = [...new Set([...newPath.matchAll(PATH_VAR_RE)].map(m => m[1]))];
+    _lastPathKeys = [...new Set(_extractPathVarKeys(newPath))];
   }
 
   urlInput.addEventListener('input', () => { _syncPathVars(); _syncQueryParamsFromUrl(); });

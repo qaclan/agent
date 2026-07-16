@@ -640,6 +640,7 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.65);
+  -webkit-backdrop-filter: blur(3px);
   backdrop-filter: blur(3px);
   z-index: 100;
   animation: fadeIn 0.15s ease;
@@ -660,15 +661,15 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   flex-direction: column;
   animation: modalIn 0.18s ease;
 }
-#modal-root:has(.modal-lg) { max-width: 960px; max-height: 92vh; }
-#modal-root:has(.modal-xl) { max-width: 1280px; max-height: 92vh; }
+#modal-root.modal-lg { max-width: 960px; max-height: 92vh; }
+#modal-root.modal-xl { max-width: 1280px; max-height: 92vh; }
 /* Run history: width mapped to the HTML report's .wrap (900px) + modal padding. */
-#modal-root:has(.modal-report) { max-width: 944px; max-height: 92vh; }
-#modal-root:has(.modal-lg) .modal-card,
-#modal-root:has(.modal-xl) .modal-card,
-#modal-root:has(.modal-report) .modal-card { max-height: 92vh; }
-#modal-root:has(.modal-lg) textarea#edit-script-content,
-#modal-root:has(.modal-lg) textarea#script-content { min-height: 55vh; }
+#modal-root.modal-report { max-width: 944px; max-height: 92vh; }
+#modal-root.modal-lg .modal-card,
+#modal-root.modal-xl .modal-card,
+#modal-root.modal-report .modal-card { max-height: 92vh; }
+#modal-root.modal-lg textarea#edit-script-content,
+#modal-root.modal-lg textarea#script-content { min-height: 55vh; }
 
 .form-hint {
   color: var(--text-secondary);
@@ -1769,6 +1770,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .kv-table td { padding: 3px 6px; }
 .kv-table .kv-key, .kv-table .kv-value { width: 100%; }
 .kv-value--var-ref {
+  background: rgba(92, 107, 192, 0.08) !important;
   background: color-mix(in srgb, var(--primary, #5C6BC0) 8%, transparent) !important;
   border-color: var(--primary, #5C6BC0) !important;
   font-family: var(--font-mono);
@@ -1784,6 +1786,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   font-family: var(--font-mono);
 }
 .kv-value--file {
+  background: rgba(136, 136, 136, 0.10) !important;
   background: color-mix(in srgb, var(--text-muted, #888) 10%, transparent) !important;
   font-style: italic;
   color: var(--text-muted);
