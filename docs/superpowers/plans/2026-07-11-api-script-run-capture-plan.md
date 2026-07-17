@@ -3,10 +3,12 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 > **Revision 2026-07-17:** Spec changed capture from always-on to **opt-in, off by default** (see spec's Section 0 and revision note). This plan now includes a new Task 1.5 (DB column + route + UI checkbox wiring) before the harness tasks, and Tasks 3-6 gate their capture branch behind `QACLAN_CAPTURE_REQUESTS` plus truncate bodies at 200KB. Also fixes a gap in the original plan: `web/routes/scripts.py:run_script_solo` is a second call site that sets harness env vars independently of `execute_run` and was not covered by Task 7 — Task 1.5 now covers it too.
+>
+> **Revision 2026-07-17 (2):** Spec's persistence decision changed again — the redacted array is **never written to `script_runs`**, only `captured_requests_count` (int) is. The full array only ever exists in `execute_run()`'s immediate JSON response; the frontend carries it client-side for "Save Selected" (which already posts pre-parsed requests directly to the existing save routes — no server re-fetch involved). `get_run()` (revisiting a run later) only ever returns the count. This removes the `script_runs.captured_requests` TEXT column from Task 1, reworks Task 7's persist step, and adds a "historical, count-only" render branch to Task 8. See spec Section 0.5.
 
 **Goal:** During a suite run, when the user opts in via a checkbox, passively record the XHR/fetch traffic the browser makes, redact sensitive values the same way the other three Discovery paths do, surface it as a "Captured Requests" section on the run-detail view with checkboxes, and let the user save selected entries through the existing shared Discovery save flow (Save as Flow / Save as Library, with folder suggestion) — with zero new backend save endpoints.
 
-**Architecture:** Each of the 4 language harness templates (`python_strategy.py`, `javascript_strategy.py`, `javascript_test_strategy.py`, `typescript_test_strategy.py` — `typescript_strategy.py` inherits `javascript_strategy.py`'s template verbatim, so it needs no direct edit) gets a capture buffer bolted onto its existing `_track_network`/`_trackNetwork` handlers, gated behind a new `QACLAN_CAPTURE_REQUESTS` env var so opted-out runs do zero extra per-request work, capped at 200 entries with each body truncated at 200KB, filtered to the same resource types the other Discovery paths hide by default. On run completion the harness writes the raw capture into the same `*.artifacts.json` file it already writes `console_errors`/`network_failures` to (no new file — one new env var to gate it, per Task 1.5). `web/routes/runs.py` reads that file (as it already does), converts the raw capture through a new adapter — `cli/api_discovery/captured_request_parser.py` — that wraps each entry as a synthetic HAR entry and calls the **existing** `parse_har()`, so redaction (`_redact_sensitive`), the browser-header skip-list, query-param splitting, and body/schema inference are reused, not duplicated. The already-redacted, already-shaped array is stored in a new `script_runs.captured_requests` column exactly the way `console_log`/`network_log` are stored today, and rendered in `app.js`'s existing per-script run-detail card via a new collapsible section that mirrors the existing "Diagnostics" toggle. "Save Selected" opens the **existing** `showRequestReviewModal()` (`request-review-modal.js`) with zero changes to it — the redacted array already matches the HAR-import request shape that modal (and its already-shipped Flow/Library radio + folder-suggestion checkbox from the variant-library and nested-folders specs) already consumes.
+**Architecture:** Each of the 4 language harness templates (`python_strategy.py`, `javascript_strategy.py`, `javascript_test_strategy.py`, `typescript_test_strategy.py` — `typescript_strategy.py` inherits `javascript_strategy.py`'s template verbatim, so it needs no direct edit) gets a capture buffer bolted onto its existing `_track_network`/`_trackNetwork` handlers, gated behind a new `QACLAN_CAPTURE_REQUESTS` env var so opted-out runs do zero extra per-request work, capped at 200 entries with each body truncated at 200KB, filtered to the same resource types the other Discovery paths hide by default. On run completion the harness writes the raw capture into the same `*.artifacts.json` file it already writes `console_errors`/`network_failures` to (no new file — one new env var to gate it, per Task 1.5). `web/routes/runs.py` reads that file (as it already does), converts the raw capture through a new adapter — `cli/api_discovery/captured_request_parser.py` — that wraps each entry as a synthetic HAR entry and calls the **existing** `parse_har()`, so redaction (`_redact_sensitive`), the browser-header skip-list, query-param splitting, and body/schema inference are reused, not duplicated. **The redacted array is never persisted** — only its length (`script_runs.captured_requests_count`, an int) is written to the DB; the array itself rides along solely in `execute_run()`'s own JSON response (see spec Section 0.5 for why: unsaved captures shouldn't cost indefinite storage, and a DB-resident array can silently go stale). `app.js`'s existing per-script run-detail card renders a new collapsible section mirroring the "Diagnostics" toggle: interactive (checkboxes + Save Selected) when the current response carries the full array, a static "captured N requests (not saved)" line when only the count survived (revisiting from run history). "Save Selected" opens the **existing** `showRequestReviewModal()` (`request-review-modal.js`) with zero changes to it, handing it the array already sitting in the page's own memory — the redacted array already matches the HAR-import request shape that modal (and its already-shipped Flow/Library radio + folder-suggestion checkbox from the variant-library and nested-folders specs) already consumes.
 
 **Tech Stack:** Flask (`web/routes/runs.py`, existing per-route pattern — this route predates the routes/services/repos 3-layer split used in `web/api/`), raw `sqlite3` via `cli/db.py`, Python/JS/TS Playwright harness templates, vanilla JS (`web/static/app.js`, no build step).
 
@@ -17,8 +19,8 @@
 - No automated test framework exists in this repo. Backend Python is verified with `python3 -c` inline assertions; harness template changes are verified by actually rendering the template and running it through the real Playwright runtime at `~/.qaclan/runtime/` against a local fixture HTTP server (not just a syntax check — Playwright event-handler races are a real risk in the JS/TS harnesses, see Task 4); frontend DOM changes are verified by running `python qaclan.py serve --port 7823` and clicking through, per this repo's established convention (see `docs/superpowers/plans/2026-07-10-api-variant-library-plan.md`, `docs/superpowers/plans/2026-07-11-nested-folders-drag-drop.md`).
 - Python targets 3.10+ typing style (`str | None`, `list[dict]`).
 - New SQL changes are one new `_migrate_xxx(conn)` function in `cli/db.py`, appended to the end of the call chain inside `init_db()` — never reorder or remove existing `_migrate_*` calls. The chain currently ends with `_migrate_nested_folders(conn)` (`cli/db.py:153`).
-- **Redact once, at write time — never persist raw secrets.** The conversion from raw harness capture to the redacted, review-modal-ready shape happens in `web/routes/runs.py` before the `INSERT INTO script_runs`. The `script_runs.captured_requests` column only ever holds the already-redacted array — this matches how HAR import and Record APIs mode never persist raw secrets either (`cli/api_discovery/har_parser.py`'s `_redact_sensitive` runs at parse time, before anything is saved).
-- **No new Discovery save endpoint, no new save-modal code.** The adapter's output must match the exact dict shape `cli/api_discovery/har_parser.py:parse_har()` already returns (`method, url, headers[], params[], body, body_type, name, request_schema, response_schema, response_status, response_headers, response_body, duration_ms`, headers/params as `{key,value,enabled}` arrays) so `showRequestReviewModal()` (`web/static/api/views/request-review-modal.js:90`) and the `/discover/save-requests` / `/discover/group-requests` / `/discover/save-library` routes it already posts to need zero changes.
+- **Redact once, before it ever leaves the server — never persist raw secrets, never persist the array at all.** The conversion from raw harness capture to the redacted, review-modal-ready shape happens in `web/routes/runs.py` before the array is put on the `execute_run()` response. Nothing about the array — redacted or not — is written to the DB; only `script_runs.captured_requests_count` (an int) is. This matches how HAR import and Record APIs mode never persist raw secrets either (`cli/api_discovery/har_parser.py`'s `_redact_sensitive` runs at parse time, before anything is saved) and goes one step further: the DB never sees the captured array in any form (see spec Section 0.5).
+- **No new Discovery save endpoint, no new save-modal code.** The adapter's output must match the exact dict shape `cli/api_discovery/har_parser.py:parse_har()` already returns (`method, url, headers[], params[], body, body_type, name, request_schema, response_schema, response_status, response_headers, response_body, duration_ms`, headers/params as `{key,value,enabled}` arrays) so `showRequestReviewModal()` (`web/static/api/views/request-review-modal.js:90`) and the `/discover/save-requests` / `/discover/group-requests` / `/discover/save-library` routes it already posts to need zero changes — the frontend hands them the array it already has in memory, no server round-trip to re-fetch it.
 - Every new/modified harness capture step is wrapped so a capture failure never fails the run (spec decision: "A capture failure on one request is swallowed; never fails the run").
 - Cap is exactly 200 captured entries per run; entries past the cap are silently dropped, no warning surfaced (spec: "Out of Scope — Surfacing a warning when the 200-entry cap is hit").
 - Each entry's `request_body`/`response_body` is independently truncated at 200KB (`_CAPTURE_BODY_CAP_BYTES = 200_000`), silently, same convention as the count cap.
@@ -32,8 +34,8 @@
 
 | File | Change | Responsibility |
 |---|---|---|
-| `cli/db.py` | Modify | New `_migrate_captured_requests` migration — adds `captured_requests`/`captured_requests_count` to `script_runs` AND `capture_requests` to `suite_runs` |
-| `web/routes/runs.py` | Modify | Task 1.5: read `capture_requests` from request body, persist on `suite_runs`, set `QACLAN_CAPTURE_REQUESTS` child env. Task 7: read raw capture from artifacts JSON, redact/shape via the new adapter, persist to DB, include in `get_run()` and `execute_run()` responses |
+| `cli/db.py` | Modify | New `_migrate_captured_requests` migration — adds `captured_requests_count` (int only, no raw array column) to `script_runs` AND `capture_requests` to `suite_runs` |
+| `web/routes/runs.py` | Modify | Task 1.5: read `capture_requests` from request body, persist on `suite_runs`, set `QACLAN_CAPTURE_REQUESTS` child env. Task 7: read raw capture from artifacts JSON, redact/shape via the new adapter, persist only the count to DB, include the full redacted array in `execute_run()`'s own response only (`get_run()` returns count only) |
 | `web/routes/scripts.py` | Modify | Task 1.5: `run_script_solo` hardcodes `QACLAN_CAPTURE_REQUESTS=0` — second call site the original plan missed |
 | `cli/api_discovery/captured_request_parser.py` | Create | `parse_captured_requests()` — wraps raw harness capture as synthetic HAR entries, reuses `parse_har()` for redaction/shaping |
 | `cli/script_strategies/python_strategy.py` | Modify | Capture buffer + resource-type filter + `QACLAN_CAPTURE_REQUESTS` gate + body truncation wired into `_track_network`; emitted in `_write_artifacts` |
@@ -47,13 +49,13 @@ No changes needed to: `typescript_strategy.py` (inherits `javascript_strategy.py
 
 ---
 
-## Task 1: DB migration — `captured_requests` columns on `script_runs`
+## Task 1: DB migration — `captured_requests_count` column on `script_runs`
 
 **Files:**
 - Modify: `cli/db.py:153` (append call), after `_migrate_nested_folders(conn)` at line 220-222 (append function)
 
 **Interfaces:**
-- Produces: `script_runs.captured_requests` (TEXT, nullable — JSON array, already-redacted, review-modal-shaped) and `script_runs.captured_requests_count` (INTEGER DEFAULT 0), consumed by Task 7 (`runs.py` INSERT/SELECT).
+- Produces: `script_runs.captured_requests_count` (INTEGER DEFAULT 0) — count only, no raw/redacted array column. The array itself is never persisted (spec Section 0.5) — it lives solely in `execute_run()`'s own JSON response. Consumed by Task 7 (`runs.py` INSERT/SELECT).
 - Produces: `suite_runs.capture_requests` (INTEGER DEFAULT 0 — the opt-in flag chosen for the run, same pattern as the existing `suite_runs.headless` column), consumed by Task 1.5 (`runs.py`'s `execute_run` INSERT) and `get_run()`'s response.
 
 - [ ] **Step 1: Write the failing verification script**
@@ -73,13 +75,13 @@ conn.row_factory = sqlite3.Row
 init_db(conn)
 
 cols = {row["name"] for row in conn.execute("PRAGMA table_info(script_runs)")}
-assert "captured_requests" in cols, f"captured_requests column missing: {cols}"
 assert "captured_requests_count" in cols, f"captured_requests_count column missing: {cols}"
+assert "captured_requests" not in cols, "captured_requests raw-array column should NOT exist — count only, see spec Section 0.5"
 
 suite_cols = {row["name"] for row in conn.execute("PRAGMA table_info(suite_runs)")}
 assert "capture_requests" in suite_cols, f"suite_runs.capture_requests column missing: {suite_cols}"
 
-print("OK: script_runs has captured_requests + captured_requests_count, suite_runs has capture_requests")
+print("OK: script_runs has captured_requests_count (no raw array column), suite_runs has capture_requests")
 EOF
 python3 /tmp/qaclan_plan_verify/test_migration.py
 ```
@@ -87,7 +89,7 @@ python3 /tmp/qaclan_plan_verify/test_migration.py
 - [ ] **Step 2: Run it to confirm it fails**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_migration.py`
-Expected: `AssertionError: captured_requests column missing: {...}` (whichever assert hits first)
+Expected: `AssertionError: captured_requests_count column missing: {...}` (whichever assert hits first)
 
 - [ ] **Step 3: Implement the migration**
 
@@ -103,19 +105,15 @@ Then add the function definition right after `_migrate_nested_folders` (after it
 
 ```python
 def _migrate_captured_requests(conn):
-    """Add captured_requests (JSON array, already redacted/shaped via
-    cli.api_discovery.captured_request_parser.parse_captured_requests) and
-    captured_requests_count to script_runs, and the opt-in capture_requests
+    """Add captured_requests_count to script_runs (count only — the redacted
+    array itself is never persisted, it only ever exists in execute_run()'s
+    own response, see spec Section 0.5), and the opt-in capture_requests
     flag to suite_runs (same pattern as suite_runs.headless).
     See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md."""
-    for col, coltype in [
-        ("captured_requests", "TEXT"),
-        ("captured_requests_count", "INTEGER DEFAULT 0"),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE script_runs ADD COLUMN {col} {coltype}")
-        except Exception:
-            pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE script_runs ADD COLUMN captured_requests_count INTEGER DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
     try:
         conn.execute("ALTER TABLE suite_runs ADD COLUMN capture_requests INTEGER DEFAULT 0")
     except Exception:
@@ -126,7 +124,7 @@ def _migrate_captured_requests(conn):
 - [ ] **Step 4: Run it to confirm it passes**
 
 Run: `python3 /tmp/qaclan_plan_verify/test_migration.py`
-Expected: `OK: script_runs has captured_requests + captured_requests_count, suite_runs has capture_requests`
+Expected: `OK: script_runs has captured_requests_count (no raw array column), suite_runs has capture_requests`
 
 - [ ] **Step 5: Verify the real local DB migrates cleanly too**
 
@@ -137,7 +135,7 @@ Expected: `migrated real db OK` (no exception)
 
 ```bash
 git add cli/db.py
-git commit -m "feat(db): add captured_requests columns to script_runs"
+git commit -m "feat(db): add captured_requests_count column to script_runs"
 ```
 
 ---
@@ -1312,7 +1310,7 @@ git commit -m "feat(harness): capture XHR/fetch traffic in the TypeScript-test s
 **Interfaces:**
 - Consumes: `cli.api_discovery.captured_request_parser.parse_captured_requests` (Task 2).
 - Consumes: `capture_requests`/`QACLAN_CAPTURE_REQUESTS` wiring already done in Task 1.5 — this task doesn't branch on the flag itself; when it's off, the harness just never populates `captured_requests` in the artifacts JSON, so `_read_artifacts` naturally returns `[]` and `parse_captured_requests([])` short-circuits to `[]` (see Task 2's `if not captured: return []`).
-- Produces: `captured_requests` (JSON text, already redacted) and `captured_requests_count` (int) on both the `get_run()` response and the immediate `execute_run()` response, matching how `console_log`/`network_log`/`console_errors`/`network_failures` are already exposed.
+- Produces (asymmetric — see spec Section 0.5, this is intentional, not an oversight to "fix" later): `captured_requests` (JSON text, already redacted) **and** `captured_requests_count` (int) on the immediate `execute_run()` response only. `get_run()`'s response carries `captured_requests_count` **only** — the array is never persisted, so there's nothing else for a later `GET` to return.
 
 - [ ] **Step 1: Add the import**
 
@@ -1371,7 +1369,7 @@ with:
                     captured_requests = []
 ```
 
-Then update the `INSERT INTO script_runs` a few lines below (lines 623-634) to persist it:
+Then update the `INSERT INTO script_runs` a few lines below (lines 623-634) — this persists **only the count**, never the array (spec Section 0.5: the redacted array is deliberately never written to the DB):
 
 ```python
                 error_detail_json = json.dumps(error_detail) if error_detail else None
@@ -1379,20 +1377,22 @@ Then update the `INSERT INTO script_runs` a few lines below (lines 623-634) to p
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
                     "duration_ms, error_message, error_detail, console_errors, network_failures, "
-                    "console_log, network_log, screenshot_path, captured_requests, captured_requests_count, "
+                    "console_log, network_log, screenshot_path, captured_requests_count, "
                     "started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"], status,
                      duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
-                     saved_screenshot, captured_requests_json, len(captured_requests),
+                     saved_screenshot, len(captured_requests),
                      script_now, finished_at),
                 )
 ```
 
-And extend the in-memory `script_results.append(...)` right below it (lines 636-648) so the immediate `execute_run()` response also carries it:
+`captured_requests_json` is still computed here — it's not for the INSERT (which never references it), it's for the `script_results.append(...)` below, i.e. this HTTP response only.
+
+And extend the in-memory `script_results.append(...)` right below it (lines 636-648) so the immediate `execute_run()` response carries the full array (this is the *only* place it exists — nothing reads it back from the DB):
 
 ```python
                 script_results.append({
@@ -1425,7 +1425,7 @@ Around line 661, apply the same pattern:
                     captured_requests = []
 ```
 
-Update the timeout-path `INSERT` (lines 666-677):
+Update the timeout-path `INSERT` (lines 666-677) — same count-only persistence as the success path:
 
 ```python
                 error_detail_json = json.dumps(error_detail)
@@ -1433,15 +1433,15 @@ Update the timeout-path `INSERT` (lines 666-677):
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
                     "duration_ms, error_message, error_detail, console_errors, network_failures, "
-                    "console_log, network_log, screenshot_path, captured_requests, captured_requests_count, "
+                    "console_log, network_log, screenshot_path, captured_requests_count, "
                     "started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"],
                      duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
-                     saved_screenshot, captured_requests_json, len(captured_requests),
+                     saved_screenshot, len(captured_requests),
                      script_now, finished_at),
                 )
 ```
@@ -1466,16 +1466,16 @@ And the timeout-path `script_results.append(...)` (lines 678-690):
                 })
 ```
 
-- [ ] **Step 5: Expose it in `get_run()`**
+- [ ] **Step 5: Expose the count (only) in `get_run()`**
 
-Update the `script_rows` query (lines 161-167):
+Update the `script_rows` query (lines 161-167) — `scr.captured_requests` (the array) is deliberately **not** selected here; that column doesn't exist (Task 1 only added `captured_requests_count`). A run revisited later via `get_run()` gets the count only, never the array — see spec Section 0.5 and Task 8's "historical" render state.
 
 ```python
         script_rows = conn.execute(
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
             "scr.console_errors, scr.network_failures, scr.error_message, scr.error_detail, "
             "scr.console_log, scr.network_log, scr.screenshot_path, "
-            "scr.captured_requests, scr.captured_requests_count, "
+            "scr.captured_requests_count, "
             "scr.order_index, scr.started_at, scr.finished_at "
             "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
             "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
@@ -1483,25 +1483,28 @@ Update the `script_rows` query (lines 161-167):
         ).fetchall()
 ```
 
-No further change needed in the loop below it — `dict(sr)` already carries the two new columns through unchanged, exactly like `console_log`/`network_log`.
+No further change needed in the loop below it — `dict(sr)` already carries the new column through unchanged, exactly like `console_log`/`network_log`. Note the resulting row has `captured_requests_count` but no `captured_requests` key at all — Task 8's frontend code must treat a missing/absent `s.captured_requests` (as opposed to a present-but-empty one) as the "historical" case, not the "zero captures" case.
 
 - [ ] **Step 6: Verify with a real run through the web UI**
 
 Run: `python qaclan.py serve --port 7823`
 
-In the browser: create a Web script whose recorded actions hit any real endpoint that fires an XHR/fetch (e.g. record a visit to a page with an API call, or manually add a script that does `page.goto("https://httpbin.org/")` — httpbin's homepage fires no XHR, so prefer a page you know issues one, or reuse the local fixture from Task 3's verification by pointing a script at `http://127.0.0.1:8934/index.html` while that fixture server is running standalone: `python3 -m http.server 8934 --directory /tmp/qaclan_plan_verify_fixture` after copying the two fixture files there). Add the script to a suite, run it, then:
+In the browser: create a Web script whose recorded actions hit any real endpoint that fires an XHR/fetch (e.g. record a visit to a page with an API call, or manually add a script that does `page.goto("https://httpbin.org/")` — httpbin's homepage fires no XHR, so prefer a page you know issues one, or reuse the local fixture from Task 3's verification by pointing a script at `http://127.0.0.1:8934/index.html` while that fixture server is running standalone: `python3 -m http.server 8934 --directory /tmp/qaclan_plan_verify_fixture` after copying the two fixture files there). Add the script to a suite, run it. First confirm the DB only ever got the count (the array must NOT be there — this is the persistence-model guarantee, not just an implementation detail):
 
 ```bash
 python3 -c "
 from cli.db import get_conn
 conn = get_conn()
-row = conn.execute('SELECT captured_requests, captured_requests_count FROM script_runs ORDER BY started_at DESC LIMIT 1').fetchone()
+row = conn.execute('SELECT * FROM script_runs ORDER BY started_at DESC LIMIT 1').fetchone()
+cols = row.keys()
+assert 'captured_requests' not in cols, f'raw array column should not exist: {cols}'
 print('count:', row['captured_requests_count'])
-print('has data.json entry:', 'data.json' in (row['captured_requests'] or ''))
 "
 ```
 
-Expected: `count: 1` (or more) and `has data.json entry: True`.
+Expected: `count: 1` (or more), no `AssertionError`.
+
+Then confirm the *response* (not the DB) carried the array — check the terminal running `qaclan.py serve` for the POST `/api/runs` request, or simply proceed to Task 8's manual verification, which confirms the same fact through the UI (the Captured Requests section only renders with picker/Save when there's something to render from).
 
 - [ ] **Step 7: Commit**
 
@@ -1518,8 +1521,9 @@ git commit -m "feat(runs): persist and expose redacted captured requests per scr
 - Modify: `web/static/app.js` — inside `showRunResults()` (starts at line 4024; add the new block near the existing `diagnosticsBlock` around line 4113-4142, insert into the returned template around line 4195-4211), plus two new top-level functions
 
 **Interfaces:**
-- Consumes: `s.captured_requests` (JSON text, already redacted) / `s.captured_requests_count` from Task 7's response shape.
+- Consumes: `s.captured_requests` (JSON text, already redacted — present **only** on the immediate `execute_run()` response, absent on `get_run()`'s response, see Task 7 Step 5) / `s.captured_requests_count` (always present when capture ran, from either response shape).
 - Consumes: `showRequestReviewModal(requests, defaultCollectionName, startUrl)` from `web/static/api/views/request-review-modal.js:90` (existing, unchanged) — via dynamic `import()`, matching how `app.js` is loaded as a classic (non-module) script while the `api/` views are ES modules.
+- Two render states, both driven by what's actually in `s` (spec Section 0.5) — not by any separate "is this fresh" flag: **fresh** when `s.captured_requests` is present (interactive picker + Save Selected), **historical** when it's absent but `s.captured_requests_count > 0` (static count line, no picker — the array to back one was never persisted). Absent entirely when the count is 0 or missing.
 
 - [ ] **Step 1: Add the section-building block**
 
@@ -1527,35 +1531,46 @@ In `showRunResults()`, right after the existing `diagnosticsBlock` construction 
 
 ```js
       // Captured Requests block (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md)
+      // s.captured_requests is only ever present on a fresh execute_run() response —
+      // get_run() (revisiting a run later) never has it, only the count (Section 0.5).
       let capturedRequestsBlock = ''
-      const capturedRequests = s.captured_requests ? (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })() : []
-      if (capturedRequests.length > 0) {
-        const capId = 'cap-' + Math.random().toString(36).slice(2, 8)
-        window._capturedReqState = window._capturedReqState || {}
-        window._capturedReqState[capId] = {
-          requests: capturedRequests,
-          selected: new Set(capturedRequests.map((_, ri) => ri)),
-        }
-        const rowsHTML = capturedRequests.map((r, ri) => `
-          <div class="cap-req-row">
-            <input type="checkbox" class="cap-req-check" checked
-                   onchange="toggleCapturedRequestSelect('${capId}', ${ri}, this.checked)">
-            <span class="method-badge method-${escHtml(r.method)}">${escHtml(r.method)}</span>
-            <span class="cap-req-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
-            <span class="cap-req-status">${r.response_status != null ? r.response_status : '—'}</span>
-            <span class="cap-req-duration">${r.duration_ms != null ? r.duration_ms + 'ms' : '—'}</span>
-          </div>`).join('')
-        capturedRequestsBlock = `<div class="script-result-diagnostics">
-          <div class="script-result-error-toggle" onclick="document.getElementById('${capId}').classList.toggle('collapsed')">
-            <span class="script-result-error-label" style="color: var(--accent)">Captured Requests (${capturedRequests.length})</span>
-            <span class="script-result-error-chevron">&#9662;</span>
-          </div>
-          <div id="${capId}" class="script-result-error-body collapsed">
-            <div class="cap-req-list">${rowsHTML}</div>
-            <div class="cap-req-actions">
-              <button class="btn-ghost btn-sm" onclick="saveCapturedRequests('${capId}', ${JSON.stringify(s.name)})">Save Selected</button>
+      const hasFreshCapture = Object.prototype.hasOwnProperty.call(s, 'captured_requests') && s.captured_requests
+      if (hasFreshCapture) {
+        const capturedRequests = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
+        if (capturedRequests.length > 0) {
+          const capId = 'cap-' + Math.random().toString(36).slice(2, 8)
+          window._capturedReqState = window._capturedReqState || {}
+          window._capturedReqState[capId] = {
+            requests: capturedRequests,
+            selected: new Set(capturedRequests.map((_, ri) => ri)),
+          }
+          const rowsHTML = capturedRequests.map((r, ri) => `
+            <div class="cap-req-row">
+              <input type="checkbox" class="cap-req-check" checked
+                     onchange="toggleCapturedRequestSelect('${capId}', ${ri}, this.checked)">
+              <span class="method-badge method-${escHtml(r.method)}">${escHtml(r.method)}</span>
+              <span class="cap-req-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
+              <span class="cap-req-status">${r.response_status != null ? r.response_status : '—'}</span>
+              <span class="cap-req-duration">${r.duration_ms != null ? r.duration_ms + 'ms' : '—'}</span>
+            </div>`).join('')
+          capturedRequestsBlock = `<div class="script-result-diagnostics">
+            <div class="script-result-error-toggle" onclick="document.getElementById('${capId}').classList.toggle('collapsed')">
+              <span class="script-result-error-label" style="color: var(--accent)">Captured Requests (${capturedRequests.length})</span>
+              <span class="script-result-error-chevron">&#9662;</span>
             </div>
-          </div>
+            <div id="${capId}" class="script-result-error-body collapsed">
+              <div class="cap-req-list">${rowsHTML}</div>
+              <div class="cap-req-actions">
+                <button class="btn-ghost btn-sm" onclick="saveCapturedRequests('${capId}', ${JSON.stringify(s.name)})">Save Selected</button>
+              </div>
+            </div>
+          </div>`
+        }
+      } else if ((s.captured_requests_count || 0) > 0) {
+        // Historical view (e.g. run reopened from run history): the array
+        // was never persisted, so there's nothing to pick from — just say so.
+        capturedRequestsBlock = `<div class="script-result-diagnostics">
+          <div class="cap-req-historical">Captured ${s.captured_requests_count} request${s.captured_requests_count === 1 ? '' : 's'} during this run (not saved)</div>
         </div>`
       }
 ```
@@ -1622,6 +1637,7 @@ Run: `python qaclan.py serve --port 7823`
 5. Uncheck one row, click "Save Selected" — confirm the existing Discovery review modal opens with only the checked rows, collection name pre-filled, Flow/Library radio and "Organize into folders by endpoint" checkbox all present (unchanged, reused).
 6. Pick "Save as Flow", save — confirm the request(s) land in the target collection.
 7. Re-open Captured Requests, "Save Selected" again, pick "Save as Library" — confirm the grouping/comparison modal (`variant-comparison-modal.js`) opens as it does for every other Discovery path.
+8. **Historical state:** close the run modal, reopen the *same* run from run history (`viewRunModal` — the run should already be in the list). Confirm the script's card now shows a static "Captured N requests during this run (not saved)" line — no checkboxes, no Save Selected button. This confirms the array really isn't round-tripping through the DB (spec Section 0.5) — if checkboxes still appear here, the persistence-model change didn't take.
 
 - [ ] **Step 5: Commit**
 
@@ -1676,6 +1692,12 @@ Insert after the existing `.diag-entry`/`.diag-type` rules (after line 1025):
   margin-top: 8px;
   display: flex;
   justify-content: flex-end;
+}
+.cap-req-historical {
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
 }
 ```
 
