@@ -79,6 +79,7 @@ def _write_artifacts(error=None):
         payload = {
             "console_errors": _console_errors,
             "network_failures": _network_failures,
+            "captured_requests": _captured_requests,
         }
         # Structured error — raw exception fields the runner's classifier
         # keys on. See docs/error-reporting-plan.md (section 2.1).
@@ -112,17 +113,77 @@ def _on_requestfailed(req):
 # until a slow-loading page (table fed by an XHR) finishes.
 _in_flight = 0
 
+# --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
+# Records XHR/fetch traffic as a passive side effect of the run so it can be
+# saved as API requests afterward. Never fails the run — every capture step
+# is wrapped in a swallowed try/except. Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1,
+# checked once at startup so _capture_request() no-ops before touching anything
+# when the run didn't ask for capture.
+_CAPTURE_ENABLED = os.environ.get("QACLAN_CAPTURE_REQUESTS") == "1"
+_captured_requests = []
+_capture_starts = {}
+_CAPTURE_CAP = 200
+_CAPTURE_BODY_CAP_BYTES = 200_000
+_CAPTURE_SKIP_TYPES = {"document", "stylesheet", "image", "font", "script"}
+
+
+def _truncate_body(text):
+    if text is None:
+        return None
+    encoded = text.encode("utf-8", errors="ignore")
+    if len(encoded) <= _CAPTURE_BODY_CAP_BYTES:
+        return text
+    return encoded[:_CAPTURE_BODY_CAP_BYTES].decode("utf-8", errors="ignore")
+
+
+def _capture_request(req):
+    if not _CAPTURE_ENABLED:
+        return
+    if req.resource_type in _CAPTURE_SKIP_TYPES:
+        return
+    start = _capture_starts.pop(id(req), None)
+    if len(_captured_requests) >= _CAPTURE_CAP:
+        return
+    try:
+        duration_ms = int((time.monotonic() - start) * 1000) if start is not None else None
+        resp = None
+        try:
+            resp = req.response()
+        except Exception:
+            resp = None
+        entry = {
+            "method": req.method,
+            "url": req.url,
+            "request_headers": dict(req.headers),
+            "request_body": _truncate_body(req.post_data),
+            "status_code": resp.status if resp else None,
+            "response_headers": dict(resp.headers) if resp else {},
+            "response_body": None,
+            "duration_ms": duration_ms,
+        }
+        if resp is not None:
+            try:
+                entry["response_body"] = _truncate_body(resp.text())
+            except Exception:
+                pass
+        _captured_requests.append(entry)
+    except Exception:
+        pass
+
 
 def _track_network(page):
     def _on_request(req):
         global _in_flight
         if req.resource_type in ("xhr", "fetch"):
             _in_flight += 1
+        if _CAPTURE_ENABLED and req.resource_type not in _CAPTURE_SKIP_TYPES:
+            _capture_starts[id(req)] = time.monotonic()
 
     def _on_done(req):
         global _in_flight
         if req.resource_type in ("xhr", "fetch"):
             _in_flight = max(0, _in_flight - 1)
+        _capture_request(req)
 
     page.on("request", _on_request)
     page.on("requestfinished", _on_done)
@@ -390,7 +451,9 @@ class PythonStrategy(ScriptStrategy):
             "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
             "_SCREENSHOT", "_console_errors", "_network_failures", "_context_opts",
             "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
-            "_in_flight",
+            "_in_flight", "_captured_requests", "_capture_starts", "_capture_request",
+            "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
+            "_CAPTURE_SKIP_TYPES", "_truncate_body",
         ):
             if re.search(r'^\s*' + re.escape(name) + r'\s*=', dedented, re.MULTILINE):
                 warnings.append(ImportWarning(
