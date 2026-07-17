@@ -3996,6 +3996,10 @@ async function runSuiteModal(id, name) {
         <input type="checkbox" id="run-stop-on-fail">
         Stop on first failure
       </label>
+      <label class="checkbox-wrap">
+        <input type="checkbox" id="run-capture-requests">
+        Capture API Requests
+      </label>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Run Suite', cls: 'btn-primary', action: async () => {
@@ -4004,6 +4008,7 @@ async function runSuiteModal(id, name) {
       const browser = document.getElementById('run-browser').value
       const resolution = document.getElementById('run-resolution').value || undefined
       const headless = document.getElementById('run-headless').checked
+      const capture_requests = document.getElementById('run-capture-requests').checked
       const waitEl = document.getElementById('run-wait-timeout')
       const wait_timeout = waitEl ? parseInt(waitEl.value, 10) : undefined
       // Show spinner
@@ -4014,7 +4019,7 @@ async function runSuiteModal(id, name) {
         </div>`
       document.querySelector('.modal-footer').innerHTML = ''
 
-      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, wait_timeout })
+      const res = await api('POST', '/runs', { suite_id: id, env_name, stop_on_fail, browser, resolution, headless, capture_requests, wait_timeout })
       if (res.ok === false) {
         document.querySelector('.modal-body').innerHTML = `<p style="color:var(--danger)">${escHtml(res.error)}</p>`
         return

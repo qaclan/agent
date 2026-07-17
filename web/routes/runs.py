@@ -148,7 +148,7 @@ def get_run(run_id):
         row = conn.execute(
             "SELECT sr.id, sr.suite_id, su.name AS suite_name, sr.environment_id, "
             "sr.channel, sr.status, sr.total, sr.passed, sr.failed, sr.skipped, "
-            "sr.started_at, sr.finished_at, sr.browser, sr.resolution, sr.headless "
+            "sr.started_at, sr.finished_at, sr.browser, sr.resolution, sr.headless, sr.capture_requests "
             "FROM suite_runs sr JOIN suites su ON sr.suite_id = su.id "
             "WHERE sr.id = ? AND sr.project_id = ?",
             (run_id, project_id),
@@ -237,6 +237,7 @@ def execute_run():
         browser_type = data.get("browser", "chromium")
         resolution = data.get("resolution") or None
         headless = data.get("headless", False)
+        capture_requests = bool(data.get("capture_requests", False))
         # Run-level "Wait limit" — one knob driving both QACLAN_EXPECT_TIMEOUT
         # (assertions) and QACLAN_ACTION_TIMEOUT (clicks/fills/waits). A
         # per-script wait_timeout column can override this inside the loop.
@@ -323,9 +324,10 @@ def execute_run():
         run_id = generate_id("run")
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless) "
-            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?)",
-            (run_id, suite_id, project_id, environment_id, len(items), now, browser_type, resolution, 1 if headless else 0),
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless, capture_requests) "
+            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?, ?)",
+            (run_id, suite_id, project_id, environment_id, len(items), now, browser_type, resolution,
+             1 if headless else 0, 1 if capture_requests else 0),
         )
         conn.commit()
         logger.info("execute_run: created run %s at %s", run_id, now)
@@ -553,6 +555,7 @@ def execute_run():
                 child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
                 child_env["QACLAN_BROWSER"] = browser_type
                 child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
+                child_env["QACLAN_CAPTURE_REQUESTS"] = "1" if capture_requests else "0"
                 child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
                 # Resolve the effective wait limit for THIS script:
                 #   script.wait_timeout  >  run-level pick  >  default.

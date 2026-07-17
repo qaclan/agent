@@ -941,6 +941,10 @@ def run_script_solo(script_id):
             child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
             child_env["QACLAN_BROWSER"] = browser_type
             child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
+            # Solo quick-run has no options UI (browser/resolution/headless are also
+            # hardcoded here) — capture is opt-in via the suite-run modal only.
+            # See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md Section 0.
+            child_env["QACLAN_CAPTURE_REQUESTS"] = "0"
             child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
             child_env["QACLAN_EXPECT_TIMEOUT"] = "15000"
             child_env["QACLAN_ACTION_TIMEOUT"] = "15000"
