@@ -1,5 +1,6 @@
 from __future__ import annotations
 import io
+import json
 import logging
 import zipfile
 from flask import Blueprint, request, jsonify, send_file
@@ -7,6 +8,7 @@ from cli.config import get_active_project_id
 from cli.sync_queue import enqueue
 from web.api.repositories.collection_repo import CollectionRepo
 from web.api.repositories.collection_vars_repo import CollectionVarsRepo
+from web.api.repositories.folder_repo import FolderRepo
 from web.api.services.collection_service import CollectionService
 from web.api.services.runner_service import RunnerService
 
@@ -187,18 +189,34 @@ def delete_collection_var(col_id, key):
 
 @bp.route("/api/collections/<col_id>/export", methods=["POST"])
 def export_collection(col_id):
-    """Export collection to Bruno .bru files, returned as a zip."""
+    """Export collection to Bruno .bru files (zip) or a Postman v2.1 JSON
+    file. Query param: ?format=bruno|postman (default bruno)."""
     try:
-        col = _svc.get(col_id, _project_id())
+        fmt = request.args.get("format", "bruno")
+        pid = _project_id()
+        col = _svc.get(col_id, pid)
         requests = col.get("requests", [])
+        folders = FolderRepo().list_for_collection(col_id)
+        collection_vars = CollectionVarsRepo().list(col_id)
 
-        from cli.api_discovery.bruno_parser import request_to_bru
+        if fmt == "postman":
+            from cli.api_discovery.postman_exporter import to_postman_collection
+            exported = to_postman_collection(col, requests, folders, collection_vars)
+            buf = io.BytesIO(json.dumps(exported, indent=2).encode("utf-8"))
+            buf.seek(0)
+            return send_file(
+                buf,
+                mimetype="application/json",
+                as_attachment=True,
+                download_name=f"{col['name']}.postman_collection.json",
+            )
+
+        from cli.api_discovery.bruno_parser import export_bruno_tree
+        tree = export_bruno_tree(col, requests, folders, collection_vars)
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for req in requests:
-                content = request_to_bru(req)
-                safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req.get("name", "request"))
-                zf.writestr(f"{col['name']}/{safe_name}.bru", content)
+            for rel_path, content in tree.items():
+                zf.writestr(f"{col['name']}/{rel_path}", content)
 
         buf.seek(0)
         return send_file(
