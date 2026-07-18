@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
@@ -795,6 +796,10 @@ def delete_script(script_id):
         file_path = row["file_path"]
         if file_path and os.path.exists(file_path):
             os.unlink(file_path)
+
+        # Delete any files captured from recorded upload interactions
+        from cli.config import UPLOADS_DIR
+        shutil.rmtree(os.path.join(UPLOADS_DIR, script_id), ignore_errors=True)
 
         # Delete DB row
         conn.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
