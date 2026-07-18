@@ -87,11 +87,14 @@ function _detailHTML(req) {
     </div>`;
 }
 
-export function showRequestReviewModal(requests, defaultCollectionName, startUrl) {
+export function showRequestReviewModal(requests, defaultCollectionName, startUrl, extras) {
   if (!requests?.length) {
     window._alertDialog('No requests found in this file.');
     return;
   }
+  const importWarnings = extras?.warnings || [];
+  const collectionVars = extras?.collection_vars || null;
+  const collectionAuth = extras?.collection_auth || null;
 
   const COMPOUND_SUFFIXES = new Set([
     'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk',
@@ -173,7 +176,16 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     });
   }
 
+  const warningsSection = importWarnings.length ? `
+    <div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12px;">
+      <div style="font-weight:700;color:var(--warning);margin-bottom:4px;">${importWarnings.length} item${importWarnings.length !== 1 ? 's' : ''} need attention:</div>
+      <ul style="margin:0;padding-left:18px;color:var(--text-secondary);">
+        ${importWarnings.map(w => `<li style="margin-bottom:2px;">${_esc(w)}</li>`).join('')}
+      </ul>
+    </div>` : '';
+
   const modalBody = `
+    ${warningsSection}
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:10px">
       ${requests.length} request${requests.length !== 1 ? 's' : ''} found. Select which to save:
     </p>
@@ -231,6 +243,8 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         requests: selected,
         collection_name: colName,
         include_in_docs: includeInDocs,
+        collection_vars: collectionVars,
+        collection_auth: collectionAuth,
       });
       window.closeModal();
       if (data.ok) {

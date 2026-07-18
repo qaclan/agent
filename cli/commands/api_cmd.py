@@ -225,11 +225,15 @@ def api_import(file_or_url, fmt, collection):
         col_json = json.loads(content)
         result = svc.import_postman(pid, col_json)
         console.print(f"[green]Imported {result['imported']} requests[/green]")
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]warning: {w}[/yellow]")
 
     elif fmt == "bruno":
         content = Path(file_or_url).read_text(encoding="utf-8")
         result = svc.import_bruno(pid, [{"name": Path(file_or_url).name, "content": content}])
         console.print(f"[green]Imported {result['imported']} requests[/green]")
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]warning: {w}[/yellow]")
 
 
 @api_group.command("record")

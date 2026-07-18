@@ -34,7 +34,11 @@ export function showPostmanImport() {
     if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
 
     window.closeModal();
-    showRequestReviewModal(data.requests, fileInput.files[0].name.replace(/\.json$/i, ''));
+    showRequestReviewModal(data.requests, fileInput.files[0].name.replace(/\.json$/i, ''), null, {
+      warnings: data.warnings,
+      collection_vars: data.collection_vars,
+      collection_auth: data.collection_auth,
+    });
   }
 }
 
@@ -72,6 +76,10 @@ export function showBrunoImportView() {
     if (!data.ok) { await window._alertDialog('Parse failed: ' + data.error); return; }
 
     window.closeModal();
-    showRequestReviewModal(data.requests, 'Bruno Import');
+    showRequestReviewModal(data.requests, 'Bruno Import', null, {
+      warnings: data.warnings,
+      collection_vars: data.collection_vars,
+      collection_auth: data.collection_auth,
+    });
   }
 }
