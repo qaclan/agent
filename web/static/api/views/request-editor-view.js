@@ -57,7 +57,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     if (_effectiveCollectionId) {
       try {
         const res = await window.api('GET', `/collections/${_effectiveCollectionId}/vars`);
-        (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: false, group: 'Collection' }));
+        (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: !!v.is_secret, group: 'Collection' }));
       } catch(e) { /* no collection vars */ }
     }
     return results;

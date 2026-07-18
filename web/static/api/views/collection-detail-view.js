@@ -30,7 +30,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     }
     try {
       const res = await window.api('GET', `/collections/${col.id}/vars`);
-      (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: false, group: 'Collection' }));
+      (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: !!v.is_secret, group: 'Collection' }));
     } catch(e) { /* no collection vars */ }
     return results;
   }
