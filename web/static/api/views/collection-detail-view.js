@@ -232,7 +232,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
 
     const hdr = document.createElement('div');
     hdr.style.cssText = 'font-size:12px;color:var(--text-secondary);line-height:1.5;';
-    hdr.textContent = 'Seed values for {{VAR}} tokens set by post-scripts (qc.set). Pre-populated before each run.';
+    hdr.textContent = 'Seed values for {{VAR}} tokens set by post-scripts (qc.set). Pre-populated before each run. Tick Secret to encrypt a value at rest.';
     wrap.appendChild(hdr);
 
     const tableWrap = document.createElement('div');
@@ -243,6 +243,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     varsTableEl.innerHTML = `<thead><tr style="background:var(--bg-elevated);">
       <th style="text-align:left;padding:7px 10px;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default);">Variable</th>
       <th style="text-align:left;padding:7px 10px;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default);">Initial value</th>
+      <th style="width:56px;text-align:center;padding:7px 4px;font-size:10px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);border-bottom:1px solid var(--border-default);">Secret</th>
       <th style="width:32px;border-bottom:1px solid var(--border-default);"></th>
     </tr></thead>`;
     const varsTbody = document.createElement('tbody');
@@ -257,9 +258,11 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     addVarBtn.textContent = '+ Add Variable';
     wrap.appendChild(addVarBtn);
 
-    function _addVarRow(v = { key: '', initial_value: '' }, isNew = false) {
+    function _addVarRow(v = { key: '', initial_value: '', is_secret: 0 }, isNew = false) {
       const tr = document.createElement('tr');
       tr.style.borderBottom = '1px solid var(--border-subtle)';
+      const isSecretInitially = !!v.is_secret;
+      if (isSecretInitially) tr.dataset.masked = '1';
 
       const keyTd = document.createElement('td');
       keyTd.style.padding = '4px 6px';
@@ -275,13 +278,26 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
       const valTd = document.createElement('td');
       valTd.style.padding = '4px 6px';
       const valInp = document.createElement('input');
-      valInp.type = 'text'; valInp.placeholder = '(empty — set by post-script)';
+      valInp.type = isSecretInitially ? 'password' : 'text';
+      valInp.placeholder = '(empty — set by post-script)';
       valInp.value = v.initial_value || '';
       valInp.className = 'input-sm';
       valInp.style.cssText = 'font-size:12px;width:100%;background:transparent;border-color:transparent;';
-      valInp.addEventListener('focus', () => { valInp.style.borderColor = ''; });
+      valInp.addEventListener('focus', () => {
+        valInp.style.borderColor = '';
+        if (tr.dataset.masked === '1' && !tr.dataset.edited) valInp.value = '';
+      });
+      valInp.addEventListener('input', () => { tr.dataset.edited = '1'; delete tr.dataset.masked; });
       valInp.addEventListener('blur',  () => { valInp.style.borderColor = 'transparent'; });
       valTd.appendChild(valInp);
+
+      const secretTd = document.createElement('td');
+      secretTd.style.cssText = 'padding:4px 6px;text-align:center;';
+      const secretCb = document.createElement('input');
+      secretCb.type = 'checkbox';
+      secretCb.checked = isSecretInitially;
+      secretCb.title = 'Secret';
+      secretTd.appendChild(secretCb);
 
       const delTd = document.createElement('td');
       delTd.style.cssText = 'padding:4px 6px;text-align:center;';
@@ -296,7 +312,12 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
       async function _saveRow() {
         const key = keyInp.value.trim();
         if (!key) return;
-        await window.api('PUT', `/collections/${col.id}/vars/${encodeURIComponent(key)}`, { initial_value: valInp.value });
+        const is_secret = secretCb.checked ? 1 : 0;
+        if (is_secret && tr.dataset.masked === '1') {
+          await window.api('PUT', `/collections/${col.id}/vars/${encodeURIComponent(key)}`, { is_secret, unchanged: true });
+        } else {
+          await window.api('PUT', `/collections/${col.id}/vars/${encodeURIComponent(key)}`, { initial_value: valInp.value, is_secret });
+        }
         _refreshKnownVarNames();
       }
       async function _deleteRow() {
@@ -305,17 +326,35 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
         tr.remove();
         _refreshKnownVarNames();
       }
+      async function _onSecretToggle() {
+        // Un-ticking a stored-masked secret: fetch decrypted value so the user sees it,
+        // but only if the row is still masked (user hasn't already typed a replacement).
+        if (!secretCb.checked && tr.dataset.masked === '1') {
+          const key = keyInp.value.trim();
+          if (key) {
+            try {
+              const res = await window.api('GET', `/collections/${col.id}/vars/${encodeURIComponent(key)}/reveal`);
+              if (res && res.ok) valInp.value = res.value || '';
+            } catch (e) { /* reveal failed, leave placeholder as-is */ }
+          }
+        }
+        valInp.type = secretCb.checked ? 'password' : 'text';
+        delete tr.dataset.masked;
+        tr.dataset.edited = '1';
+        await _saveRow();
+      }
 
       keyInp.addEventListener('blur', _saveRow);
       valInp.addEventListener('blur', _saveRow);
+      secretCb.addEventListener('change', _onSecretToggle);
       delBtn.onclick = _deleteRow;
 
-      tr.appendChild(keyTd); tr.appendChild(valTd); tr.appendChild(delTd);
+      tr.appendChild(keyTd); tr.appendChild(valTd); tr.appendChild(secretTd); tr.appendChild(delTd);
       varsTbody.appendChild(tr);
       if (isNew) keyInp.focus();
     }
 
-    addVarBtn.onclick = () => _addVarRow({ key: '', initial_value: '' }, true);
+    addVarBtn.onclick = () => _addVarRow({ key: '', initial_value: '', is_secret: 0 }, true);
 
     window.api('GET', `/collections/${col.id}/vars`).then(res => {
       (res.vars || []).forEach(v => _addVarRow(v));
