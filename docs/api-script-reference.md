@@ -212,8 +212,16 @@ Any `qc.set("key", value)` call (script or extractor) lands in `qaclan_vars` ins
 
 ---
 
+## Variable secrecy
+
+Both environment variables (`env_vars.is_secret`) and collection variables (`collection_vars.is_secret`) support secret storage: Fernet-encrypted at rest (`cli/crypto.py`, key at `~/.qaclan/secret.key`), masked as `••••••••` in list/suggestion responses, and decrypted only when actually needed — at request-resolution time (`resolve_vars`, fed by `env_loader.load_env_vars` for environment vars and `CollectionVarsRepo.as_seed_dict` for collection vars) or via an explicit reveal endpoint (`GET /api/envs/<env_name>/vars/<key>/reveal`, `GET /api/collections/<col_id>/vars/<key>/reveal`), both responding with `Cache-Control: no-store`.
+
+**Export caveat:** exporting a collection to Postman JSON or Bruno `.bru` writes secret collection vars as **decrypted plaintext** (matching the fidelity-first behavior of the rest of collection export). Treat an exported file containing secret vars with the same care as a `.env` file — avoid committing it to git or pasting it into chat.
+
+---
+
 ## Known gaps (accurate as of this writing — update if closed)
 
 - No `pm.sendRequest()` equivalent — scripts can't issue additional HTTP calls (nothing blocks it technically, but no helper is provided). Non-trivial to add: would need `resolve_vars`/`_apply_auth` reachable from inside the subprocess, or an IPC round-trip back to the parent process, which breaks the current one-shot write-file-and-exit sandbox model.
-- No 4-tier variable scoping (global/collection/environment/local) — one flat `qaclan_vars` bucket plus the active environment's `env_vars`. Likely intentional given the local-first/single-active-environment model rather than a bug.
+- No 4-tier variable scoping (global/collection/environment/local) — one flat `qaclan_vars` bucket plus the active environment's `env_vars`. Likely intentional given the local-first/single-active-environment model rather than a bug. Both tiers support secret values (`is_secret`) — see "Variable secrecy" above.
 - `response.text()` exported to Bruno becomes a `res.body`-based ternary (no direct Bruno equivalent — Bruno auto-parses JSON, no separate raw-text accessor). If that exported `.bru` file is later re-imported, the import table's `res.body` → `response.json()` mapping rewrites the ternary's `res.body` references too, so the round-tripped script calls `response.json()` instead of `response.text()` — functionally near-identical when the body actually is JSON, but `json()` throws where `text()` wouldn't on a non-JSON body. Only surfaces on export-then-reimport of qaclan's own output, not on a first import from a real Postman/Bruno collection.
