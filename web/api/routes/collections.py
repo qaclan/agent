@@ -17,6 +17,8 @@ bp = Blueprint("api_collections", __name__)
 _svc = CollectionService()
 _runner_svc = RunnerService()
 
+MASKED_DISPLAY = "•" * 8
+
 
 def _project_id():
     pid = get_active_project_id()
@@ -146,7 +148,11 @@ def list_collection_vars(col_id):
         pid = _project_id()
         if not CollectionRepo().get(col_id, pid):
             return jsonify({"ok": False, "error": "Not found"}), 404
-        return jsonify({"ok": True, "vars": CollectionVarsRepo().list(col_id)})
+        rows = CollectionVarsRepo().list(col_id)
+        for v in rows:
+            if v.get("is_secret"):
+                v["initial_value"] = MASKED_DISPLAY
+        return jsonify({"ok": True, "vars": rows})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
@@ -161,7 +167,11 @@ def upsert_collection_var(col_id, key):
         if not CollectionRepo().get(col_id, pid):
             return jsonify({"ok": False, "error": "Not found"}), 404
         body = request.get_json(force=True) or {}
-        result = CollectionVarsRepo().upsert(col_id, key, body.get("initial_value", ""))
+        result = CollectionVarsRepo().upsert(
+            col_id, key, body.get("initial_value", ""),
+            is_secret=bool(body.get("is_secret", False)),
+            unchanged=bool(body.get("unchanged", False)),
+        )
         enqueue("collection_vars", col_id, "upsert")
         return jsonify({"ok": True, "var": result})
     except ValueError as e:
@@ -184,6 +194,26 @@ def delete_collection_var(col_id, key):
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("delete_collection_var")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/<col_id>/vars/<path:key>/reveal", methods=["GET"])
+def reveal_collection_var(col_id, key):
+    """Return the decrypted plaintext for a single secret collection var."""
+    try:
+        pid = _project_id()
+        if not CollectionRepo().get(col_id, pid):
+            return jsonify({"ok": False, "error": "Not found"}), 404
+        value = CollectionVarsRepo().reveal(col_id, key)
+        if value is None:
+            return jsonify({"ok": False, "error": f'Variable "{key}" not found'}), 404
+        resp = jsonify({"ok": True, "key": key, "value": value})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("reveal_collection_var")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
