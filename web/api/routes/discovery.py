@@ -35,7 +35,7 @@ def discover_har():
             return jsonify({"ok": False, "error": "No file uploaded (field: 'file')"}), 400
         f = request.files["file"]
         har_json = json.loads(f.read().decode("utf-8"))
-        collection_name = request.form.get("collection_name") or f.filename.replace(".har", "")
+        collection_name = request.form.get("collection_name") or (f.filename or "").replace(".har", "")
         result = _svc.import_har(pid, har_json, collection_name=collection_name)
         return jsonify({"ok": True, **result})
     except ValueError as e:
@@ -53,7 +53,8 @@ def discover_openapi():
         if request.files.get("file"):
             f = request.files["file"]
             raw = f.read().decode("utf-8")
-            if f.filename.endswith(".yaml") or f.filename.endswith(".yml"):
+            fname = f.filename or ""
+            if fname.endswith(".yaml") or fname.endswith(".yml"):
                 import yaml
                 spec = yaml.safe_load(raw)
             else:
@@ -205,7 +206,8 @@ def discover_openapi_preview():
         if request.files.get("file"):
             f = request.files["file"]
             raw = f.read().decode("utf-8")
-            if f.filename.endswith(".yaml") or f.filename.endswith(".yml"):
+            fname = f.filename or ""
+            if fname.endswith(".yaml") or fname.endswith(".yml"):
                 import yaml
                 spec = yaml.safe_load(raw)
             else:
@@ -260,7 +262,7 @@ def discover_bruno_preview():
             parsed = parse_bruno(f.read().decode("utf-8"))
             for req in parsed:
                 if req.get("name") in ("Imported Request", "", None):
-                    req["name"] = f.filename.replace(".bru", "")
+                    req["name"] = (f.filename or "").replace(".bru", "")
             requests_list.extend(parsed)
         return jsonify({"ok": True, "requests": requests_list})
     except Exception as e:
