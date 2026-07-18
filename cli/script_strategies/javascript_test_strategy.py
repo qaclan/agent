@@ -44,14 +44,60 @@ let _scriptError = null;
 
 // --- Smart-wait network tracking (docs/auto-wait-plan.md) ---
 let _inFlight = 0;
+
+// --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
+// See javascript_strategy.py for the race-safety rationale on _capturePending.
+// Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1, checked once at startup.
+const _CAPTURE_ENABLED = process.env.QACLAN_CAPTURE_REQUESTS === '1';
+const _capturedRequests = [];
+const _captureStarts = new Map();
+const _capturePending = [];
+const _CAPTURE_CAP = 200;
+const _CAPTURE_BODY_CAP_BYTES = 200000;
+const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
+
+function _truncateBody(text) {
+  if (text == null) return text;
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= _CAPTURE_BODY_CAP_BYTES) return text;
+  return buf.subarray(0, _CAPTURE_BODY_CAP_BYTES).toString('utf-8');
+}
+
+async function _captureRequest(req) {
+  if (!_CAPTURE_ENABLED) return;
+  if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
+  const start = _captureStarts.get(req);
+  _captureStarts.delete(req);
+  if (_capturedRequests.length >= _CAPTURE_CAP) return;
+  try {
+    const resp = await req.response();
+    const entry = {
+      method: req.method(),
+      url: req.url(),
+      request_headers: await req.allHeaders(),
+      request_body: _truncateBody(req.postData()),
+      status_code: resp ? resp.status() : null,
+      response_headers: resp ? await resp.allHeaders() : {},
+      response_body: null,
+      duration_ms: start != null ? Date.now() - start : null,
+    };
+    if (resp) {
+      try { entry.response_body = _truncateBody(await resp.text()); } catch (_) {}
+    }
+    _capturedRequests.push(entry);
+  } catch (_) {}
+}
+
 function _trackNetwork(page) {
   page.on('request', req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
+    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight = Math.max(0, _inFlight - 1);
+    _capturePending.push(_captureRequest(req).catch(() => {}));
   };
   page.on('requestfinished', done);
   page.on('requestfailed', done);
@@ -106,6 +152,7 @@ test('qaclan', async ({ page, context }) => {
     _scriptError = err;
     throw err;
   } finally {
+    await Promise.allSettled(_capturePending);
     if (_STATE) {
       try { await context.storageState({ path: _STATE }); } catch (_) {}
     }
@@ -118,6 +165,7 @@ test.afterAll(() => {
     const payload = {
       console_errors: _consoleErrors,
       network_failures: _networkFailures,
+      captured_requests: _capturedRequests,
     };
     if (_scriptError) payload.error = {
       raw_type: (_scriptError && _scriptError.name) || 'Error',
