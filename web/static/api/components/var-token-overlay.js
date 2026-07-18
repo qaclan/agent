@@ -90,9 +90,24 @@ export function attachTokenOverlay(el, getVarsList) {
     let last = 0;
     tokenSpansIn(value).forEach(({ name, start, end }) => {
       html += escapeHtml(value.slice(last, start));
-      const known = list ? list.some(v => v.key === name) : null;
-      const cls = known == null ? 'var-tok' : known ? 'var-tok var-tok--ok' : 'var-tok var-tok--missing';
-      html += `<span class="${cls}">${escapeHtml(value.slice(start, end))}</span>`;
+      const entry = list ? list.find(v => v.key === name) || null : null;
+      const known = list ? !!entry : null;
+      let cls;
+      let badge = '';
+      if (known == null) {
+        cls = 'var-tok';
+      } else if (!known) {
+        cls = 'var-tok var-tok--missing';
+      } else if (entry.group === 'Environment') {
+        cls = 'var-tok var-tok--ok var-tok--env';
+        badge = ' data-src="E"';
+      } else if (entry.group === 'Collection') {
+        cls = 'var-tok var-tok--ok var-tok--col';
+        badge = ' data-src="C"';
+      } else {
+        cls = 'var-tok var-tok--ok';
+      }
+      html += `<span class="${cls}"${badge}>${escapeHtml(value.slice(start, end))}</span>`;
       last = end;
     });
     html += escapeHtml(value.slice(last));
