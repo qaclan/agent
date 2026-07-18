@@ -19,6 +19,11 @@ _BRUNO_OP_MAP = {
 _BRUNO_APPROX_OPS = {"gte": ("gt", -1), "lte": ("lt", 1)}
 _BRUNO_UNSUPPORTED_OPS = {"isJson", "isString", "isNumber", "isBoolean", "isArray"}
 
+# qaclan's auth_type name -> Bruno's own auth mode name, for the few that
+# differ (e.g. qaclan "api_key" vs Bruno "apikey"). Everything else maps
+# to itself (bearer, basic, oauth2, inherit, none all match verbatim).
+_QC_TO_BRU_AUTH_MODE = {"api_key": "apikey"}
+
 
 def _parse_bru_sections(text: str) -> dict:
     """Parse .bru text into a dict of section_name → list of lines."""
@@ -206,10 +211,14 @@ def parse_bruno(bru_text: str) -> dict:
     elif "body:graphql" in sections:
         gql_vars = {}
         if "body:graphql:vars" in sections:
+            raw_vars = "\n".join(sections["body:graphql:vars"]).strip()
             try:
-                gql_vars = json.loads("\n".join(sections["body:graphql:vars"]).strip() or "{}")
+                gql_vars = json.loads(raw_vars or "{}")
             except json.JSONDecodeError:
-                gql_vars = {}
+                # Not JSON — fall back to Bru's own key: value dict-block
+                # syntax (same as params:query/headers), since it's
+                # ambiguous which form a given Bruno version writes here.
+                gql_vars = {kv["key"]: kv["value"] for kv in _parse_kv_block(sections["body:graphql:vars"]) if kv["enabled"]}
         body_type = "graphql"
         body = json.dumps({"query": "\n".join(sections["body:graphql"]).strip(), "variables": gql_vars})
 
@@ -272,6 +281,7 @@ def request_to_bru(req: dict) -> str:
     url = revert_path_vars(req.get("url", ""), req.get("path_params"))
     method = req.get("method", "GET").lower()
     auth_type = req.get("auth_type", "inherit")
+    bru_auth_mode = _QC_TO_BRU_AUTH_MODE.get(auth_type, auth_type)
 
     lines = [
         "meta {",
@@ -283,7 +293,7 @@ def request_to_bru(req: dict) -> str:
         f"{method} {{",
         f"  url: {url}",
         f"  body: {_bru_body_mode(req.get('body_type'))}",
-        f"  auth: {auth_type if auth_type in ('bearer', 'basic', 'apikey', 'oauth2', 'inherit') else 'none'}",
+        f"  auth: {bru_auth_mode if bru_auth_mode in ('bearer', 'basic', 'apikey', 'oauth2', 'inherit') else 'none'}",
         "}",
         "",
     ]
@@ -445,7 +455,7 @@ def collection_bru(collection: dict, collection_vars: list[dict]) -> str:
     auth_type = collection.get("auth_type", "none")
     if auth_type not in ("none", None, "inherit"):
         lines.append("auth {")
-        lines.append(f"  mode: {auth_type}")
+        lines.append(f"  mode: {_QC_TO_BRU_AUTH_MODE.get(auth_type, auth_type)}")
         lines.append("}")
         lines.append("")
         lines.extend(_bru_auth_block(auth_type, collection.get("auth_config") or {}))

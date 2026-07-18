@@ -194,6 +194,7 @@ _REVERSE_DIRECT: dict[str, list[tuple[re.Pattern, str]]] = {
         (re.compile(r"\bqc\.setParam\("), "req.setQueryParam("),
         (re.compile(r"\bqc\.getParam\("), "req.getQueryParam("),
         (re.compile(r"\bresponse\.json\(\)"), "res.body"),
+        (re.compile(r"\bresponse\.text\(\)"), "(typeof res.body === 'string' ? res.body : JSON.stringify(res.body))"),
         (re.compile(r"\bresponse\.headers\b"), "res.headers"),
         (re.compile(r"\bresponse\.status\b"), "res.status"),
     ],
