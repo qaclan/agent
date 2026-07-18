@@ -264,23 +264,54 @@ def parse_bruno_collection_settings(bru_text: str) -> dict:
 
 
 def request_to_bru(req: dict) -> str:
-    """Convert a QAClan api_request dict to Bruno .bru format string."""
+    """Convert a qaclan api_request dict to Bruno .bru format string."""
     import json as _json
+    from cli.api_discovery.path_vars import revert_path_vars
+    from cli.api_discovery.script_rewrite import qc_script_to_foreign
+
+    url = revert_path_vars(req.get("url", ""), req.get("path_params"))
+    method = req.get("method", "GET").lower()
+    auth_type = req.get("auth_type", "inherit")
+
     lines = [
         "meta {",
         f"  name: {req.get('name', 'Request')}",
-        f"  method: {req.get('method', 'GET')}",
+        "  type: http",
         "  seq: 1",
         "}",
         "",
-        f"{req.get('method', 'GET').lower()} {{",
-        f"  url: {req.get('url', '')}",
+        f"{method} {{",
+        f"  url: {url}",
+        f"  body: {_bru_body_mode(req.get('body_type'))}",
+        f"  auth: {auth_type if auth_type in ('bearer', 'basic', 'apikey', 'oauth2', 'inherit') else 'none'}",
         "}",
         "",
     ]
+
+    path_params = req.get("path_params") or []
+    if isinstance(path_params, str):
+        path_params = _json.loads(path_params or "[]")
+    if path_params:
+        lines.append("params:path {")
+        for p in path_params:
+            lines.append(f"  {p.get('key', '')}: {p.get('value', '')}")
+        lines.append("}")
+        lines.append("")
+
+    params = req.get("params") or []
+    if isinstance(params, str):
+        params = _json.loads(params or "[]")
+    if params:
+        lines.append("params:query {")
+        for p in params:
+            prefix = "" if p.get("enabled", True) else "~"
+            lines.append(f"  {prefix}{p.get('key', '')}: {p.get('value', '')}")
+        lines.append("}")
+        lines.append("")
+
     headers = req.get("headers", [])
     if isinstance(headers, str):
-        headers = _json.loads(headers)
+        headers = _json.loads(headers or "[]")
     if headers:
         lines.append("headers {")
         for h in headers:
@@ -288,12 +319,159 @@ def request_to_bru(req: dict) -> str:
             lines.append(f"  {prefix}{h.get('key', '')}: {h.get('value', '')}")
         lines.append("}")
         lines.append("")
-    body = req.get("body")
-    body_type = req.get("body_type")
-    if body and body_type == "raw":
-        lines.append("body:json {")
-        for line in body.splitlines():
+
+    if auth_type not in ("inherit", "none", None):
+        auth_lines = _bru_auth_block(auth_type, req.get("auth_config") or {})
+        if auth_lines:
+            lines.extend(auth_lines)
+            lines.append("")
+
+    body_lines = _bru_body_block(req.get("body_type"), req.get("body"))
+    if body_lines:
+        lines.extend(body_lines)
+        lines.append("")
+
+    if req.get("pre_lang", "js") == "js" and req.get("pre_script"):
+        lines.append("script:pre-request {")
+        for line in qc_script_to_foreign(req["pre_script"], "bruno").splitlines():
             lines.append(f"  {line}")
         lines.append("}")
         lines.append("")
+
+    if req.get("post_lang", "js") == "js" and req.get("post_script"):
+        lines.append("script:post-response {")
+        for line in qc_script_to_foreign(req["post_script"], "bruno").splitlines():
+            lines.append(f"  {line}")
+        lines.append("}")
+        lines.append("")
+
+    assertions = req.get("assertions") or []
+    if isinstance(assertions, str):
+        assertions = _json.loads(assertions or "[]")
+    assert_lines = _bru_assert_lines(assertions)
+    if assert_lines:
+        lines.append("assert {")
+        lines.extend(f"  {l}" for l in assert_lines)
+        lines.append("}")
+        lines.append("")
+
     return "\n".join(lines)
+
+
+def _bru_body_mode(body_type: str | None) -> str:
+    return {"raw": "json", "form": "form-urlencoded", "multipart": "multipart-form", "graphql": "graphql"}.get(body_type, "none")
+
+
+def _bru_body_block(body_type: str | None, body: str | None) -> list[str]:
+    import json as _json
+    if not body_type or body is None:
+        return []
+    if body_type == "raw":
+        return ["body:json {"] + [f"  {l}" for l in body.splitlines()] + ["}"]
+    if body_type == "graphql":
+        try:
+            gql = _json.loads(body)
+        except (ValueError, TypeError):
+            gql = {"query": "", "variables": {}}
+        out = ["body:graphql {"] + [f"  {l}" for l in gql.get("query", "").splitlines()] + ["}"]
+        if gql.get("variables"):
+            out += ["", "body:graphql:vars {"] + [f"  {l}" for l in _json.dumps(gql["variables"], indent=2).splitlines()] + ["}"]
+        return out
+    try:
+        items = _json.loads(body)
+    except (ValueError, TypeError):
+        items = []
+    if body_type == "form":
+        return ["body:form-urlencoded {"] + [f"  {'' if i.get('enabled', True) else '~'}{i.get('key', '')}: {i.get('value', '')}" for i in items] + ["}"]
+    if body_type == "multipart":
+        out = ["body:multipart-form {"]
+        for i in items:
+            prefix = "" if i.get("enabled", True) else "~"
+            value = f"@file({i.get('filename', '')})" if i.get("is_file") else i.get("value", "")
+            out.append(f"  {prefix}{i.get('key', '')}: {value}")
+        out.append("}")
+        return out
+    return []
+
+
+def _bru_auth_block(auth_type: str, auth_config: dict | str) -> list[str]:
+    import json as _json
+    if isinstance(auth_config, str):
+        try:
+            auth_config = _json.loads(auth_config)
+        except (ValueError, TypeError):
+            auth_config = {}
+    if auth_type == "bearer":
+        return ["auth:bearer {", f"  token: {auth_config.get('token', '')}", "}"]
+    if auth_type == "basic":
+        return ["auth:basic {", f"  username: {auth_config.get('username', '')}", f"  password: {auth_config.get('password', '')}", "}"]
+    if auth_type == "api_key":
+        return ["auth:apikey {", f"  key: {auth_config.get('key', '')}", f"  value: {auth_config.get('value', '')}", f"  placement: {auth_config.get('in', 'header')}", "}"]
+    if auth_type == "oauth2":
+        return ["auth:oauth2 {", "  grant_type: client_credentials",
+                f"  accessTokenUrl: {auth_config.get('token_url', '')}",
+                f"  clientId: {auth_config.get('client_id', '')}",
+                f"  clientSecret: {auth_config.get('client_secret', '')}", "}"]
+    return []
+
+
+def _bru_assert_lines(assertions: list[dict]) -> list[str]:
+    op_reverse = {"eq": "eq", "ne": "neq", "gt": "gt", "lt": "lt", "contains": "contains", "matches": "matches"}
+    out = []
+    for a in assertions:
+        a_type, op, value = a.get("type"), a.get("op"), a.get("value")
+        qc_op = op_reverse.get(op, "eq")
+        if a_type == "status":
+            out.append(f"res.status: {qc_op} {value}")
+        elif a_type == "header":
+            out.append(f"res.headers.{a.get('key', '')}: {qc_op} {value}")
+        elif a_type == "response_time":
+            out.append(f"res.responseTime: {qc_op} {value}")
+        elif a_type == "json_path":
+            path = (a.get("path") or "$").replace("$.", "").replace("$", "")
+            out.append(f"res.body{'.' + path if path else ''}: {qc_op} {value}")
+    return out
+
+
+def collection_bru(collection: dict, collection_vars: list[dict]) -> str:
+    """Build a collection.bru file: collection-level vars + auth."""
+    lines = []
+    if collection_vars:
+        lines.append("vars:pre-request {")
+        for v in collection_vars:
+            lines.append(f"  {v['key']}: {v['initial_value']}")
+        lines.append("}")
+        lines.append("")
+    auth_type = collection.get("auth_type", "none")
+    if auth_type not in ("none", None, "inherit"):
+        lines.append("auth {")
+        lines.append(f"  mode: {auth_type}")
+        lines.append("}")
+        lines.append("")
+        lines.extend(_bru_auth_block(auth_type, collection.get("auth_config") or {}))
+    return "\n".join(lines)
+
+
+def export_bruno_tree(collection: dict, requests: list[dict], folders: list[dict], collection_vars: list[dict]) -> dict[str, str]:
+    """Build the whole collection as {relative_path: file_content}."""
+    by_id = {f["id"]: f for f in folders}
+
+    def _dir_path(folder_id: str | None) -> str:
+        if not folder_id or folder_id not in by_id:
+            return ""
+        f = by_id[folder_id]
+        parent = _dir_path(f.get("parent_folder_id"))
+        return f"{parent}/{f['name']}" if parent else f["name"]
+
+    files: dict[str, str] = {}
+    settings = collection_bru(collection, collection_vars)
+    if settings.strip():
+        files["collection.bru"] = settings
+
+    for req in requests:
+        dir_path = _dir_path(req.get("folder_id"))
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req.get("name", "request"))
+        rel = f"{dir_path}/{safe_name}.bru" if dir_path else f"{safe_name}.bru"
+        files[rel] = request_to_bru(req)
+
+    return files
