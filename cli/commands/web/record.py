@@ -8,7 +8,7 @@ import tempfile
 import click
 from rich.console import Console
 
-from cli.config import get_active_project, SCRIPTS_DIR
+from cli.config import get_active_project, SCRIPTS_DIR, UPLOADS_DIR
 from cli.db import get_conn, generate_id
 from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 from cli.runtime import is_frozen_binary, is_path_in_temp, get_default_playwright_browsers_path
@@ -171,7 +171,12 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
         with open(tmp_path, "r", encoding="utf-8") as f:
             raw_script = f.read()
 
-        processed = strategy.post_process_recording(raw_script)
+        # script_id is generated here (rather than after post-processing, as
+        # before) because post_process_recording needs to know where to copy
+        # any uploaded test file it detects.
+        script_id = generate_id("script")
+        upload_dir = os.path.join(UPLOADS_DIR, script_id)
+        processed = strategy.post_process_recording(raw_script, upload_dir=upload_dir)
 
         var_keys_list = []
         start_url_value = url_key_value or url
@@ -179,7 +184,6 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
             processed = strategy.rewrite_url_template(processed, url_key_value, url_key)
             var_keys_list = [url_key]
 
-        script_id = generate_id("script")
         dest = os.path.join(SCRIPTS_DIR, f"{script_id}{strategy.file_extension}")
         os.makedirs(SCRIPTS_DIR, exist_ok=True)
         with open(dest, "w", encoding="utf-8") as f:
