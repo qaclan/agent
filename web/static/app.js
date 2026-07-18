@@ -4029,6 +4029,22 @@ async function runSuiteModal(id, name) {
   ], name)
 }
 
+function toggleCapturedRequestSelect(capId, idx, checked) {
+  const state = window._capturedReqState && window._capturedReqState[capId]
+  if (!state) return
+  if (checked) state.selected.add(idx)
+  else state.selected.delete(idx)
+}
+
+async function saveCapturedRequests(capId, scriptName) {
+  const state = window._capturedReqState && window._capturedReqState[capId]
+  if (!state || !state.selected.size) { toast('Select at least one request', 'error'); return }
+  const selected = state.requests.filter((_, i) => state.selected.has(i))
+  const { showRequestReviewModal } = await import('./api/views/request-review-modal.js')
+  closeModal()
+  showRequestReviewModal(selected, scriptName, selected[0] ? selected[0].url : '')
+}
+
 function showRunResults(run, suiteName) {
   const scripts = run.scripts || []
   const skipped = run.skipped || 0
@@ -4149,6 +4165,50 @@ function showRunResults(run, suiteName) {
         </div>`
       }
 
+      // Captured Requests block (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md)
+      // s.captured_requests is only ever present on a fresh execute_run() response —
+      // get_run() (revisiting a run later) never has it, only the count (Section 0.5).
+      let capturedRequestsBlock = ''
+      const hasFreshCapture = Object.prototype.hasOwnProperty.call(s, 'captured_requests') && s.captured_requests
+      if (hasFreshCapture) {
+        const capturedRequests = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
+        if (capturedRequests.length > 0) {
+          const capId = 'cap-' + Math.random().toString(36).slice(2, 8)
+          window._capturedReqState = window._capturedReqState || {}
+          window._capturedReqState[capId] = {
+            requests: capturedRequests,
+            selected: new Set(capturedRequests.map((_, ri) => ri)),
+          }
+          const rowsHTML = capturedRequests.map((r, ri) => `
+            <div class="cap-req-row">
+              <input type="checkbox" class="cap-req-check" checked
+                     onchange="toggleCapturedRequestSelect('${capId}', ${ri}, this.checked)">
+              <span class="method-badge method-${escHtml(r.method)}">${escHtml(r.method)}</span>
+              <span class="cap-req-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
+              <span class="cap-req-status">${r.response_status != null ? r.response_status : '—'}</span>
+              <span class="cap-req-duration">${r.duration_ms != null ? r.duration_ms + 'ms' : '—'}</span>
+            </div>`).join('')
+          capturedRequestsBlock = `<div class="script-result-diagnostics">
+            <div class="script-result-error-toggle" onclick="document.getElementById('${capId}').classList.toggle('collapsed')">
+              <span class="script-result-error-label" style="color: var(--accent)">Captured Requests (${capturedRequests.length})</span>
+              <span class="script-result-error-chevron">&#9662;</span>
+            </div>
+            <div id="${capId}" class="script-result-error-body collapsed">
+              <div class="cap-req-list">${rowsHTML}</div>
+              <div class="cap-req-actions">
+                <button class="btn-ghost btn-sm" onclick="saveCapturedRequests('${capId}', ${escHtml(JSON.stringify(s.name))})">Save Selected</button>
+              </div>
+            </div>
+          </div>`
+        }
+      } else if ((s.captured_requests_count || 0) > 0) {
+        // Historical view (e.g. run reopened from run history): the array
+        // was never persisted, so there's nothing to pick from — just say so.
+        capturedRequestsBlock = `<div class="script-result-diagnostics">
+          <div class="cap-req-historical">Captured ${s.captured_requests_count} request${s.captured_requests_count === 1 ? '' : 's'} during this run (not saved)</div>
+        </div>`
+      }
+
       // Error block. Prefer the structured error_detail (classified, plain
       // language); fall back to the raw friendly-error line for old runs.
       let errorBlock = ''
@@ -4215,6 +4275,7 @@ function showRunResults(run, suiteName) {
         </div>
         ${errorBlock}
         ${diagnosticsBlock}
+        ${capturedRequestsBlock}
       </div>`
     }).join('')}
     </div>`
