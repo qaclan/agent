@@ -301,9 +301,11 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
     codegen_target = "playwright-test"
     file_extension = ".spec.js"
 
-    def post_process_recording(self, raw: str) -> str:
+    def post_process_recording(self, raw: str, upload_dir: str = None) -> str:
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
+        actions = self._extract_upload_files(actions, upload_dir)
+        actions = self._strip_upload_click(actions)
         return self._render_harness(actions)
 
     def setup_run_dir(self, run_dir: str) -> None:
