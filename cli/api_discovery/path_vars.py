@@ -38,3 +38,12 @@ def convert_path_vars(url: str, seed_values: dict[str, str] | None = None) -> tu
         new_url = _COLON_VAR_RE.sub(_replace, url)
 
     return new_url, path_params
+
+
+def revert_path_vars(url: str, path_params: list[dict] | None) -> str:
+    """Reverse of convert_path_vars: qaclan's {key} -> Postman/Bruno's :key."""
+    for p in (path_params or []):
+        key = p.get("key")
+        if key:
+            url = url.replace("{" + key + "}", ":" + key)
+    return url

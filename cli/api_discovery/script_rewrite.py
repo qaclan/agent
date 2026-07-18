@@ -134,3 +134,174 @@ def foreign_script_to_qc(script: str | None) -> tuple[str | None, list[str]]:
                 seen.add(token)
                 warnings.append(f"unconverted script call: {token}")
     return text, warnings
+
+
+def _split_top_level_args(s: str) -> list[str]:
+    """Split a JS call's argument text on top-level commas, respecting
+    (), [], {}, and both quote types. Not a full JS parser — good enough
+    for the single-line calls this module generates and typically sees."""
+    parts: list[str] = []
+    depth = 0
+    quote = None
+    current = []
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if quote:
+            current.append(c)
+            if c == "\\" and i + 1 < len(s):
+                i += 1
+                current.append(s[i])
+            elif c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+            current.append(c)
+        elif c in "([{":
+            depth += 1
+            current.append(c)
+        elif c in ")]}":
+            depth -= 1
+            current.append(c)
+        elif c == "," and depth == 0:
+            parts.append("".join(current).strip())
+            current = []
+        else:
+            current.append(c)
+        i += 1
+    if current:
+        parts.append("".join(current).strip())
+    return parts
+
+
+# Reverse of _DIRECT_REWRITES — qc.* -> foreign, keyed by target.
+_REVERSE_DIRECT: dict[str, list[tuple[re.Pattern, str]]] = {
+    "postman": [
+        (re.compile(r"\bqc\.set\("), "pm.environment.set("),
+        (re.compile(r"\bqc\.test\("), "pm.test("),
+        (re.compile(r"\bqc\.getHeader\("), "pm.request.headers.get("),
+        (re.compile(r"\bqc\.getParam\("), "pm.request.url.query.get("),
+        (re.compile(r"\bresponse\.json\("), "pm.response.json("),
+        (re.compile(r"\bresponse\.text\("), "pm.response.text("),
+        (re.compile(r"\bresponse\.headers\b"), "pm.response.headers"),
+        (re.compile(r"\bresponse\.status\b"), "pm.response.code"),
+    ],
+    "bruno": [
+        (re.compile(r"\bqc\.set\("), "bru.setVar("),
+        (re.compile(r"\bqc\.test\("), "test("),
+        (re.compile(r"\bqc\.setHeader\("), "req.setHeader("),
+        (re.compile(r"\bqc\.getHeader\("), "req.getHeader("),
+        (re.compile(r"\bqc\.setParam\("), "req.setQueryParam("),
+        (re.compile(r"\bqc\.getParam\("), "req.getQueryParam("),
+        (re.compile(r"\bresponse\.json\(\)"), "res.body"),
+        (re.compile(r"\bresponse\.headers\b"), "res.headers"),
+        (re.compile(r"\bresponse\.status\b"), "res.status"),
+    ],
+}
+
+
+def _find_matching_paren(s: str, open_idx: int) -> int:
+    """s[open_idx] must be '('. Returns the index of its matching ')',
+    respecting nesting and quotes, or -1 if unbalanced."""
+    depth = 0
+    quote = None
+    i = open_idx
+    while i < len(s):
+        c = s[i]
+        if quote:
+            if c == "\\" and i + 1 < len(s):
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _rewrite_calls(line: str, call_name: str, build) -> str:
+    """Replace every top-level call to `call_name(...)` in line, using
+    build(args: list[str]) -> str | None (None = leave this call alone).
+    Uses real paren-matching (not regex) so nested calls on the same line
+    (e.g. qc.expect(...) inside a qc.test(...) callback) are handled
+    correctly instead of a greedy regex swallowing past the true close
+    paren."""
+    out = []
+    i = 0
+    needle = call_name + "("
+    while True:
+        idx = line.find(needle, i)
+        if idx == -1:
+            out.append(line[i:])
+            break
+        out.append(line[i:idx])
+        open_paren = idx + len(call_name)
+        close_paren = _find_matching_paren(line, open_paren)
+        if close_paren == -1:
+            out.append(line[idx:])
+            break
+        inner = line[open_paren + 1:close_paren]
+        args = _split_top_level_args(inner) if inner.strip() else []
+        replacement = build(args, line[:idx], line[close_paren + 1:])
+        if replacement is None:
+            out.append(line[idx:close_paren + 1])
+        else:
+            out.append(replacement)
+        i = close_paren + 1
+    return "".join(out)
+
+
+def _build_expect_replacement(target):
+    def build(args: list[str], before: str, after: str) -> str | None:
+        if len(args) < 2:
+            return None
+        cond, message = args[0], ",".join(args[1:])
+        # Whole-statement case (qc.expect(...) is the entire line, modulo
+        # indentation/semicolon): wrap as a named test so Postman/Bruno's
+        # test runner records it as a distinct result, matching what a
+        # standalone qc.expect() does in qaclan (records its own pass/fail).
+        if not before.strip() and not after.strip().rstrip(";").strip():
+            # No trailing ";" here — the original line's own trailing ";"
+            # (left in `after`) supplies it, avoiding a doubled ";;".
+            if target == "postman":
+                return f'pm.test({message}, () => {{ if (!({cond})) throw new Error({message}); }})'
+            return f'test({message}, () => {{ if (!({cond})) throw new Error({message}); }})'
+        # Nested case (already inside some other block, e.g. a qc.test
+        # callback): in-place statement substitution, no extra wrapping —
+        # qc.expect is always called for its side effect, never as a value,
+        # so it's always safe to replace with an if/throw statement.
+        return f"if (!({cond})) throw new Error({message})"
+    return build
+
+
+def _build_object_wrap(wrapper: str):
+    def build(args: list[str], before: str, after: str) -> str | None:
+        if len(args) != 2:
+            return None
+        return f"{wrapper}({{key: {args[0]}, value: {args[1]}}})"
+    return build
+
+
+def qc_script_to_foreign(script: str | None, target: str) -> str | None:
+    """Reverse of foreign_script_to_qc — regenerate Postman/Bruno-flavored
+    JS from qaclan's native qc.* script text. target: "postman" | "bruno".
+    """
+    if not script:
+        return script
+    out_lines = []
+    for line in script.splitlines():
+        rewritten = _rewrite_calls(line, "qc.expect", _build_expect_replacement(target))
+        if target == "postman":
+            rewritten = _rewrite_calls(rewritten, "qc.setHeader", _build_object_wrap("pm.request.headers.add"))
+            rewritten = _rewrite_calls(rewritten, "qc.setParam", _build_object_wrap("pm.request.url.addQueryParams"))
+        for pattern, replacement in _REVERSE_DIRECT[target]:
+            rewritten = pattern.sub(replacement, rewritten)
+        out_lines.append(rewritten if rewritten.strip() else line)
+    return "\n".join(out_lines)
