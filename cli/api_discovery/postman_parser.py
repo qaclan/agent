@@ -179,7 +179,7 @@ def parse_postman(collection: dict) -> dict:
         _process_item(item, [], results, warnings)
 
     collection_vars = {
-        v.get("key"): str(v.get("value", ""))
+        v.get("key"): {"value": str(v.get("value", "")), "is_secret": v.get("type") == "secret"}
         for v in collection.get("variable", []) if v.get("key")
     }
 

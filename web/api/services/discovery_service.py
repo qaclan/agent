@@ -40,10 +40,16 @@ def _resolve_folders(project_id: str, collection_id: str, requests: list[dict]) 
     return cache
 
 
-def _apply_collection_extras(project_id: str, collection_id: str, collection_vars: dict[str, str] | None,
+def _apply_collection_extras(project_id: str, collection_id: str, collection_vars: dict | None,
                               collection_auth: tuple[str, dict] | None) -> None:
-    for key, value in (collection_vars or {}).items():
-        _vars_repo.upsert(collection_id, key, str(value))
+    for key, v in (collection_vars or {}).items():
+        if isinstance(v, dict):
+            value = str(v.get("value", ""))
+            is_secret = bool(v.get("is_secret"))
+        else:
+            value = str(v)
+            is_secret = False
+        _vars_repo.upsert(collection_id, key, value, is_secret=is_secret)
     if collection_auth:
         auth_type, auth_config = collection_auth
         existing = _col_repo.get(collection_id, project_id) or {}
