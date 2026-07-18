@@ -7,6 +7,7 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -17,6 +18,13 @@ from typing import List
 from cli.runtime import is_frozen_binary
 from cli import runtime_setup
 from cli.script_strategies.base import ScriptStrategy
+
+logger = logging.getLogger("qaclan.script_strategies.python")
+
+_SET_INPUT_FILES_RE = re.compile(
+    r'\.set_input_files\((\[[^\]]*\]|"[^"]*"|\'[^\']*\')\)'
+)
+_UPLOAD_QUOTED_STRING_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'')
 
 
 _BEGIN_MARKER = "# BEGIN ACTIONS"
@@ -275,9 +283,11 @@ class PythonStrategy(ScriptStrategy):
     codegen_target = "python"
     file_extension = ".py"
 
-    def post_process_recording(self, raw: str) -> str:
+    def post_process_recording(self, raw: str, upload_dir: str = None) -> str:
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
+        actions = self._extract_upload_files(actions, upload_dir)
+        actions = self._strip_upload_click(actions)
         return self._render_harness(actions)
 
     def settle_call_snippet(self) -> str:
@@ -518,6 +528,76 @@ class PythonStrategy(ScriptStrategy):
             r'page.goto(\1, wait_until="domcontentloaded")',
             actions,
         )
+
+    _UPLOAD_CLICK_RE = re.compile(
+        r'^(?P<indent>[ \t]*)(?P<loc>page\.[^\n]*?)\.click\(\)[ \t]*\n'
+        r'(?:(?P=indent)_wait_for_network_settle\(page\)[ \t]*\n)?'
+        r'(?=(?P=indent)(?P=loc)\.set_input_files\()',
+        re.MULTILINE,
+    )
+
+    def _strip_upload_click(self, actions: str) -> str:
+        """Drop a codegen-recorded ``.click()`` that immediately precedes a
+        ``.set_input_files()`` call on the identical locator.
+
+        Codegen's own recording session intercepts the native OS file-picker
+        that click triggers on a real ``<input type=file>``, but that
+        interception isn't part of the exported script. Replayed headed, the
+        click opens a real unhandled OS dialog and hangs the page.
+        ``set_input_files()`` alone sets the file via CDP — no click needed."""
+        return self._UPLOAD_CLICK_RE.sub("", actions)
+
+    def _extract_upload_files(self, actions: str, upload_dir: str = None) -> str:
+        """Copy any absolute-path file referenced by a recorded
+        ``set_input_files()`` call into ``upload_dir`` and rewrite the call to
+        reference it via the ``{{__qaclan_upload_dir__}}`` token instead of the
+        machine-local path codegen recorded — see
+        docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md.
+
+        No-ops if ``upload_dir`` is falsy: only the live `qaclan web record`
+        flow supplies one; the paste/import call sites don't."""
+        if not upload_dir:
+            return actions
+
+        from cli.config import get_upload_size_cap_mb
+        cap_bytes = get_upload_size_cap_mb() * 1024 * 1024
+
+        def _replace(m):
+            args_text = m.group(1)
+            paths = [a or b for a, b in _UPLOAD_QUOTED_STRING_RE.findall(args_text)]
+            new_paths = []
+            changed = False
+            for p in paths:
+                if not os.path.isabs(p) or not os.path.exists(p):
+                    new_paths.append(p)
+                    continue
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    new_paths.append(p)
+                    continue
+                if size > cap_bytes:
+                    logger.warning(
+                        "Upload file %r is %d bytes, over the %dMB cap — not "
+                        "captured, recorded path left as-is.",
+                        p, size, get_upload_size_cap_mb(),
+                    )
+                    new_paths.append(p)
+                    continue
+                basename = os.path.basename(p)
+                os.makedirs(upload_dir, exist_ok=True)
+                shutil.copyfile(p, os.path.join(upload_dir, basename))
+                new_paths.append("{{__qaclan_upload_dir__}}/" + basename)
+                changed = True
+            if not changed:
+                return m.group(0)
+            if args_text.startswith("["):
+                new_args = "[" + ", ".join(f'"{pp}"' for pp in new_paths) + "]"
+            else:
+                new_args = f'"{new_paths[0]}"'
+            return f".set_input_files({new_args})"
+
+        return _SET_INPUT_FILES_RE.sub(_replace, actions)
 
     def _render_harness(self, actions: str) -> str:
         if not actions.strip():
