@@ -3,6 +3,7 @@ import json
 
 from cli.api_discovery.path_vars import revert_path_vars
 from cli.api_discovery.script_rewrite import qc_script_to_foreign
+from cli.crypto import decrypt
 
 _AUTH_REVERSE = {
     "bearer": lambda c: {"type": "bearer", "bearer": [{"key": "token", "value": c.get("token", ""), "type": "string"}]},
@@ -194,7 +195,17 @@ def to_postman_collection(collection: dict, requests: list[dict], folders: list[
         "item": _build_folder_tree(folders, requests),
     }
     if collection_vars:
-        result["variable"] = [{"key": v["key"], "value": v["initial_value"], "type": "string"} for v in collection_vars]
+        result["variable"] = []
+        for v in collection_vars:
+            value = v["initial_value"]
+            is_secret = bool(v.get("is_secret"))
+            if is_secret and value:
+                value = decrypt(value)
+            result["variable"].append({
+                "key": v["key"],
+                "value": value,
+                "type": "secret" if is_secret else "string",
+            })
     auth = _auth_block(collection.get("auth_type", "none"), collection.get("auth_config") or {})
     if auth and auth.get("type") != "noauth":
         result["auth"] = auth

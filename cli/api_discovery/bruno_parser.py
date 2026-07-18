@@ -5,6 +5,7 @@ import re
 
 from cli.api_discovery.path_vars import convert_path_vars
 from cli.api_discovery.script_rewrite import foreign_script_to_qc
+from cli.crypto import decrypt
 
 logger = logging.getLogger("qaclan.bruno_parser")
 
@@ -449,7 +450,10 @@ def collection_bru(collection: dict, collection_vars: list[dict]) -> str:
     if collection_vars:
         lines.append("vars:pre-request {")
         for v in collection_vars:
-            lines.append(f"  {v['key']}: {v['initial_value']}")
+            value = v["initial_value"]
+            if v.get("is_secret") and value:
+                value = decrypt(value)
+            lines.append(f"  {v['key']}: {value}")
         lines.append("}")
         lines.append("")
     auth_type = collection.get("auth_type", "none")
