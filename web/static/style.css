@@ -26,6 +26,7 @@
   --danger-border:   rgba(239,68,68,0.20);
   --warning:         #f59e0b;
   --warning-bg:      rgba(245,158,11,0.10);
+  --var-col:         #a855f7;
 
   --font-ui:   'Outfit', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
@@ -67,6 +68,7 @@ html[data-theme="light"] {
   --danger-bg:       rgba(239,68,68,0.10);
   --danger-border:   rgba(239,68,68,0.28);
   --warning-bg:      rgba(245,158,11,0.14);
+  --var-col:         #9333ea;
 
   --shadow-sm:   0 1px 2px rgba(15,23,42,0.06);
   --shadow-md:   0 4px 16px rgba(15,23,42,0.08);
@@ -1854,6 +1856,15 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .var-token-overlay--multiline { white-space: pre-wrap; word-break: break-word; }
 .var-tok--ok { color: var(--success); }
 .var-tok--missing { color: var(--danger); }
+.var-tok--env { color: var(--accent); }
+.var-tok--col { color: var(--var-col); }
+.var-tok[data-src]::after {
+  content: attr(data-src);
+  font-size: 8px;
+  vertical-align: super;
+  opacity: .75;
+  margin-left: 1px;
+}
 
 /* Chrome/Edge autofill paints its own text via -webkit-text-fill-color, which
    wins over the `color: transparent` we set on the real input — so autofilled
