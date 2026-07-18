@@ -225,8 +225,36 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   });
   urlInput.value = r.url || '';
 
+  // {{ autocomplete — contenteditable has no .selectionStart/.setSelectionRange,
+  // so this can't use watchInput() (built for real <input>/<textarea>); wire the
+  // same open/handleKeydown primitives by hand against the caret-offset helpers above.
+  const _urlInlineDrop = createInlineVarDrop(getAllVars);
   urlInput.addEventListener('input', _renderUrlTokens);
+  urlInput.addEventListener('input', (e) => {
+    if (!e.isTrusted) return;
+    const val = urlInput.value;
+    const caret = _urlCaretOffset();
+    if (caret == null) { _urlInlineDrop.close(); return; }
+    const before = val.slice(0, caret);
+    const openAt = before.lastIndexOf('{{');
+    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
+      const partial = before.slice(openAt + 2);
+      _urlInlineDrop.open(urlInput, (varToken) => {
+        const cv = urlInput.value;
+        const cc = _urlCaretOffset() ?? cv.length;
+        const cb = cv.slice(0, cc);
+        const oa = cb.lastIndexOf('{{');
+        const at = oa !== -1 ? oa : cc;
+        urlInput.value = cv.slice(0, at) + varToken + cv.slice(cc);
+        _setUrlCaretOffset(at + varToken.length);
+        urlInput.focus();
+      }, partial);
+    } else {
+      _urlInlineDrop.close();
+    }
+  });
   urlInput.addEventListener('keydown', (e) => {
+    if (_urlInlineDrop.handleKeydown(e)) return;
     if (e.key === 'Enter') e.preventDefault(); // single-line field, no inserted linebreaks
   });
 

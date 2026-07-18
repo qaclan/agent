@@ -1670,8 +1670,11 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 
 .req-url-bar .req-url-input {
   flex: 1;
-  display: flex;
-  align-items: center;
+  /* block, not flex — a flex container splits its text node + {{var}} token
+     spans into separate flex items, which breaks native caret navigation
+     across that boundary (click/End/ArrowLeft all get stuck at the first
+     item). line-height centers the single line of text instead. */
+  display: block;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -1680,6 +1683,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   font-family: var(--font-mono);
   color: var(--text-primary);
   min-height: 44px;
+  line-height: 44px;
   box-shadow: none;
   white-space: pre;
   overflow-x: auto;
@@ -1961,8 +1965,21 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   word-break: break-all;
 }
 
-/* Assertions */
+/* Assertions — type/op/matchmode are fixed-choice selects, keep them compact;
+   path/expected-value are free-text fields the user actually types into, so
+   let them grow and claim the leftover row width (targets both the raw
+   input, when no var-overlay is attached, and its overlay wrap otherwise). */
 .assertion-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.assertion-row .assertion-type { flex: 0 0 100px; width: auto; }
+.assertion-row .assertion-op { flex: 0 0 150px; width: auto; }
+.assertion-row .assertion-matchmode { flex: 0 0 110px; width: auto; }
+.assertion-row .assertion-extra,
+.assertion-row .assertion-value,
+.assertion-row .var-token-overlay-wrap:has(.assertion-extra),
+.assertion-row .var-token-overlay-wrap:has(.assertion-value) {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
 .assertion-value--invalid {
   border-color: var(--danger) !important;
   background: var(--danger-bg);

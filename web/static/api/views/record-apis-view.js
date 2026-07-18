@@ -14,7 +14,13 @@ export function showRecordApis() {
       placeholder="https://your-app.com" autocomplete="url">
     <p id="record-url-error" style="color:var(--danger);font-size:12px;margin-top:4px;display:none">
       Enter a valid URL starting with http:// or https://
-    </p>`;
+    </p>
+    <div class="form-group" style="margin-top:12px">
+      <label class="form-label">Resolution</label>
+      <select id="record-resolution">
+        ${window._renderResolutionOptions()}
+      </select>
+    </div>`;
 
   let _sessionId = null;
   let _pollTimer = null;
@@ -43,10 +49,12 @@ export function showRecordApis() {
       return;
     }
     if (errEl) errEl.style.display = 'none';
-    _startRecording(url);
+    const resEl = document.getElementById('record-resolution');
+    const resolution = resEl ? resEl.value : '';
+    _startRecording(url, resolution);
   }
 
-  async function _startRecording(url) {
+  async function _startRecording(url, resolution) {
     _startUrl = url;
     const modalBody = document.querySelector('.modal-body');
     if (modalBody) {
@@ -67,7 +75,9 @@ export function showRecordApis() {
       stopBtn.parentNode.replaceChild(newBtn, stopBtn);
     }
 
-    const res = await window.api('POST', '/discover/record/start', { url });
+    const payload = { url };
+    if (resolution) payload.resolution = resolution;
+    const res = await window.api('POST', '/discover/record/start', payload);
     if (!res.ok) {
       const mb = document.querySelector('.modal-body');
       if (mb) mb.innerHTML = `<p style="color:var(--danger)">Failed to start: ${_esc(res.error)}</p>`;
