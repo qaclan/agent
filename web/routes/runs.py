@@ -17,6 +17,7 @@ from cli.runtime_setup import RUNTIME_DIR
 from cli.crypto import decrypt
 from cli.script_strategies import get_strategy
 from cli.script_strategies._shared import substitute_template_vars
+from cli.api_discovery.captured_request_parser import parse_captured_requests
 
 logger = logging.getLogger("qaclan.runs")
 
@@ -36,21 +37,24 @@ def _read_artifacts(path: Path):
     files degrade gracefully to empty lists — a crashed script may not have
     written anything.
 
-    Returns (console_errors, network_failures, error) — `error` is the
-    harness's structured exception dict ({raw_type, raw_message}) or None.
+    Returns (console_errors, network_failures, captured_requests, error) —
+    `captured_requests` is the raw (unredacted) harness capture list, `error`
+    is the harness's structured exception dict ({raw_type, raw_message}) or
+    None.
     """
     if not path.exists():
-        return [], [], None
+        return [], [], [], None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return (
             data.get("console_errors", []) or [],
             data.get("network_failures", []) or [],
+            data.get("captured_requests", []) or [],
             data.get("error") or None,
         )
     except Exception as e:
         logger.warning("Failed to read artifacts at %s: %s", path, e)
-        return [], [], None
+        return [], [], [], None
 
 
 def _build_error_detail(*, kind, returncode=None, stdout=None, stderr=None,
@@ -162,6 +166,7 @@ def get_run(run_id):
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
             "scr.console_errors, scr.network_failures, scr.error_message, scr.error_detail, "
             "scr.console_log, scr.network_log, scr.screenshot_path, "
+            "scr.captured_requests_count, "
             "scr.order_index, scr.started_at, scr.finished_at "
             "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
             "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
@@ -594,7 +599,12 @@ def execute_run():
 
                 duration_ms = int((time.time() - script_start) * 1000)
                 finished_at = datetime.now(timezone.utc).isoformat()
-                console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
+                console_errors, network_failures, captured_requests_raw, artifacts_error = _read_artifacts(artifacts_path)
+                try:
+                    captured_requests = parse_captured_requests(captured_requests_raw)
+                except Exception:
+                    logger.warning("execute_run: failed to parse captured requests for %s", srun_id, exc_info=True)
+                    captured_requests = []
 
                 error_detail = None
                 if proc.returncode == 0:
@@ -623,17 +633,20 @@ def execute_run():
                         logger.info("execute_run: stop-on-fail triggered, remaining scripts will be skipped")
 
                 error_detail_json = json.dumps(error_detail) if error_detail else None
+                captured_requests_json = json.dumps(captured_requests) if captured_requests else None
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
                     "duration_ms, error_message, error_detail, console_errors, network_failures, "
-                    "console_log, network_log, screenshot_path, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "console_log, network_log, screenshot_path, captured_requests_count, "
+                    "started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"], status,
                      duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
-                     saved_screenshot, script_now, finished_at),
+                     saved_screenshot, len(captured_requests),
+                     script_now, finished_at),
                 )
 
                 script_results.append({
@@ -648,6 +661,8 @@ def execute_run():
                     "network_failures": len(network_failures),
                     "console_log": json.dumps(console_errors) if console_errors else None,
                     "network_log": json.dumps(network_failures) if network_failures else None,
+                    "captured_requests": captured_requests_json,
+                    "captured_requests_count": len(captured_requests),
                 })
 
             except subprocess.TimeoutExpired:
@@ -661,22 +676,30 @@ def execute_run():
                     stopped = True
                 # Partial console/network data may still exist from the killed
                 # subprocess; the harness `error` almost never does.
-                console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
+                console_errors, network_failures, captured_requests_raw, artifacts_error = _read_artifacts(artifacts_path)
+                try:
+                    captured_requests = parse_captured_requests(captured_requests_raw)
+                except Exception:
+                    logger.warning("execute_run: failed to parse captured requests for %s", srun_id, exc_info=True)
+                    captured_requests = []
                 error_detail, error_msg = _build_error_detail(
                     kind="timeout", has_network_failures=bool(network_failures),
                 )
                 error_detail_json = json.dumps(error_detail)
+                captured_requests_json = json.dumps(captured_requests) if captured_requests else None
                 conn.execute(
                     "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
                     "duration_ms, error_message, error_detail, console_errors, network_failures, "
-                    "console_log, network_log, screenshot_path, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "console_log, network_log, screenshot_path, captured_requests_count, "
+                    "started_at, finished_at) "
+                    "VALUES (?, ?, ?, ?, 'FAILED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (srun_id, run_id, item["script_id"], item["order_index"],
                      duration_ms, error_msg, error_detail_json,
                      len(console_errors), len(network_failures),
                      json.dumps(console_errors) if console_errors else None,
                      json.dumps(network_failures) if network_failures else None,
-                     saved_screenshot, script_now, finished_at),
+                     saved_screenshot, len(captured_requests),
+                     script_now, finished_at),
                 )
                 script_results.append({
                     "script_id": item["script_id"],
@@ -690,6 +713,8 @@ def execute_run():
                     "network_failures": len(network_failures),
                     "console_log": json.dumps(console_errors) if console_errors else None,
                     "network_log": json.dumps(network_failures) if network_failures else None,
+                    "captured_requests": captured_requests_json,
+                    "captured_requests_count": len(captured_requests),
                 })
 
             except Exception as e:
