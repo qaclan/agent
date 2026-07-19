@@ -7,6 +7,21 @@ from typing import Optional
 
 _VAR_PLACEHOLDER_RE = re.compile(r'\{\{(\w+)\}\}')
 
+# Reserved tokens that look like {{KEY}} but are resolved by dedicated
+# internal machinery, never through the environment-variable path — must
+# never be surfaced as a "required environment variable". See
+# docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md.
+RESERVED_VAR_TOKENS = {"__qaclan_upload_dir__"}
+
+# Resource types kept during capture-run request recording (opt-in via
+# QACLAN_CAPTURE_REQUESTS=1). Matches discovery's live-record filter
+# (cli/api_discovery/har_parser.py _API_RESOURCE_TYPES) -- an allowlist, not
+# a blocklist, so unknown/future Playwright resource types are excluded by
+# default. Single source of truth, JSON-injected into each harness template
+# at render time — see
+# docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md.
+CAPTURE_ALLOWED_RESOURCE_TYPES = ("xhr", "fetch")
+
 # Markers emitted by every strategy's harness. Detection is lax on the trailing
 # comment so future template tweaks don't break re-import.
 _BEGIN_MARKER_RE = re.compile(r'^[ \t]*(?:#|//)\s*BEGIN ACTIONS', re.MULTILINE)
@@ -60,6 +75,8 @@ def scan_var_keys(content: str) -> list:
     seen = []
     for m in _VAR_PLACEHOLDER_RE.finditer(content):
         key = m.group(1)
+        if key in RESERVED_VAR_TOKENS:
+            continue
         if key not in seen:
             seen.append(key)
     return seen
