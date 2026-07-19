@@ -302,6 +302,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
     if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    _rawValue = parsed.body || '';
     bodyTextarea.value = parsed.body || '';
     _setBodyType(parsed.body_type || 'none');
 
@@ -651,6 +652,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _syncGqlBodyTextarea();
       return;
     }
+    _rawValue = val;
     bodyTextarea.value = val; // always keep hidden textarea in sync for _save()
     if (_cmActive && _cmEditor) { _cmEditor.setValue(val); return; }
     if (_cmActive) { bodyFallback.value = val; return; }
