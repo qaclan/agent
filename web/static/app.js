@@ -544,6 +544,7 @@ async function createProjectPrompt() {
 // ── Modal System ────────────────────────────────────────────────
 
 function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
+  window._modalCloseGuard = null
   const backdrop = document.getElementById('modal-backdrop')
   const root = document.getElementById('modal-root')
 
@@ -581,6 +582,25 @@ function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
 }
 
 function closeModal() {
+  // Optional async guard the currently-open modal can register (e.g. "you
+  // have unsaved captured API requests") — return true to proceed with the
+  // close, false/undefined to abort it. Checked before anything else so an
+  // aborted close leaves the modal fully intact. See
+  // docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md (Section C).
+  const guard = window._modalCloseGuard
+  if (typeof guard === 'function') {
+    guard().then(proceed => {
+      if (proceed) {
+        window._modalCloseGuard = null
+        _doCloseModal()
+      }
+    })
+    return
+  }
+  _doCloseModal()
+}
+
+function _doCloseModal() {
   // Fire any cleanup hook the current modal registered (e.g. CM6 editor teardown)
   // before we blow away the modal DOM. Runs once, then clears.
   const hook = window._qcModalCleanupHook
@@ -4197,20 +4217,16 @@ async function runSuiteModal(id, name) {
   ], name)
 }
 
-function toggleCapturedRequestSelect(capId, idx, checked) {
-  const state = window._capturedReqState && window._capturedReqState[capId]
-  if (!state) return
-  if (checked) state.selected.add(idx)
-  else state.selected.delete(idx)
-}
-
-async function saveCapturedRequests(capId, scriptName) {
-  const state = window._capturedReqState && window._capturedReqState[capId]
-  if (!state || !state.selected.size) { toast('Select at least one request', 'error'); return }
-  const selected = state.requests.filter((_, i) => state.selected.has(i))
+async function reviewRunCapturedRequests() {
+  const requests = window._runCapturedRequests || []
+  if (!requests.length) { toast('No captured requests', 'error'); return }
   const { showRequestReviewModal } = await import('./api/views/request-review-modal.js')
-  closeModal()
-  showRequestReviewModal(selected, scriptName, selected[0] ? selected[0].url : '')
+  showRequestReviewModal(requests, 'Recorded APIs', requests[0].url, {
+    onSaved: () => {
+      window._runCapturedRequests = []
+      window._modalCloseGuard = null
+    },
+  })
 }
 
 function showRunResults(run, suiteName) {
@@ -4219,6 +4235,37 @@ function showRunResults(run, suiteName) {
   const statusBadge = run.status === 'PASSED'
     ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
     : '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
+
+  // Aggregate captured requests across the whole run instead of per script
+  // (docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md, Section
+  // B) -- one header-level summary, not N per-script accordions.
+  const anyFreshCapture = scripts.some(s => Object.prototype.hasOwnProperty.call(s, 'captured_requests'))
+  let runCapturedCount = 0
+  let capturedSummaryHTML = ''
+  window._runCapturedRequests = []
+  if (anyFreshCapture) {
+    const runCapturedRequests = []
+    scripts.forEach(s => {
+      if (!s.captured_requests) return
+      const parsed = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
+      parsed.forEach(r => runCapturedRequests.push({ ...r, _scriptName: s.name }))
+    })
+    runCapturedCount = runCapturedRequests.length
+    if (runCapturedCount > 0) {
+      window._runCapturedRequests = runCapturedRequests
+      capturedSummaryHTML = `<div class="run-capture-summary">
+        <span>${runCapturedCount} API request${runCapturedCount === 1 ? '' : 's'} captured</span>
+        <button class="btn-ghost btn-sm" onclick="reviewRunCapturedRequests()">Save as collection</button>
+      </div>`
+    }
+  } else {
+    runCapturedCount = scripts.reduce((sum, s) => sum + (s.captured_requests_count || 0), 0)
+    if (runCapturedCount > 0) {
+      capturedSummaryHTML = `<div class="run-capture-summary run-capture-summary-historical">
+        Captured ${runCapturedCount} request${runCapturedCount === 1 ? '' : 's'} during this run (not saved)
+      </div>`
+    }
+  }
 
   // Group failures by category so the pattern is visible at a glance.
   const catCounts = {}
@@ -4245,6 +4292,7 @@ function showRunResults(run, suiteName) {
       <div class="stat-card"><div class="stat-value fail">${run.failed || 0}</div><div class="stat-label">Failed</div></div>
       <div class="stat-card"><div class="stat-value">${skipped}</div><div class="stat-label">Skipped</div></div>
     </div>
+    ${capturedSummaryHTML}
     ${failureSummary}
     <div class="run-history-scroll">
     ${scripts.map(s => {
@@ -4333,50 +4381,6 @@ function showRunResults(run, suiteName) {
         </div>`
       }
 
-      // Captured Requests block (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md)
-      // s.captured_requests is only ever present on a fresh execute_run() response —
-      // get_run() (revisiting a run later) never has it, only the count (Section 0.5).
-      let capturedRequestsBlock = ''
-      const hasFreshCapture = Object.prototype.hasOwnProperty.call(s, 'captured_requests') && s.captured_requests
-      if (hasFreshCapture) {
-        const capturedRequests = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
-        if (capturedRequests.length > 0) {
-          const capId = 'cap-' + Math.random().toString(36).slice(2, 8)
-          window._capturedReqState = window._capturedReqState || {}
-          window._capturedReqState[capId] = {
-            requests: capturedRequests,
-            selected: new Set(capturedRequests.map((_, ri) => ri)),
-          }
-          const rowsHTML = capturedRequests.map((r, ri) => `
-            <div class="cap-req-row">
-              <input type="checkbox" class="cap-req-check" checked
-                     onchange="toggleCapturedRequestSelect('${capId}', ${ri}, this.checked)">
-              <span class="method-badge method-${escHtml(r.method)}">${escHtml(r.method)}</span>
-              <span class="cap-req-url" title="${escHtml(r.url)}">${escHtml(r.url)}</span>
-              <span class="cap-req-status">${r.response_status != null ? r.response_status : '—'}</span>
-              <span class="cap-req-duration">${r.duration_ms != null ? r.duration_ms + 'ms' : '—'}</span>
-            </div>`).join('')
-          capturedRequestsBlock = `<div class="script-result-diagnostics">
-            <div class="script-result-error-toggle" onclick="document.getElementById('${capId}').classList.toggle('collapsed')">
-              <span class="script-result-error-label" style="color: var(--accent)">Captured Requests (${capturedRequests.length})</span>
-              <span class="script-result-error-chevron">&#9662;</span>
-            </div>
-            <div id="${capId}" class="script-result-error-body collapsed">
-              <div class="cap-req-list">${rowsHTML}</div>
-              <div class="cap-req-actions">
-                <button class="btn-ghost btn-sm" onclick="saveCapturedRequests('${capId}', ${escHtml(JSON.stringify(s.name))})">Save Selected</button>
-              </div>
-            </div>
-          </div>`
-        }
-      } else if ((s.captured_requests_count || 0) > 0) {
-        // Historical view (e.g. run reopened from run history): the array
-        // was never persisted, so there's nothing to pick from — just say so.
-        capturedRequestsBlock = `<div class="script-result-diagnostics">
-          <div class="cap-req-historical">Captured ${s.captured_requests_count} request${s.captured_requests_count === 1 ? '' : 's'} during this run (not saved)</div>
-        </div>`
-      }
-
       // Error block. Prefer the structured error_detail (classified, plain
       // language); fall back to the raw friendly-error line for old runs.
       let errorBlock = ''
@@ -4443,7 +4447,6 @@ function showRunResults(run, suiteName) {
         </div>
         ${errorBlock}
         ${diagnosticsBlock}
-        ${capturedRequestsBlock}
       </div>`
     }).join('')}
     </div>`
@@ -4457,6 +4460,18 @@ function showRunResults(run, suiteName) {
     ...reportBtn,
     { label: 'Close', cls: 'btn-ghost', action: () => { closeModal(); renderSuitesPage() } }
   ], suiteName + ' \u00b7 ' + statusBadge, 'report')
+
+  // Assigned after showModal() (which resets any prior guard to null) so it
+  // isn't immediately wiped out. Harmless no-op when there's nothing unsaved
+  // -- always set, not just when captures are present.
+  window._modalCloseGuard = async () => {
+    if (!window._runCapturedRequests || !window._runCapturedRequests.length) return true
+    return !!(await window._confirmDialog(
+      'Unsaved captured API requests',
+      `You have ${window._runCapturedRequests.length} unsaved captured API request${window._runCapturedRequests.length === 1 ? '' : 's'}. Close anyway?`,
+      'Close anyway', 'btn btn-sm btn-danger',
+    ))
+  }
 }
 
 async function deleteSuite(id, name) {
