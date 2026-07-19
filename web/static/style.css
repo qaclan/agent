@@ -1869,15 +1869,12 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .var-token-overlay--multiline { white-space: pre-wrap; word-break: break-word; }
 .var-tok--ok { color: var(--success); }
 .var-tok--missing { color: var(--danger); }
-.var-tok--env { color: var(--accent); }
-.var-tok--col { color: var(--var-col); }
-.var-tok[data-src]::after {
-  content: attr(data-src);
-  font-size: 8px;
-  vertical-align: super;
-  opacity: .75;
-  margin-left: 1px;
-}
+
+/* Source indicator dot on {{var}} suggestion-dropdown rows (var-picker.js /
+   inline-var-drop.js) — Environment vs. Collection. */
+.var-source-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.var-source-dot--env { background: var(--accent); }
+.var-source-dot--col { background: var(--var-col); }
 
 /* Chrome/Edge autofill paints its own text via -webkit-text-fill-color, which
    wins over the `color: transparent` we set on the real input — so autofilled

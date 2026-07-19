@@ -106,6 +106,13 @@ export function createVarPicker(opts = {}) {
     };
     row.onclick = () => _pick(v.key);
 
+    if (v.group === 'Environment' || v.group === 'Collection') {
+      const dot = document.createElement('span');
+      dot.className = 'var-source-dot ' + (v.group === 'Environment' ? 'var-source-dot--env' : 'var-source-dot--col');
+      dot.title = v.group;
+      row.appendChild(dot);
+    }
+
     const keyEl = document.createElement('span');
     keyEl.style.cssText = 'font-family:var(--font-mono);font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     keyEl.textContent = v.key;
@@ -195,5 +202,7 @@ export function createVarPicker(opts = {}) {
     }
   }
 
-  return { open, close: _close };
+  function invalidate() { _cacheTs = 0; }
+
+  return { open, close: _close, invalidate };
 }

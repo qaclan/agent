@@ -92,6 +92,13 @@ export function createInlineVarDrop(getVars) {
     // mousedown (not click) so we fire before blur and can e.preventDefault() to keep focus in inp
     row.onmousedown = (e) => { e.preventDefault(); _pick(v.key); };
 
+    if (v.group === 'Environment' || v.group === 'Collection') {
+      const dot = document.createElement('span');
+      dot.className = 'var-source-dot ' + (v.group === 'Environment' ? 'var-source-dot--env' : 'var-source-dot--col');
+      dot.title = v.group;
+      row.appendChild(dot);
+    }
+
     const keyEl = document.createElement('span');
     keyEl.style.cssText = 'font-family:var(--font-mono);font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
     keyEl.textContent = v.key;
@@ -138,6 +145,8 @@ export function createInlineVarDrop(getVars) {
   function isOpen() {
     return pop.style.display !== 'none';
   }
+
+  function invalidate() { _cacheTs = 0; }
 
   function handleKeydown(e) {
     if (!isOpen()) return false;
@@ -203,5 +212,5 @@ export function createInlineVarDrop(getVars) {
     inp.addEventListener('keydown', handleKeydown);
   }
 
-  return { open, close: _close, isOpen, handleKeydown, watchInput };
+  return { open, close: _close, isOpen, handleKeydown, watchInput, invalidate };
 }

@@ -35,12 +35,19 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     return results;
   }
 
+  // Registered by _colAuthField() below — busts the suggestion dropdown's 30s
+  // cache whenever env/collection var data actually changes (env switch, var
+  // save/delete/secret toggle), otherwise an already-open-once dropdown can
+  // keep showing stale contents for up to 30s.
+  let _varSuggestUIs = [];
+
   async function _refreshKnownVarNames() {
     const vars = await getAllVars();
     _knownVarNames = new Set(vars.map(v => v.key));
     _allVarsList = vars;
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
     _authFieldOverlays.forEach(o => o.refresh());
+    _varSuggestUIs.forEach(u => u.invalidate());
   }
 
   function _destroy() {
@@ -136,6 +143,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     try { _colAuthConfig = JSON.parse(col.auth_config || '{}'); } catch(e) { _colAuthConfig = {}; }
 
     const _authInlineDrop = createInlineVarDrop(getAllVars);
+    _varSuggestUIs.push(_authInlineDrop);
 
     function _colAuthField(label, placeholder, key) {
       const fw = document.createElement('div');

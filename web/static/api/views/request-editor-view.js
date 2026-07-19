@@ -71,6 +71,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _scriptTextareaOverlays = [];
   let _bodyFallbackOverlay = null;
   let _extractorNameInputs = [];
+  // Every var-picker/inline-var-drop instance created below registers itself
+  // here so its 30s suggestion cache can be busted whenever the underlying
+  // env/collection var data actually changes (see _refreshKnownVarNames) —
+  // without this a dropdown opened before a var edit/env switch can keep
+  // showing stale contents for up to 30s.
+  let _varSuggestUIs = [];
 
   // Extractor "Variable Name" fields hold a bare name (no {{ }}), so they're
   // styled by exact match against known var names rather than token scanning.
@@ -100,6 +106,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _cmEditor?.refresh?.();
     _gqlQueryEditor?.refresh?.();
     _gqlVariablesEditor?.refresh?.();
+    _varSuggestUIs.forEach(u => u.invalidate());
   }
 
   container.innerHTML = '';
@@ -232,6 +239,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // so this can't use watchInput() (built for real <input>/<textarea>); wire the
   // same open/handleKeydown primitives by hand against the caret-offset helpers above.
   const _urlInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_urlInlineDrop);
   urlInput.addEventListener('input', _renderUrlTokens);
   urlInput.addEventListener('input', (e) => {
     if (!e.isTrusted) return;
@@ -587,6 +595,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
   const _bodyInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_bodyVarPicker, _bodyInlineDrop);
   const bodyVarBtn = document.createElement('button');
   bodyVarBtn.type = 'button';
   bodyVarBtn.title = 'Insert variable at cursor';
@@ -983,6 +992,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     : (r.auth_config || '{}');
 
   const _authInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_authInlineDrop);
 
   function _makeField(labelText, placeholder, getValue, setValue) {
     const wrap = document.createElement('div');
@@ -1264,6 +1274,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Script sections ──
   const _scriptInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_scriptInlineDrop);
   function makeScriptSection(lang, code, hint) {
     const div = document.createElement('div');
 
@@ -1477,6 +1488,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const div = document.createElement('div');
     const _namePicker = createVarPicker({ getVars: getAllVars });
     const _nameDrop = createInlineVarDrop(getAllVars);
+    _varSuggestUIs.push(_namePicker, _nameDrop);
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
