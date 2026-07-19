@@ -7,6 +7,7 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -16,6 +17,7 @@ import sys
 from typing import List
 
 from cli import runtime_setup
+from cli.script_strategies._shared import CAPTURE_ALLOWED_RESOURCE_TYPES
 from cli.script_strategies.base import ScriptStrategy
 
 logger = logging.getLogger("qaclan.script_strategies.javascript")
@@ -61,7 +63,7 @@ const _captureStarts = new Map();
 const _capturePending = [];
 const _CAPTURE_CAP = 200;
 const _CAPTURE_BODY_CAP_BYTES = 200000;
-const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
+const _CAPTURE_ALLOWED_TYPES = new Set({CAPTURE_ALLOWED_TYPES_JSON});
 
 function _truncateBody(text) {
   if (text == null) return text;
@@ -72,7 +74,7 @@ function _truncateBody(text) {
 
 async function _captureRequest(req) {
   if (!_CAPTURE_ENABLED) return;
-  if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
+  if (!_CAPTURE_ALLOWED_TYPES.has(req.resourceType())) return;
   const start = _captureStarts.get(req);
   _captureStarts.delete(req);
   if (_capturedRequests.length >= _CAPTURE_CAP) return;
@@ -99,7 +101,7 @@ function _trackNetwork(page) {
   page.on('request', req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
-    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
+    if (_CAPTURE_ENABLED && _CAPTURE_ALLOWED_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = req => {
     const t = req.resourceType();
@@ -508,4 +510,7 @@ class JavaScriptStrategy(ScriptStrategy):
         else:
             body = "\n".join("    " + line if line else "" for line in actions.splitlines())
         body = f"    {_BEGIN_MARKER}\n{body}\n    {_END_MARKER}"
-        return _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        rendered = _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        return rendered.replace(
+            "{CAPTURE_ALLOWED_TYPES_JSON}", json.dumps(list(CAPTURE_ALLOWED_RESOURCE_TYPES))
+        )
