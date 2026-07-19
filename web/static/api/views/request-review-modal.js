@@ -95,6 +95,8 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
   const importWarnings = extras?.warnings || [];
   const collectionVars = extras?.collection_vars || null;
   const collectionAuth = extras?.collection_auth || null;
+  const onSaved = extras?.onSaved || null;
+  let existingCollections = [];
 
   const COMPOUND_SUFFIXES = new Set([
     'co.uk', 'org.uk', 'me.uk', 'ltd.uk', 'plc.uk',
@@ -133,7 +135,15 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
   function _renderList(listEl) {
     // Build rows as DOM nodes so we can attach handlers directly
     listEl.innerHTML = '';
+    let lastGroup = undefined;
     _visible().forEach(r => {
+      if (r._scriptName !== undefined && r._scriptName !== lastGroup) {
+        lastGroup = r._scriptName;
+        const groupHeader = document.createElement('div');
+        groupHeader.style.cssText = 'padding:6px 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);background:var(--bg-base);border-bottom:1px solid var(--border);';
+        groupHeader.textContent = lastGroup || 'Unknown script';
+        listEl.appendChild(groupHeader);
+      }
       const wrapper = document.createElement('div');
       wrapper.style.borderBottom = '1px solid var(--border)';
 
@@ -205,6 +215,9 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       <label class="form-label">Save to collection</label>
       <input id="rev-col-name" type="text" class="input-sm" style="width:100%"
         value="${_esc(defaultCollectionName || 'Imported APIs')}">
+      <select id="rev-col-existing" class="input-sm" style="width:100%;margin-top:6px;">
+        <option value="">— New collection (name above) —</option>
+      </select>
     </div>
     <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;">
       <input type="checkbox" id="rev-include-docs" checked>
@@ -225,13 +238,14 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     { label: 'Cancel', cls: 'btn-ghost', action: window.closeModal },
     { label: 'Save Selected', cls: 'btn-primary', action: async () => {
       const colName = document.getElementById('rev-col-name')?.value.trim() || 'Imported APIs';
+      const existingColId = document.getElementById('rev-col-existing')?.value || '';
       const selected = indexedRequests.filter(r => document.getElementById(`rev-req-${r._idx}`)?.checked);
       if (!selected.length) { await window._alertDialog('No requests selected.'); return; }
       const includeInDocs = document.getElementById('rev-include-docs')?.checked ? 1 : 0;
       const mode = document.querySelector('input[name="rev-save-mode"]:checked')?.value || 'flow';
 
       if (mode === 'library') {
-        const plainRequests = selected.map(({ _idx, ...rest }) => rest);
+        const plainRequests = selected.map(({ _idx, _scriptName, ...rest }) => rest);
         const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
         if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
         window.closeModal();
@@ -239,24 +253,30 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         return;
       }
 
+      const plainSelected = selected.map(({ _idx, _scriptName, ...rest }) => rest);
       const data = await window.api('POST', '/discover/save-requests', {
-        requests: selected,
+        requests: plainSelected,
         collection_name: colName,
+        collection_id: existingColId || undefined,
         include_in_docs: includeInDocs,
         collection_vars: collectionVars,
         collection_auth: collectionAuth,
       });
+      if (data.ok) onSaved?.(data);
       window.closeModal();
       if (data.ok) {
+        const targetName = existingColId
+          ? (existingCollections.find(c => c.id === existingColId)?.name || colName)
+          : colName;
         window.__qaclanApi?.refresh?.();
-        window._toast(`Saved ${data.imported} request${data.imported !== 1 ? 's' : ''} to '${colName}'.`);
+        window._toast(`Saved ${data.imported} request${data.imported !== 1 ? 's' : ''} to '${targetName}'.`);
       } else {
         await window._alertDialog('Save failed: ' + data.error);
       }
     }},
   ], null, 'lg');
 
-  requestAnimationFrame(() => {
+  requestAnimationFrame(async () => {
     const listEl = document.getElementById('rev-list');
     if (listEl) _renderList(listEl);
 
@@ -276,5 +296,17 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         if (saveBtn) saveBtn.textContent = mode === 'library' ? 'Next →' : 'Save Selected';
       });
     });
+
+    const existingSel = document.getElementById('rev-col-existing');
+    if (existingSel) {
+      const res = await window.api('GET', '/collections');
+      existingCollections = res?.collections || [];
+      for (const c of existingCollections) {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name;
+        existingSel.appendChild(opt);
+      }
+    }
   });
 }
