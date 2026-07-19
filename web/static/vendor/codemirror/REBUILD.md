@@ -42,6 +42,9 @@ npm install --silent --no-audit --no-fund \
   @codemirror/lang-json@6 \
   @codemirror/lint@6 \
   @codemirror/theme-one-dark@6 \
+  @lezer/highlight@1 \
+  graphql@16 \
+  cm6-graphql@0.2 \
   esbuild@0.24
 
 # 3. Write entry.js (see snippet below)
@@ -63,7 +66,9 @@ This is the actual entry point used to produce the committed `cm6.js` —
 keep it in sync with reality (json language + lint support, the
 decoration/hover-tooltip primitives used for {{var}} highlighting, and the
 autocomplete primitives used for {{var}} suggestions in the raw JSON body
-editor) so a future rebuild doesn't silently drop functionality.
+editor, and the schema-less GraphQL language pack used by the GraphQL
+query/variables body editor) so a future rebuild doesn't silently drop
+functionality.
 
 ```js
 import { EditorState, Compartment, RangeSetBuilder, StateEffect } from "@codemirror/state"
@@ -86,6 +91,7 @@ import { javascript } from "@codemirror/lang-javascript"
 import { json, jsonParseLinter } from "@codemirror/lang-json"
 import { linter, lintGutter } from "@codemirror/lint"
 import { oneDark } from "@codemirror/theme-one-dark"
+import { graphql } from "cm6-graphql"
 
 // basicSetup() is shared by every CM6 editor in the app (JSON body editor +
 // the Playwright script recorder editor in app.js). Keep it unchanged when
@@ -120,6 +126,7 @@ window.CM6 = {
   basicSetup, oneDark, indentUnit,
   python, javascript, json, jsonParseLinter, linter, lintGutter,
   autocompletion, completionKeymap, CompletionContext,
+  graphql,
 }
 ```
 
@@ -127,4 +134,4 @@ window.CM6 = {
 
 - End users never run this. They get `cm6.js` bundled inside the Nuitka binary.
 - Target is `es2019` so it runs in any modern browser without transpilation surprises.
-- Bundle is ~530 KB minified (includes Python + JS grammars, one-dark theme, autocomplete).
+- Bundle is ~730 KB minified (includes Python + JS grammars, GraphQL grammar + graphql-js, one-dark theme, autocomplete).
