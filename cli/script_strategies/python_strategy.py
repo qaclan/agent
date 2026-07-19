@@ -7,6 +7,7 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -17,6 +18,7 @@ from typing import List
 
 from cli.runtime import is_frozen_binary
 from cli import runtime_setup
+from cli.script_strategies._shared import CAPTURE_ALLOWED_RESOURCE_TYPES
 from cli.script_strategies.base import ScriptStrategy
 
 logger = logging.getLogger("qaclan.script_strategies.python")
@@ -126,7 +128,7 @@ _captured_requests = []
 _capture_starts = {}
 _CAPTURE_CAP = 200
 _CAPTURE_BODY_CAP_BYTES = 200_000
-_CAPTURE_SKIP_TYPES = {"document", "stylesheet", "image", "font", "script"}
+_CAPTURE_ALLOWED_TYPES = set({CAPTURE_ALLOWED_TYPES_JSON})
 
 
 def _truncate_body(text):
@@ -141,7 +143,7 @@ def _truncate_body(text):
 def _capture_request(req):
     if not _CAPTURE_ENABLED:
         return
-    if req.resource_type in _CAPTURE_SKIP_TYPES:
+    if req.resource_type not in _CAPTURE_ALLOWED_TYPES:
         return
     start = _capture_starts.pop(id(req), None)
     if len(_captured_requests) >= _CAPTURE_CAP:
@@ -178,7 +180,7 @@ def _track_network(page):
         global _in_flight
         if req.resource_type in ("xhr", "fetch"):
             _in_flight += 1
-        if _CAPTURE_ENABLED and req.resource_type not in _CAPTURE_SKIP_TYPES:
+        if _CAPTURE_ENABLED and req.resource_type in _CAPTURE_ALLOWED_TYPES:
             _capture_starts[id(req)] = time.monotonic()
 
     def _on_done(req):
@@ -555,4 +557,7 @@ class PythonStrategy(ScriptStrategy):
         else:
             body = "\n".join("            " + line if line else "" for line in actions.splitlines())
         body = f"{' ' * 12}{_BEGIN_MARKER}\n{body}\n{' ' * 12}{_END_MARKER}"
-        return _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        rendered = _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        return rendered.replace(
+            "{CAPTURE_ALLOWED_TYPES_JSON}", json.dumps(list(CAPTURE_ALLOWED_RESOURCE_TYPES))
+        )
