@@ -545,6 +545,7 @@ async function createProjectPrompt() {
 
 function showModal(title, bodyHTML, buttons = [], subtitle = '', size = '') {
   window._modalCloseGuard = null
+  window._modalReturnTo = null
   const backdrop = document.getElementById('modal-backdrop')
   const root = document.getElementById('modal-root')
 
@@ -592,9 +593,22 @@ function closeModal() {
     guard().then(proceed => {
       if (proceed) {
         window._modalCloseGuard = null
-        _doCloseModal()
+        _closeOrReturn()
       }
     })
+    return
+  }
+  _closeOrReturn()
+}
+
+function _closeOrReturn() {
+  // Optional hook so a modal opened "on top of" another (e.g. the API
+  // request review editor opened from run results) can hand back to the
+  // modal it replaced instead of closing everything. Consumed once.
+  const returnTo = window._modalReturnTo
+  if (typeof returnTo === 'function') {
+    window._modalReturnTo = null
+    returnTo()
     return
   }
   _doCloseModal()
@@ -4220,6 +4234,7 @@ async function runSuiteModal(id, name) {
 async function reviewRunCapturedRequests() {
   const requests = window._runCapturedRequests || []
   if (!requests.length) { toast('No captured requests', 'error'); return }
+  const returnToRunResults = window._lastRunResultsRender
   const { showRequestReviewModal } = await import('./api/views/request-review-modal.js')
   showRequestReviewModal(requests, 'Recorded APIs', requests[0].url, {
     onSaved: () => {
@@ -4227,6 +4242,11 @@ async function reviewRunCapturedRequests() {
       window._modalCloseGuard = null
     },
   })
+  // Cancel/✕ on the review editor hands back to the run-results modal instead
+  // of closing everything -- set after showRequestReviewModal (which resets
+  // this via showModal) so it isn't immediately wiped out. Cleared by the
+  // review modal itself once a save actually completes.
+  window._modalReturnTo = returnToRunResults || null
 }
 
 function showRunResults(run, suiteName) {
@@ -4255,7 +4275,7 @@ function showRunResults(run, suiteName) {
       window._runCapturedRequests = runCapturedRequests
       capturedSummaryHTML = `<div class="run-capture-summary">
         <span>${runCapturedCount} API request${runCapturedCount === 1 ? '' : 's'} captured</span>
-        <button class="btn-ghost btn-sm" onclick="reviewRunCapturedRequests()">Save as collection</button>
+        <button class="btn btn-sm btn-primary" onclick="reviewRunCapturedRequests()">Save as collection</button>
       </div>`
     }
   } else {
@@ -4461,9 +4481,10 @@ function showRunResults(run, suiteName) {
     { label: 'Close', cls: 'btn-ghost', action: () => { closeModal(); renderSuitesPage() } }
   ], suiteName + ' \u00b7 ' + statusBadge, 'report')
 
-  // Assigned after showModal() (which resets any prior guard to null) so it
-  // isn't immediately wiped out. Harmless no-op when there's nothing unsaved
-  // -- always set, not just when captures are present.
+  // Assigned after showModal() (which resets any prior guard/returnTo to
+  // null) so neither is immediately wiped out. Lets reviewRunCapturedRequests
+  // hand back to this exact run/suite when its editor modal is dismissed.
+  window._lastRunResultsRender = () => showRunResults(run, suiteName)
   window._modalCloseGuard = async () => {
     if (!window._runCapturedRequests || !window._runCapturedRequests.length) return true
     return !!(await window._confirmDialog(

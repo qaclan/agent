@@ -215,7 +215,8 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       <label class="form-label">Save to collection</label>
       <input id="rev-col-name" type="text" class="input-sm" style="width:100%"
         value="${_esc(defaultCollectionName || 'Imported APIs')}">
-      <select id="rev-col-existing" class="input-sm" style="width:100%;margin-top:6px;">
+      <label class="form-label" style="margin-top:8px;">Or add to an existing collection</label>
+      <select id="rev-col-existing" class="input-sm" style="width:100%;">
         <option value="">— New collection (name above) —</option>
       </select>
     </div>
@@ -248,6 +249,7 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         const plainRequests = selected.map(({ _idx, _scriptName, ...rest }) => rest);
         const grouped = await window.api('POST', '/discover/group-requests', { requests: plainRequests });
         if (grouped.ok === false) { await window._alertDialog('Grouping failed: ' + grouped.error); return; }
+        window._modalReturnTo = null;
         window.closeModal();
         showVariantComparisonModal(grouped.groups, colName, includeInDocs);
         return;
@@ -263,6 +265,7 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
         collection_auth: collectionAuth,
       });
       if (data.ok) onSaved?.(data);
+      window._modalReturnTo = null;
       window.closeModal();
       if (data.ok) {
         const targetName = existingColId

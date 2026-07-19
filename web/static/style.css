@@ -949,6 +949,19 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   font-size: 11px;
   color: var(--text-primary);
 }
+.run-capture-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.run-capture-summary-historical {
+  font-style: italic;
+}
+
 .failure-summary {
   margin: 10px 0 4px;
   padding: 8px 10px;
