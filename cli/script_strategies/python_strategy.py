@@ -466,7 +466,7 @@ class PythonStrategy(ScriptStrategy):
             "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
             "_in_flight", "_captured_requests", "_capture_starts", "_capture_request",
             "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
-            "_CAPTURE_SKIP_TYPES", "_truncate_body",
+            "_CAPTURE_ALLOWED_TYPES", "_truncate_body",
         ):
             if re.search(r'^\s*' + re.escape(name) + r'\s*=', dedented, re.MULTILINE):
                 warnings.append(ImportWarning(

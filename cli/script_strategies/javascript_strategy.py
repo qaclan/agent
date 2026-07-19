@@ -234,7 +234,7 @@ _QACLAN_JS_NAMES = (
     "_writeArtifacts", "_browsers", "_browserType", "_inFlight",
     "_capturedRequests", "_captureStarts", "_capturePending",
     "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
-    "_CAPTURE_SKIP_TYPES", "_truncateBody",
+    "_CAPTURE_ALLOWED_TYPES", "_truncateBody",
 )
 
 
