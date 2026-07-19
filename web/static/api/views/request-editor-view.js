@@ -618,6 +618,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _cmEditor = null; // CodeMirror view instance (null when unavailable or non-raw type)
   let _cmActive = false;
 
+  // Raw body gets its own private cache, mirroring _formRows/_multipartRows/
+  // _gqlQuery — otherwise switching away to graphql (which continuously
+  // overwrites the shared bodyTextarea via _syncGqlBodyTextarea) and back
+  // would read back the other type's content instead of raw's own text.
+  let _rawValue = r.body || '';
+
   function _parseBodyWithVarSub(text) {
     const vars = [];
     const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
@@ -706,6 +712,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         const start = bodyFallback.selectionStart;
         const end = bodyFallback.selectionEnd;
         bodyFallback.value = bodyFallback.value.slice(0, start) + varToken + bodyFallback.value.slice(end);
+        _rawValue = bodyFallback.value;
         bodyTextarea.value = bodyFallback.value;
         bodyFallback.setSelectionRange(start + varToken.length, start + varToken.length);
         bodyFallback.focus();
@@ -734,6 +741,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   });
 
   bodyFallback.addEventListener('input', (e) => {
+    _rawValue = bodyFallback.value;
     bodyTextarea.value = bodyFallback.value;
     _validateFallback();
   });
@@ -746,7 +754,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       parent: cmWrap,
       value: val,
       isDark,
-      onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+      onChange: (v) => { _rawValue = v; bodyTextarea.value = v; }, // keep private cache + hidden textarea in sync
       getVarsList: () => _allVarsList,
     });
     if (!_cmEditor) {
@@ -897,7 +905,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     if (!isRawText && _cmEditor) {
       // Leaving raw text mode — read current value before destroying
-      bodyTextarea.value = _cmEditor.getValue();
+      _rawValue = _cmEditor.getValue();
+      bodyTextarea.value = _rawValue;
       _cmEditor.destroy();
       _cmEditor = null;
       cmWrap.style.display = 'none';
@@ -919,7 +928,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _cmActive = true;
       cmWrap.style.display = '';
       _bodyFallbackOverlay.el.style.display = 'none';
-      _activateCmEditor(bodyTextarea.value);
+      // Restore the shared hidden textarea from the private cache immediately
+      // on entry — mirrors _mountGqlEditors()'s immediate _syncGqlBodyTextarea()
+      // call. Without this, bodyTextarea (the actual source of truth read by
+      // _save()/_copyAsCurl/the dirty-check) would keep whatever the previous
+      // type last wrote to it until the user's next keystroke in raw.
+      bodyTextarea.value = _rawValue;
+      _activateCmEditor(_rawValue);
       bodyFallback.placeholder = '{\n  "key": "value"\n}';
     } else if (isGraphql) {
       _mountGqlEditors();
