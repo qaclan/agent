@@ -154,6 +154,10 @@ test('qaclan', async ({ page, context }) => {
   } finally {
     await Promise.allSettled(_capturePending);
     if (_STATE) {
+      // Give a trailing auth request (e.g. a cookie/token finalized just
+      // after the page renders) a short window to land before snapshotting,
+      // so the next script in the suite doesn't inherit a partial session.
+      try { await _waitForNetworkSettle(page, { graceMs: 200, quietMs: 300, timeoutMs: 3000 }); } catch (_) {}
       try { await context.storageState({ path: _STATE }); } catch (_) {}
     }
   }
@@ -301,10 +305,9 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
     codegen_target = "playwright-test"
     file_extension = ".spec.js"
 
-    def post_process_recording(self, raw: str, upload_dir: str = None) -> str:
+    def post_process_recording(self, raw: str) -> str:
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
-        actions = self._extract_upload_files(actions, upload_dir)
         actions = self._strip_upload_click(actions)
         return self._render_harness(actions)
 

@@ -2264,9 +2264,11 @@ async function editScriptModal(id) {
   if (host) {
     const editor = _createScriptEditor(host, s.content || '', { readOnly: false, language: s.language || 'python' })
     window._qcCurrentEditor = editor
+    window._qcCurrentScriptId = id
     window._qcModalCleanupHook = () => {
       editor.destroy()
       if (window._qcCurrentEditor === editor) window._qcCurrentEditor = null
+      if (window._qcCurrentScriptId === id) window._qcCurrentScriptId = null
     }
   }
 }
@@ -3276,12 +3278,66 @@ async function _wizardScanTyped(state) {
   state.phases[2]._scan = { candidates }
 }
 
+// Detect set_input_files()/setInputFiles() calls whose argument is a plain
+// quoted filename (not yet the {{__qaclan_upload_dir__}}/... token form).
+// One entry per distinct filename referenced anywhere in the script.
+function _parseUploadFileRefs(content) {
+  const callRe = /\.(?:set_input_files|setInputFiles)\((\[[^\]]*\]|"[^"]*"|'[^']*')\)/g
+  const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g
+  const seen = new Set()
+  const refs = []
+  let m
+  while ((m = callRe.exec(content))) {
+    strRe.lastIndex = 0
+    let sm
+    while ((sm = strRe.exec(m[1]))) {
+      const val = sm[1] !== undefined ? sm[1] : sm[2]
+      if (!val || val.startsWith('{{__qaclan_upload_dir__}}/') || seen.has(val)) continue
+      seen.add(val)
+      refs.push({ filename: val })
+    }
+  }
+  return refs
+}
+
+// Rewrite every set_input_files()/setInputFiles() occurrence of `filename`
+// to reference the uploaded file via the {{__qaclan_upload_dir__}} token.
+function _rewriteUploadRef(content, filename, savedName) {
+  const callRe = /\.(?:set_input_files|setInputFiles)\((\[[^\]]*\]|"[^"]*"|'[^']*')\)/g
+  return content.replace(callRe, (whole, argsText) => {
+    let changed = false
+    const strRe = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g
+    const newArgsText = argsText.replace(strRe, (sm, dq, sq) => {
+      const val = dq !== undefined ? dq : sq
+      if (val !== filename) return sm
+      changed = true
+      const quote = dq !== undefined ? '"' : "'"
+      return quote + '{{__qaclan_upload_dir__}}/' + savedName + quote
+    })
+    return changed ? whole.replace(argsText, newArgsText) : whole
+  })
+}
+
+async function _wizardScanUploads(state) {
+  const refs = _parseUploadFileRefs(state.content)
+  let attached = []
+  if (state.scriptId) {
+    const r = await api('GET', '/scripts/' + state.scriptId + '/uploads')
+    if (r.ok !== false) attached = (r.files || []).map(f => f.name)
+  }
+  state.uploadsAttached = attached
+  const missing = refs.filter(r => !attached.includes(r.filename))
+  state.phases[3].count = missing.length
+  state.phases[3]._scan = { refs, missing }
+}
+
 async function _wizardScanAll(state) {
   // Re-scan every phase against state.content. Called after each apply so
   // stepper counts reflect the latest script.
   await _wizardScanBind(state)
   await _wizardScanWait(state)
   await _wizardScanTyped(state)
+  await _wizardScanUploads(state)
 }
 
 // ── Persistent wizard shell — single modal, body swap ─────────────────────
@@ -3299,7 +3355,7 @@ function _wizardTabsHTML(state) {
     if (p.status === 'applied') cls.push('is-applied')
     if (p.status === 'skipped') cls.push('is-skipped')
     if (p.count === 0 && p.status === 'pending') cls.push('is-empty')
-    const isJumpable = !isCurrent && p.count > 0
+    const isJumpable = !isCurrent && (p.count > 0 || p.id === 'uploads')
     const disabled = isJumpable ? '' : 'disabled'
     const countTxt = p.count > 0 ? `<span class="qc-wizard-tab-count">${p.count}</span>` : ''
     let icon = ''
@@ -3322,7 +3378,8 @@ window._qcWizardSwitchTo = async function(idx) {
   const w = window._qcWizardActive
   if (!w) return
   if (idx === w.state.currentIdx) return
-  if (w.state.phases[idx].count === 0) return  // empty phase tab is disabled
+  const targetPhase = w.state.phases[idx]
+  if (targetPhase.count === 0 && targetPhase.id !== 'uploads') return  // empty phase tab is disabled
   if (w.current?.handler?.dispose) w.current.handler.dispose()
   w.state.currentIdx = idx
   await _qcWizardMountCurrent()
@@ -3339,6 +3396,7 @@ async function _qcWizardMountCurrent() {
   if (phase.id === 'bind')       handler = await _wizardMountBind(state, slot)
   else if (phase.id === 'wait')  handler = await _wizardMountWait(state, slot)
   else if (phase.id === 'typed') handler = await _wizardMountTyped(state, slot)
+  else if (phase.id === 'uploads') handler = await _wizardMountUploads(state, slot)
   w.current = { phaseId: phase.id, handler }
   _wizardRenderTabs(state)
   _qcWizardSyncCurrent()
@@ -3362,9 +3420,11 @@ window._qcWizardSyncCurrent = function() {
   if (phase.id === 'bind')       label = `Apply Bindings (${n})`
   else if (phase.id === 'wait')  label = `Apply Waits (${n})`
   else if (phase.id === 'typed') label = `Convert Steps (${n})`
+  else if (phase.id === 'uploads') label = phase.count > 0 ? `Continue (${phase.count} missing)` : 'Continue'
   applyBtn.textContent = label
   let disabled = (n === 0)
   if (phase.id === 'bind' && handler.canApply && !handler.canApply()) disabled = true
+  if (phase.id === 'uploads') disabled = false
   applyBtn.disabled = disabled
 }
 
@@ -3428,6 +3488,107 @@ async function _wizardMountTyped(state, slot) {
     typedCallTemplate: state.cfgs.typed.typed_call_template,
     mountInto: slot,
   })
+}
+
+// Files tab — attach the real files behind set_input_files()/setInputFiles()
+// calls. Playwright's recorder can only ever capture a bare filename (browser
+// security blocks JS from reading the real OS path picked in a native file
+// dialog), so unlike the other 3 phases this isn't an auto-detected rewrite:
+// the user explicitly uploads each file here. See
+// docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md.
+async function _wizardMountUploads(state, slot) {
+  const refs = state.phases[3]._scan?.refs || []
+  let attached = state.uploadsAttached || []
+
+  function render() {
+    const refRows = refs.map(r => {
+      const isAttached = attached.includes(r.filename)
+      return `<div class="qc-upload-row">
+        <span class="qc-upload-name">${escHtml(r.filename)}</span>
+        <span class="qc-upload-status ${isAttached ? 'is-attached' : 'is-missing'}">${isAttached ? '✓ attached' : 'missing'}</span>
+        ${isAttached
+          ? `<button type="button" class="btn btn-sm btn-ghost" data-remove="${escHtml(r.filename)}">Remove</button>`
+          : `<input type="file" class="qc-upload-input" data-target="${escHtml(r.filename)}">`}
+      </div>`
+    }).join('')
+    const extra = attached.filter(name => !refs.find(r => r.filename === name))
+    const extraRows = extra.map(name => `<div class="qc-upload-row">
+        <span class="qc-upload-name">${escHtml(name)}</span>
+        <span class="qc-upload-status is-attached">✓ attached</span>
+        <button type="button" class="btn btn-sm btn-ghost" data-remove="${escHtml(name)}">Remove</button>
+      </div>`).join('')
+    slot.innerHTML = `
+      <div class="qc-upload-list">
+        ${refRows || '<p style="margin:0;color:var(--text-secondary)">No set_input_files()/setInputFiles() calls detected in this script.</p>'}
+        ${extraRows}
+      </div>
+      <div class="qc-upload-add" style="margin-top:12px">
+        <label class="btn btn-sm btn-ghost" for="qc-upload-add-input" style="cursor:pointer">+ Add file</label>
+        <input type="file" id="qc-upload-add-input" style="display:none">
+      </div>
+      <p class="form-hint">Playwright can only record a bare filename for uploads, never the real file — attach the actual file here so the script can find it at run time, on any machine.</p>
+    `
+    slot.querySelectorAll('.qc-upload-input').forEach(inp => {
+      inp.addEventListener('change', () => onUpload(inp.files[0], inp.dataset.target))
+    })
+    slot.querySelectorAll('[data-remove]').forEach(btn => {
+      btn.addEventListener('click', () => onRemove(btn.dataset.remove))
+    })
+    const addInput = slot.querySelector('#qc-upload-add-input')
+    if (addInput) addInput.addEventListener('change', () => onUpload(addInput.files[0], null))
+  }
+
+  async function onUpload(file, targetFilename) {
+    if (!file) return
+    if (!state.scriptId) { toast('Save the script before attaching files', 'error'); return }
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    let data
+    try {
+      const res = await fetch('/api/scripts/' + state.scriptId + '/uploads', { method: 'POST', body: fd })
+      data = await res.json()
+    } catch (e) {
+      toast('Upload failed', 'error'); return
+    }
+    if (!data.ok) { toast(data.error || 'Upload failed', 'error'); return }
+    const savedName = data.file.name
+    if (!attached.includes(savedName)) attached.push(savedName)
+    state.uploadsAttached = attached
+    if (targetFilename) {
+      const rewritten = _rewriteUploadRef(state.content, targetFilename, savedName)
+      if (rewritten !== state.content) {
+        state.content = rewritten
+        const commitRes = await _wizardCommit(state.source, state.scriptId, state.content)
+        if (!commitRes.ok) return
+      }
+    }
+    state.phases[3].applied = (state.phases[3].applied || 0) + 1
+    state.phases[3].count = refs.filter(r => !attached.includes(r.filename)).length
+    toast(`Attached ${savedName}`)
+    render()
+    _wizardRenderTabs(state)
+  }
+
+  async function onRemove(filename) {
+    if (!state.scriptId) return
+    const res = await api('DELETE', '/scripts/' + state.scriptId + '/uploads/' + encodeURIComponent(filename))
+    if (res.ok === false) { toast(res.error || 'Could not remove file', 'error'); return }
+    const idx = attached.indexOf(filename)
+    if (idx !== -1) attached.splice(idx, 1)
+    state.uploadsAttached = attached
+    state.phases[3].count = refs.filter(r => !attached.includes(r.filename)).length
+    toast(`Removed ${filename}`)
+    render()
+    _wizardRenderTabs(state)
+  }
+
+  render()
+  return {
+    apply: async () => ({ newContent: state.content, meta: { count: 0 } }),
+    dispose: () => {},
+    sync: () => 1,
+    empty: refs.length === 0,
+  }
 }
 
 window._qcWizardSkip = async function() {
@@ -3519,9 +3680,10 @@ async function openReviewWizard(scriptId, opts = {}) {
     content: initCtx.content,
     cfgs: {},
     phases: [
-      { id: 'bind',  label: 'Bind',  status: 'pending', count: 0, applied: 0 },
-      { id: 'wait',  label: 'Waits', status: 'pending', count: 0, applied: 0 },
-      { id: 'typed', label: 'Typed', status: 'pending', count: 0, applied: 0 },
+      { id: 'bind',    label: 'Bind',  status: 'pending', count: 0, applied: 0 },
+      { id: 'wait',    label: 'Waits', status: 'pending', count: 0, applied: 0 },
+      { id: 'typed',   label: 'Typed', status: 'pending', count: 0, applied: 0 },
+      { id: 'uploads', label: 'Files', status: 'pending', count: 0, applied: 0 },
     ],
     currentIdx: 0,
   }
@@ -3530,10 +3692,16 @@ async function openReviewWizard(scriptId, opts = {}) {
 
   const firstWithCands = state.phases.findIndex(p => p.count > 0)
   if (firstWithCands === -1) {
-    toast('Nothing to review — script looks clean.')
-    return
+    // Nothing to auto-review, but the Files tab is a management panel, not
+    // a review queue — always reachable when the script is saved.
+    if (!state.scriptId) {
+      toast('Nothing to review — script looks clean.')
+      return
+    }
+    state.currentIdx = state.phases.findIndex(p => p.id === 'uploads')
+  } else {
+    state.currentIdx = firstWithCands
   }
-  state.currentIdx = firstWithCands
 
   const useOverlay = source === 'editor'
   const modalShowFn = useOverlay ? showOverlayModal : showModal
@@ -3593,7 +3761,7 @@ function _runReviewWizardFromEditor(menuItem) {
       if (menu) menu.hidden = true
     }
   }
-  return openReviewWizard(null, { source: 'editor' })
+  return openReviewWizard(window._qcCurrentScriptId || null, { source: 'editor' })
 }
 
 function _runSinglePhaseFromMenu(menuItem, fn) {

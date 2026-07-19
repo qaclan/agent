@@ -25,14 +25,9 @@ class ScriptStrategy(ABC):
     expect_timeout: int = 7000
 
     @abstractmethod
-    def post_process_recording(self, raw: str, upload_dir: str = None) -> str:
+    def post_process_recording(self, raw: str) -> str:
         """Transform raw codegen output into a self-contained harness script
-        that honors the QACLAN_* runtime contract.
-
-        ``upload_dir``, if given, is where any file referenced by a recorded
-        set_input_files()/setInputFiles() call gets copied — see
-        docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md.
-        Only the live `qaclan web record` flow supplies one."""
+        that honors the QACLAN_* runtime contract."""
 
     def starter_template(self) -> str:
         """Return the empty harness scaffolding for this language.
