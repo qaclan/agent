@@ -636,6 +636,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         const gql = JSON.parse(val || '{}');
         _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
         _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+        _gqlLastValidVariables = gql.variables ?? {};
       } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; }
       if (_gqlQueryEditor) _gqlQueryEditor.setValue(_gqlQuery);
       else if (_gqlQueryFallback) _gqlQueryFallback.value = _gqlQuery;
@@ -790,11 +791,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // string in bodyTextarea.value, exactly as cli/api_runner.py expects.
   let _gqlQuery = '';
   let _gqlVariables = '{}';
+  let _gqlLastValidVariables = {};
   try {
     if (r.body_type === 'graphql') {
       const gql = JSON.parse(r.body || '{}');
       _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
       _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+      _gqlLastValidVariables = gql.variables ?? {};
     }
   } catch (e) { /* malformed saved body — start both panes empty */ }
 
@@ -819,10 +822,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   gqlWrap.append(gqlQueryLabel, gqlQueryMount, gqlVariablesLabel, gqlVariablesMount);
 
   function _syncGqlBodyTextarea() {
-    let variables = {};
-    try { variables = JSON.parse(_gqlVariables || '{}'); }
-    catch (e) { /* keep last-valid variables in bodyTextarea until the user fixes the syntax error */ }
-    bodyTextarea.value = JSON.stringify({ query: _gqlQuery, variables });
+    try {
+      _gqlLastValidVariables = JSON.parse(_gqlVariables || '{}');
+    } catch (e) { /* keep last-valid variables — do not overwrite _gqlLastValidVariables */ }
+    bodyTextarea.value = JSON.stringify({ query: _gqlQuery, variables: _gqlLastValidVariables });
   }
 
   async function _mountGqlEditors() {
