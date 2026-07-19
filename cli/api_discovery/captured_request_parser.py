@@ -37,9 +37,14 @@ def _to_har_entry(captured: dict) -> dict:
         }
 
     return {
-        # Marks this as an XHR/fetch entry so parse_har()'s _should_skip()
-        # never filters it out — the harness already filtered at capture time.
-        "_resourceType": "fetch",
+        # No _resourceType key here: the harness already narrowed capture to
+        # xhr/fetch (cli.script_strategies._shared
+        # CAPTURE_ALLOWED_RESOURCE_TYPES), so parse_har()'s _should_skip()
+        # falls through to its real _is_static() heuristic branch for every
+        # entry — the same extension/path/content-type check discovery
+        # applies to third-party HAR imports, catching e.g.
+        # fetch('/static/app.js') that Playwright still labels 'fetch'. See
+        # docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md.
         "time": captured.get("duration_ms") or 0,
         "request": {
             "method": captured.get("method", "GET"),
