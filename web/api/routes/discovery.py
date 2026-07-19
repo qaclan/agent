@@ -119,15 +119,19 @@ def discover_bruno():
 @bp.route("/api/discover/save-requests", methods=["POST"])
 def save_requests():
     """Save pre-parsed request objects directly (no re-parsing). Body:
-    {requests, collection_name, include_in_docs, collection_vars,
-    collection_auth}. collection_vars/collection_auth are optional passthrough
-    from a Postman/Bruno preview (parse_postman/parse_bruno_collection_settings
+    {requests, collection_name, collection_id, include_in_docs,
+    collection_vars, collection_auth}. collection_id (optional) appends into
+    an existing collection instead of creating a new one — see
+    docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md (Section
+    A). collection_vars/collection_auth are optional passthrough from a
+    Postman/Bruno preview (parse_postman/parse_bruno_collection_settings
     output) so the review-modal save step doesn't lose them."""
     try:
         pid = _project_id()
         data = request.get_json(force=True) or {}
         requests_list = data.get("requests", [])
         collection_name = data.get("collection_name", "Recorded APIs")
+        collection_id = data.get("collection_id")
         include_in_docs = int(data.get("include_in_docs", 1))
         collection_vars = data.get("collection_vars")
         collection_auth = data.get("collection_auth")
@@ -138,7 +142,13 @@ def save_requests():
             r['include_in_docs'] = include_in_docs
         from web.api.services.discovery_service import _save_requests, _apply_collection_extras
         from web.api.repositories.collection_repo import CollectionRepo
-        col = CollectionRepo().create(pid, collection_name)
+        if collection_id:
+            existing = CollectionRepo().get(collection_id, pid)
+            if not existing:
+                return jsonify({"ok": False, "error": "Collection not found"}), 404
+            col = existing
+        else:
+            col = CollectionRepo().create(pid, collection_name)
         saved = _save_requests(pid, requests_list, collection_id=col["id"])
         if collection_vars or collection_auth:
             _apply_collection_extras(
