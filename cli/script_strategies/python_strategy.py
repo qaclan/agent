@@ -7,6 +7,8 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import shutil
@@ -16,8 +18,10 @@ from typing import List
 
 from cli.runtime import is_frozen_binary
 from cli import runtime_setup
+from cli.script_strategies._shared import CAPTURE_ALLOWED_RESOURCE_TYPES
 from cli.script_strategies.base import ScriptStrategy
 
+logger = logging.getLogger("qaclan.script_strategies.python")
 
 _BEGIN_MARKER = "# BEGIN ACTIONS"
 _END_MARKER = "# END ACTIONS"
@@ -124,7 +128,7 @@ _captured_requests = []
 _capture_starts = {}
 _CAPTURE_CAP = 200
 _CAPTURE_BODY_CAP_BYTES = 200_000
-_CAPTURE_SKIP_TYPES = {"document", "stylesheet", "image", "font", "script"}
+_CAPTURE_ALLOWED_TYPES = set({CAPTURE_ALLOWED_TYPES_JSON})
 
 
 def _truncate_body(text):
@@ -139,7 +143,7 @@ def _truncate_body(text):
 def _capture_request(req):
     if not _CAPTURE_ENABLED:
         return
-    if req.resource_type in _CAPTURE_SKIP_TYPES:
+    if req.resource_type not in _CAPTURE_ALLOWED_TYPES:
         return
     start = _capture_starts.pop(id(req), None)
     if len(_captured_requests) >= _CAPTURE_CAP:
@@ -176,7 +180,7 @@ def _track_network(page):
         global _in_flight
         if req.resource_type in ("xhr", "fetch"):
             _in_flight += 1
-        if _CAPTURE_ENABLED and req.resource_type not in _CAPTURE_SKIP_TYPES:
+        if _CAPTURE_ENABLED and req.resource_type in _CAPTURE_ALLOWED_TYPES:
             _capture_starts[id(req)] = time.monotonic()
 
     def _on_done(req):
@@ -238,6 +242,14 @@ def run():
             raise
         finally:
             if _STATE:
+                # Give a trailing auth request (e.g. a cookie/token finalized
+                # just after the page renders) a short window to land before
+                # snapshotting, so the next script in the suite doesn't inherit
+                # a partial session.
+                try:
+                    _wait_for_network_settle(page, grace_ms=200, quiet_ms=300, timeout_ms=3000)
+                except Exception:
+                    pass
                 try:
                     context.storage_state(path=_STATE)
                 except Exception:
@@ -278,6 +290,7 @@ class PythonStrategy(ScriptStrategy):
     def post_process_recording(self, raw: str) -> str:
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
+        actions = self._strip_upload_click(actions)
         return self._render_harness(actions)
 
     def settle_call_snippet(self) -> str:
@@ -453,7 +466,7 @@ class PythonStrategy(ScriptStrategy):
             "_write_artifacts", "_on_console", "_on_pageerror", "_on_requestfailed",
             "_in_flight", "_captured_requests", "_capture_starts", "_capture_request",
             "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
-            "_CAPTURE_SKIP_TYPES", "_truncate_body",
+            "_CAPTURE_ALLOWED_TYPES", "_truncate_body",
         ):
             if re.search(r'^\s*' + re.escape(name) + r'\s*=', dedented, re.MULTILINE):
                 warnings.append(ImportWarning(
@@ -519,6 +532,24 @@ class PythonStrategy(ScriptStrategy):
             actions,
         )
 
+    _UPLOAD_CLICK_RE = re.compile(
+        r'^(?P<indent>[ \t]*)(?P<loc>page\.[^\n]*?)\.click\(\)[ \t]*\n'
+        r'(?:(?P=indent)_wait_for_network_settle\(page\)[ \t]*\n)?'
+        r'(?=(?P=indent)(?P=loc)\.set_input_files\()',
+        re.MULTILINE,
+    )
+
+    def _strip_upload_click(self, actions: str) -> str:
+        """Drop a codegen-recorded ``.click()`` that immediately precedes a
+        ``.set_input_files()`` call on the identical locator.
+
+        Codegen's own recording session intercepts the native OS file-picker
+        that click triggers on a real ``<input type=file>``, but that
+        interception isn't part of the exported script. Replayed headed, the
+        click opens a real unhandled OS dialog and hangs the page.
+        ``set_input_files()`` alone sets the file via CDP — no click needed."""
+        return self._UPLOAD_CLICK_RE.sub("", actions)
+
     def _render_harness(self, actions: str) -> str:
         if not actions.strip():
             # Harness still needs a body — emit a `pass` so the file is valid.
@@ -526,4 +557,7 @@ class PythonStrategy(ScriptStrategy):
         else:
             body = "\n".join("            " + line if line else "" for line in actions.splitlines())
         body = f"{' ' * 12}{_BEGIN_MARKER}\n{body}\n{' ' * 12}{_END_MARKER}"
-        return _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        rendered = _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        return rendered.replace(
+            "{CAPTURE_ALLOWED_TYPES_JSON}", json.dumps(list(CAPTURE_ALLOWED_RESOURCE_TYPES))
+        )

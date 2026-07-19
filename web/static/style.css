@@ -26,6 +26,7 @@
   --danger-border:   rgba(239,68,68,0.20);
   --warning:         #f59e0b;
   --warning-bg:      rgba(245,158,11,0.10);
+  --var-col:         #a855f7;
 
   --font-ui:   'Outfit', sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
@@ -67,6 +68,7 @@ html[data-theme="light"] {
   --danger-bg:       rgba(239,68,68,0.10);
   --danger-border:   rgba(239,68,68,0.28);
   --warning-bg:      rgba(245,158,11,0.14);
+  --var-col:         #9333ea;
 
   --shadow-sm:   0 1px 2px rgba(15,23,42,0.06);
   --shadow-md:   0 4px 16px rgba(15,23,42,0.08);
@@ -947,6 +949,19 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   font-size: 11px;
   color: var(--text-primary);
 }
+.run-capture-summary {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+.run-capture-summary-historical {
+  font-style: italic;
+}
+
 .failure-summary {
   margin: 10px 0 4px;
   padding: 8px 10px;
@@ -1670,8 +1685,11 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 
 .req-url-bar .req-url-input {
   flex: 1;
-  display: flex;
-  align-items: center;
+  /* block, not flex — a flex container splits its text node + {{var}} token
+     spans into separate flex items, which breaks native caret navigation
+     across that boundary (click/End/ArrowLeft all get stuck at the first
+     item). line-height centers the single line of text instead. */
+  display: block;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -1680,6 +1698,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   font-family: var(--font-mono);
   color: var(--text-primary);
   min-height: 44px;
+  line-height: 44px;
   box-shadow: none;
   white-space: pre;
   overflow-x: auto;
@@ -1851,6 +1870,12 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .var-tok--ok { color: var(--success); }
 .var-tok--missing { color: var(--danger); }
 
+/* Source indicator dot on {{var}} suggestion-dropdown rows (var-picker.js /
+   inline-var-drop.js) — Environment vs. Collection. */
+.var-source-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+.var-source-dot--env { background: var(--accent); }
+.var-source-dot--col { background: var(--var-col); }
+
 /* Chrome/Edge autofill paints its own text via -webkit-text-fill-color, which
    wins over the `color: transparent` we set on the real input — so autofilled
    text becomes visible again, stacked behind/above the overlay's own text.
@@ -1961,8 +1986,21 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
   word-break: break-all;
 }
 
-/* Assertions */
+/* Assertions — type/op/matchmode are fixed-choice selects, keep them compact;
+   path/expected-value are free-text fields the user actually types into, so
+   let them grow and claim the leftover row width (targets both the raw
+   input, when no var-overlay is attached, and its overlay wrap otherwise). */
 .assertion-row { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.assertion-row .assertion-type { flex: 0 0 100px; width: auto; }
+.assertion-row .assertion-op { flex: 0 0 150px; width: auto; }
+.assertion-row .assertion-matchmode { flex: 0 0 110px; width: auto; }
+.assertion-row .assertion-extra,
+.assertion-row .assertion-value,
+.assertion-row .var-token-overlay-wrap:has(.assertion-extra),
+.assertion-row .var-token-overlay-wrap:has(.assertion-value) {
+  flex: 1 1 180px;
+  min-width: 140px;
+}
 .assertion-value--invalid {
   border-color: var(--danger) !important;
   background: var(--danger-bg);

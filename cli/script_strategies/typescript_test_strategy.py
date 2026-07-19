@@ -9,6 +9,9 @@ via its built-in esbuild integration; no tsx needed.
 
 from __future__ import annotations
 
+import json
+
+from cli.script_strategies._shared import CAPTURE_ALLOWED_RESOURCE_TYPES
 from cli.script_strategies.javascript_test_strategy import JavaScriptTestStrategy
 
 
@@ -55,7 +58,7 @@ const _captureStarts = new Map<any, number>();
 const _capturePending: Promise<void>[] = [];
 const _CAPTURE_CAP = 200;
 const _CAPTURE_BODY_CAP_BYTES = 200000;
-const _CAPTURE_SKIP_TYPES = new Set(['document', 'stylesheet', 'image', 'font', 'script']);
+const _CAPTURE_ALLOWED_TYPES = new Set({CAPTURE_ALLOWED_TYPES_JSON});
 
 function _truncateBody(text: string | null): string | null {
   if (text == null) return text;
@@ -66,7 +69,7 @@ function _truncateBody(text: string | null): string | null {
 
 async function _captureRequest(req: any): Promise<void> {
   if (!_CAPTURE_ENABLED) return;
-  if (_CAPTURE_SKIP_TYPES.has(req.resourceType())) return;
+  if (!_CAPTURE_ALLOWED_TYPES.has(req.resourceType())) return;
   const start = _captureStarts.get(req);
   _captureStarts.delete(req);
   if (_capturedRequests.length >= _CAPTURE_CAP) return;
@@ -93,7 +96,7 @@ function _trackNetwork(page: any) {
   page.on('request', (req: any) => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
-    if (_CAPTURE_ENABLED && !_CAPTURE_SKIP_TYPES.has(t)) _captureStarts.set(req, Date.now());
+    if (_CAPTURE_ENABLED && _CAPTURE_ALLOWED_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = (req: any) => {
     const t = req.resourceType();
@@ -189,4 +192,7 @@ class TypeScriptTestStrategy(JavaScriptTestStrategy):
         else:
             body = "\n".join("    " + line if line else "" for line in actions.splitlines())
         body = f"    {_BEGIN_MARKER}\n{body}\n    {_END_MARKER}"
-        return _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        rendered = _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        return rendered.replace(
+            "{CAPTURE_ALLOWED_TYPES_JSON}", json.dumps(list(CAPTURE_ALLOWED_RESOURCE_TYPES))
+        )

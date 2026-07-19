@@ -153,6 +153,7 @@ def init_db():
     _migrate_nested_folders(conn)
     _migrate_captured_requests(conn)
     _migrate_api_cloud_id(conn)
+    _migrate_collection_var_secret(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -562,6 +563,15 @@ def _migrate_api_cloud_id(conn):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
         except Exception:
             pass  # already exists
+    conn.commit()
+
+
+def _migrate_collection_var_secret(conn):
+    """Add is_secret to collection_vars, mirroring env_vars.is_secret."""
+    try:
+        conn.execute("ALTER TABLE collection_vars ADD COLUMN is_secret INTEGER DEFAULT 0")
+    except Exception:
+        pass  # already exists
     conn.commit()
 
 

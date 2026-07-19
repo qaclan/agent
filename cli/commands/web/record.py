@@ -171,6 +171,7 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
         with open(tmp_path, "r", encoding="utf-8") as f:
             raw_script = f.read()
 
+        script_id = generate_id("script")
         processed = strategy.post_process_recording(raw_script)
 
         var_keys_list = []
@@ -179,7 +180,6 @@ def record_script(project_id, feature_id, name, url=None, url_key=None, url_key_
             processed = strategy.rewrite_url_template(processed, url_key_value, url_key)
             var_keys_list = [url_key]
 
-        script_id = generate_id("script")
         dest = os.path.join(SCRIPTS_DIR, f"{script_id}{strategy.file_extension}")
         os.makedirs(SCRIPTS_DIR, exist_ok=True)
         with open(dest, "w", encoding="utf-8") as f:

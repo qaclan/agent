@@ -118,22 +118,43 @@ def discover_bruno():
 
 @bp.route("/api/discover/save-requests", methods=["POST"])
 def save_requests():
-    """Save pre-parsed request objects directly (no re-parsing). Body: {requests, collection_name, include_in_docs}."""
+    """Save pre-parsed request objects directly (no re-parsing). Body:
+    {requests, collection_name, collection_id, include_in_docs,
+    collection_vars, collection_auth}. collection_id (optional) appends into
+    an existing collection instead of creating a new one — see
+    docs/superpowers/specs/2026-07-19-run-api-capture-ux-design.md (Section
+    A). collection_vars/collection_auth are optional passthrough from a
+    Postman/Bruno preview (parse_postman/parse_bruno_collection_settings
+    output) so the review-modal save step doesn't lose them."""
     try:
         pid = _project_id()
         data = request.get_json(force=True) or {}
         requests_list = data.get("requests", [])
         collection_name = data.get("collection_name", "Recorded APIs")
+        collection_id = data.get("collection_id")
         include_in_docs = int(data.get("include_in_docs", 1))
+        collection_vars = data.get("collection_vars")
+        collection_auth = data.get("collection_auth")
         if not requests_list:
             return jsonify({"ok": False, "error": "No requests provided"}), 400
         # Stamp include_in_docs on each request
         for r in requests_list:
             r['include_in_docs'] = include_in_docs
-        from web.api.services.discovery_service import _save_requests
+        from web.api.services.discovery_service import _save_requests, _apply_collection_extras
         from web.api.repositories.collection_repo import CollectionRepo
-        col = CollectionRepo().create(pid, collection_name)
+        if collection_id:
+            existing = CollectionRepo().get(collection_id, pid)
+            if not existing:
+                return jsonify({"ok": False, "error": "Collection not found"}), 404
+            col = existing
+        else:
+            col = CollectionRepo().create(pid, collection_name)
         saved = _save_requests(pid, requests_list, collection_id=col["id"])
+        if collection_vars or collection_auth:
+            _apply_collection_extras(
+                pid, col["id"], collection_vars,
+                tuple(collection_auth) if collection_auth else None,
+            )
         logger.info("save_requests: saved %d to collection %s", saved, col["id"])
         return jsonify({"ok": True, "imported": saved, "collection_id": col["id"]})
     except ValueError as e:
@@ -242,8 +263,14 @@ def discover_postman_preview():
         f = request.files["file"]
         collection_json = json.loads(f.read().decode("utf-8"))
         from cli.api_discovery.postman_parser import parse_postman
-        requests_list = parse_postman(collection_json)
-        return jsonify({"ok": True, "requests": requests_list})
+        parsed = parse_postman(collection_json)
+        return jsonify({
+            "ok": True,
+            "requests": parsed["requests"],
+            "warnings": parsed["warnings"],
+            "collection_vars": parsed["collection_vars"],
+            "collection_auth": parsed["collection_auth"],
+        })
     except Exception as e:
         logger.exception("discover_postman_preview")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -251,20 +278,43 @@ def discover_postman_preview():
 
 @bp.route("/api/discover/bruno/preview", methods=["POST"])
 def discover_bruno_preview():
-    """Parse .bru files and return request list without saving."""
+    """Parse .bru files and return request list without saving. A file
+    named 'collection.bru' or 'folder.bru' anywhere in the upload is
+    treated as collection-level settings (vars/auth), not a request."""
     try:
         files = request.files.getlist("files")
         if not files:
             return jsonify({"ok": False, "error": "No files uploaded (field: 'files')"}), 400
-        from cli.api_discovery.bruno_parser import parse_bruno
+        from cli.api_discovery.bruno_parser import parse_bruno, parse_bruno_collection_settings
         requests_list = []
+        warnings: list = []
+        collection_vars: dict = {}
+        collection_auth = None
         for f in files:
-            parsed = parse_bruno(f.read().decode("utf-8"))
-            for req in parsed:
+            rel_name = f.filename or "Request.bru"
+            base = rel_name.rsplit("/", 1)[-1]
+            content = f.read().decode("utf-8")
+            if base in ("collection.bru", "folder.bru"):
+                settings = parse_bruno_collection_settings(content)
+                collection_vars.update(settings.get("vars") or {})
+                if settings.get("auth"):
+                    collection_auth = settings["auth"]
+                continue
+            parsed = parse_bruno(content)
+            warnings.extend(parsed["warnings"])
+            folder_path = rel_name.split("/")[:-1]
+            for req in parsed["requests"]:
                 if req.get("name") in ("Imported Request", "", None):
-                    req["name"] = (f.filename or "").replace(".bru", "")
-            requests_list.extend(parsed)
-        return jsonify({"ok": True, "requests": requests_list})
+                    req["name"] = base.replace(".bru", "")
+                req["folder_path"] = folder_path
+            requests_list.extend(parsed["requests"])
+        return jsonify({
+            "ok": True,
+            "requests": requests_list,
+            "warnings": warnings,
+            "collection_vars": collection_vars,
+            "collection_auth": collection_auth,
+        })
     except Exception as e:
         logger.exception("discover_bruno_preview")
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -367,6 +417,7 @@ def record_start():
         session_id = str(uuid.uuid4())
         data = request.get_json(force=True) or {}
         url = data.get("url", "about:blank")
+        resolution = data.get("resolution") or None
 
         import shutil, tempfile, os
         if not url or not url.startswith(("http://", "https://")):
@@ -381,7 +432,7 @@ def record_start():
 
         from web.api.services.discovery_service import DiscoveryService
         try:
-            proc, stop_file, harness_dir = DiscoveryService().launch_recorder(url, har_file)
+            proc, stop_file, harness_dir = DiscoveryService().launch_recorder(url, har_file, resolution)
         except Exception:
             shutil.rmtree(capture_dir, ignore_errors=True)
             raise

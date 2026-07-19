@@ -11,6 +11,15 @@ Frontend: [assertion-builder.js](../web/static/api/components/assertion-builder.
 `_evaluate_assertions`/`_compare`/`_values_equal`/`_contains` in
 [cli/api_runner.py](../cli/api_runner.py) (around line 315).
 
+Postman/Bruno import and export convert between this schema and each
+tool's own assertion representation — Bruno's declarative `assert {}`
+block maps directly (op table in `_convert_assertions`/`_bru_assert_lines`,
+`cli/api_discovery/bruno_parser.py`); Postman has no declarative assertion
+format, so its import only sees assertions via test-script code (handled
+by the script conversion in [api-script-reference.md](api-script-reference.md#postmanbruno-import--export-script-conversion)),
+and export codegens this schema into `pm.test(...)` snippets
+(`_assertions_to_test_script`, `cli/api_discovery/postman_exporter.py`).
+
 ## Assertion shape
 
 ```json

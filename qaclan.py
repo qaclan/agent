@@ -395,6 +395,22 @@ def reset_runtime(yes):
     console.print("[green]✓ Runtime removed.[/green] Run [bold]qaclan setup --runtime-only[/bold] to rebuild.")
 
 
+@qaclan.command("set-upload-cap")
+@click.argument("mb", type=int)
+def set_upload_cap(mb):
+    """Set the per-file size cap (MB) for files captured from recorded
+    upload interactions. Applies globally to every script."""
+    from rich.console import Console
+    from cli.config import set_upload_size_cap_mb
+
+    console = Console()
+    if mb <= 0:
+        console.print("[red]Cap must be a positive number of megabytes.[/red]")
+        sys.exit(1)
+    set_upload_size_cap_mb(mb)
+    console.print(f"[green]✓ Upload file size cap set to {mb}MB.[/green]")
+
+
 @qaclan.command("_pw-install", hidden=True)
 def pw_install():
     """Install Playwright browsers (used by install script)."""
