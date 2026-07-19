@@ -7,6 +7,7 @@ harness reads configuration from QACLAN_* env vars and writes artifacts
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -16,10 +17,10 @@ import sys
 from typing import List
 
 from cli import runtime_setup
+from cli.script_strategies._shared import CAPTURE_ALLOWED_RESOURCE_TYPES
 from cli.script_strategies.base import ScriptStrategy
 
 logger = logging.getLogger("qaclan.script_strategies.javascript")
-
 
 _BEGIN_MARKER = "// BEGIN ACTIONS"
 _END_MARKER = "// END ACTIONS"
@@ -47,14 +48,65 @@ const _networkFailures = [];
 // Counts in-flight XHR/fetch requests so _waitForNetworkSettle can block
 // until a slow-loading page (table fed by an XHR) finishes.
 let _inFlight = 0;
+
+// --- Request capture (docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md) ---
+// Records XHR/fetch traffic as a passive side effect of the run so it can be
+// saved as API requests afterward. Never fails the run — every capture step
+// is wrapped in a try/catch that swallows errors. Playwright does not await
+// page.on() handlers, so every _captureRequest() call is tracked in
+// _capturePending and awaited before run() returns (see the finally block
+// below) — otherwise the last in-flight capture can race process exit.
+// Opt-in: off unless QACLAN_CAPTURE_REQUESTS=1, checked once at startup.
+const _CAPTURE_ENABLED = process.env.QACLAN_CAPTURE_REQUESTS === '1';
+const _capturedRequests = [];
+const _captureStarts = new Map();
+const _capturePending = [];
+const _CAPTURE_CAP = 200;
+const _CAPTURE_BODY_CAP_BYTES = 200000;
+const _CAPTURE_ALLOWED_TYPES = new Set({CAPTURE_ALLOWED_TYPES_JSON});
+
+function _truncateBody(text) {
+  if (text == null) return text;
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= _CAPTURE_BODY_CAP_BYTES) return text;
+  return buf.subarray(0, _CAPTURE_BODY_CAP_BYTES).toString('utf-8');
+}
+
+async function _captureRequest(req) {
+  if (!_CAPTURE_ENABLED) return;
+  if (!_CAPTURE_ALLOWED_TYPES.has(req.resourceType())) return;
+  const start = _captureStarts.get(req);
+  _captureStarts.delete(req);
+  if (_capturedRequests.length >= _CAPTURE_CAP) return;
+  try {
+    const resp = await req.response();
+    const entry = {
+      method: req.method(),
+      url: req.url(),
+      request_headers: await req.allHeaders(),
+      request_body: _truncateBody(req.postData()),
+      status_code: resp ? resp.status() : null,
+      response_headers: resp ? await resp.allHeaders() : {},
+      response_body: null,
+      duration_ms: start != null ? Date.now() - start : null,
+    };
+    if (resp) {
+      try { entry.response_body = _truncateBody(await resp.text()); } catch (_) {}
+    }
+    _capturedRequests.push(entry);
+  } catch (_) {}
+}
+
 function _trackNetwork(page) {
   page.on('request', req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight++;
+    if (_CAPTURE_ENABLED && _CAPTURE_ALLOWED_TYPES.has(t)) _captureStarts.set(req, Date.now());
   });
   const done = req => {
     const t = req.resourceType();
     if (t === 'xhr' || t === 'fetch') _inFlight = Math.max(0, _inFlight - 1);
+    _capturePending.push(_captureRequest(req).catch(() => {}));
   };
   page.on('requestfinished', done);
   page.on('requestfailed', done);
@@ -108,6 +160,7 @@ function _writeArtifacts(error) {
     const payload = {
       console_errors: _consoleErrors,
       network_failures: _networkFailures,
+      captured_requests: _capturedRequests,
     };
     // Structured error — raw exception fields the runner's classifier keys
     // on. See docs/error-reporting-plan.md (section 2.1).
@@ -147,7 +200,12 @@ async function run() {
     }
     throw err;
   } finally {
+    await Promise.allSettled(_capturePending);
     if (_STATE) {
+      // Give a trailing auth request (e.g. a cookie/token finalized just
+      // after the page renders) a short window to land before snapshotting,
+      // so the next script in the suite doesn't inherit a partial session.
+      try { await _waitForNetworkSettle(page, { graceMs: 200, quietMs: 300, timeoutMs: 3000 }); } catch (_) {}
       try { await context.storageState({ path: _STATE }); } catch (_) {}
     }
     try { await page.close(); } catch (_) {}
@@ -174,6 +232,9 @@ _QACLAN_JS_NAMES = (
     "_BROWSER", "_HEADLESS", "_VIEWPORT", "_STATE", "_ARTIFACTS",
     "_SCREENSHOT", "_consoleErrors", "_networkFailures", "_contextOpts",
     "_writeArtifacts", "_browsers", "_browserType", "_inFlight",
+    "_capturedRequests", "_captureStarts", "_capturePending",
+    "_CAPTURE_ENABLED", "_CAPTURE_CAP", "_CAPTURE_BODY_CAP_BYTES",
+    "_CAPTURE_ALLOWED_TYPES", "_truncateBody",
 )
 
 
@@ -270,6 +331,7 @@ class JavaScriptStrategy(ScriptStrategy):
     def post_process_recording(self, raw: str) -> str:
         actions = self._extract_actions(raw)
         actions = self._patch_goto_wait(actions)
+        actions = self._strip_upload_click(actions)
         return self._render_harness(actions)
 
     def rewrite_url_template(self, content: str, base_value: str, key_name: str) -> str:
@@ -424,10 +486,31 @@ class JavaScriptStrategy(ScriptStrategy):
             actions,
         )
 
+    _UPLOAD_CLICK_RE = re.compile(
+        r'^(?P<indent>[ \t]*)await (?P<loc>page\.[^\n]*?)\.click\(\);[ \t]*\n'
+        r'(?:(?P=indent)await _waitForNetworkSettle\(page\);[ \t]*\n)?'
+        r'(?=(?P=indent)await (?P=loc)\.setInputFiles\()',
+        re.MULTILINE,
+    )
+
+    def _strip_upload_click(self, actions: str) -> str:
+        """Drop a codegen-recorded ``.click()`` that immediately precedes a
+        ``.setInputFiles()`` call on the identical locator.
+
+        Codegen's own recording session intercepts the native OS file-picker
+        that click triggers on a real ``<input type=file>``, but that
+        interception isn't part of the exported script. Replayed headed, the
+        click opens a real unhandled OS dialog and hangs the page.
+        ``setInputFiles()`` alone sets the file via CDP — no click needed."""
+        return self._UPLOAD_CLICK_RE.sub("", actions)
+
     def _render_harness(self, actions: str) -> str:
         if not actions.strip():
             body = "    // pass"
         else:
             body = "\n".join("    " + line if line else "" for line in actions.splitlines())
         body = f"    {_BEGIN_MARKER}\n{body}\n    {_END_MARKER}"
-        return _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        rendered = _HARNESS_TEMPLATE.replace("{ACTIONS}", body)
+        return rendered.replace(
+            "{CAPTURE_ALLOWED_TYPES_JSON}", json.dumps(list(CAPTURE_ALLOWED_RESOURCE_TYPES))
+        )

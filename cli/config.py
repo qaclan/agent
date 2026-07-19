@@ -4,11 +4,13 @@ import os
 QACLAN_DIR = os.path.expanduser("~/.qaclan")
 CONFIG_PATH = os.path.join(QACLAN_DIR, "config.json")
 SCRIPTS_DIR = os.path.join(QACLAN_DIR, "scripts")
+UPLOADS_DIR = os.path.join(QACLAN_DIR, "uploads")
 
 
 def ensure_dirs():
     os.makedirs(QACLAN_DIR, exist_ok=True)
     os.makedirs(SCRIPTS_DIR, exist_ok=True)
+    os.makedirs(UPLOADS_DIR, exist_ok=True)
 
 
 def _read_config():
@@ -150,3 +152,25 @@ def get_editor_mode():
     if mode not in ALLOWED_EDITOR_MODES:
         mode = "code"
     return mode
+
+
+# Per-file size cap (MB) for files captured from recorded upload
+# interactions (set_input_files/setInputFiles). Global, not per-script —
+# see docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md.
+DEFAULT_UPLOAD_SIZE_CAP_MB = 20
+
+
+def get_upload_size_cap_mb():
+    """Return the configured per-file upload size cap in MB (default 20)."""
+    cfg = _read_config()
+    val = cfg.get("upload_size_cap_mb", DEFAULT_UPLOAD_SIZE_CAP_MB)
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return DEFAULT_UPLOAD_SIZE_CAP_MB
+
+
+def set_upload_size_cap_mb(mb):
+    cfg = _read_config()
+    cfg["upload_size_cap_mb"] = int(mb)
+    _write_config(cfg)

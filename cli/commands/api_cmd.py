@@ -137,13 +137,15 @@ def api_run(name_or_id, collection, env):
 
 @api_group.command("export")
 @click.argument("collection")
-@click.option("--output", "-o", default=".", help="Output directory for .bru files")
-def api_export(collection, output):
-    """Export a collection as Bruno .bru files."""
+@click.option("--output", "-o", default=".", help="Output directory")
+@click.option("--format", "fmt", type=click.Choice(["bruno", "postman"]), default="bruno", help="Export format")
+def api_export(collection, output, fmt):
+    """Export a collection as Bruno .bru files or a Postman v2.1 collection JSON."""
     pid = _require_project()
     from web.api.services.collection_service import CollectionService
     from web.api.services.request_service import RequestService
-    from cli.api_discovery.bruno_parser import request_to_bru
+    from web.api.repositories.folder_repo import FolderRepo
+    from web.api.repositories.collection_vars_repo import CollectionVarsRepo
 
     cols = CollectionService().list(pid)
     col = next((c for c in cols if c["name"] == collection or c["id"] == collection), None)
@@ -152,11 +154,25 @@ def api_export(collection, output):
         sys.exit(1)
 
     reqs = RequestService().list(pid, collection_id=col["id"])
+    folders = FolderRepo().list_for_collection(col["id"])
+    collection_vars = CollectionVarsRepo().list(col["id"])
     out_dir = Path(output)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for req in reqs:
-        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in req["name"])
-        (out_dir / f"{safe_name}.bru").write_text(request_to_bru(req), encoding="utf-8")
+
+    if fmt == "postman":
+        from cli.api_discovery.postman_exporter import to_postman_collection
+        exported = to_postman_collection(col, reqs, folders, collection_vars)
+        out_file = out_dir / f"{col['name']}.postman_collection.json"
+        out_file.write_text(json.dumps(exported, indent=2), encoding="utf-8")
+        console.print(f"[green]Exported {len(reqs)} requests to {out_file}[/green]")
+        return
+
+    from cli.api_discovery.bruno_parser import export_bruno_tree
+    tree = export_bruno_tree(col, reqs, folders, collection_vars)
+    for rel_path, content in tree.items():
+        file_path = out_dir / rel_path
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content, encoding="utf-8")
     console.print(f"[green]Exported {len(reqs)} requests to {out_dir}[/green]")
 
 
@@ -225,11 +241,15 @@ def api_import(file_or_url, fmt, collection):
         col_json = json.loads(content)
         result = svc.import_postman(pid, col_json)
         console.print(f"[green]Imported {result['imported']} requests[/green]")
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]warning: {w}[/yellow]")
 
     elif fmt == "bruno":
         content = Path(file_or_url).read_text(encoding="utf-8")
         result = svc.import_bruno(pid, [{"name": Path(file_or_url).name, "content": content}])
         console.print(f"[green]Imported {result['imported']} requests[/green]")
+        for w in result.get("warnings", []):
+            console.print(f"[yellow]warning: {w}[/yellow]")
 
 
 @api_group.command("record")

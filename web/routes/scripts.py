@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shutil
 from pathlib import Path
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
@@ -796,12 +797,108 @@ def delete_script(script_id):
         if file_path and os.path.exists(file_path):
             os.unlink(file_path)
 
+        # Delete any files captured from recorded upload interactions
+        from cli.config import UPLOADS_DIR
+        shutil.rmtree(os.path.join(UPLOADS_DIR, script_id), ignore_errors=True)
+
         # Delete DB row
         conn.execute("DELETE FROM scripts WHERE id = ?", (script_id,))
         conn.commit()
 
         from cli.sync_queue import enqueue
         enqueue("script", script_id, "delete")
+
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _require_script(script_id, project_id):
+    """Return the scripts row for script_id scoped to project_id, or None."""
+    conn = get_conn()
+    return conn.execute(
+        "SELECT id FROM scripts WHERE id = ? AND project_id = ?",
+        (script_id, project_id),
+    ).fetchone()
+
+
+@bp.route('/api/scripts/<script_id>/uploads', methods=['GET'])
+def list_script_uploads(script_id):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+        if not _require_script(script_id, project_id):
+            return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
+
+        from cli.config import UPLOADS_DIR
+        script_upload_dir = os.path.join(UPLOADS_DIR, script_id)
+        files = []
+        if os.path.isdir(script_upload_dir):
+            for name in sorted(os.listdir(script_upload_dir)):
+                full = os.path.join(script_upload_dir, name)
+                if os.path.isfile(full):
+                    files.append({"name": name, "size": os.path.getsize(full)})
+
+        return jsonify({"ok": True, "files": files})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/scripts/<script_id>/uploads', methods=['POST'])
+def upload_script_file(script_id):
+    """Multipart file upload. Field name: 'file'. Attaches a file to a
+    script's upload folder so a set_input_files()/setInputFiles() call can
+    reference it via the {{__qaclan_upload_dir__}} token — see
+    docs/superpowers/specs/2026-07-19-recorded-upload-assets-design.md."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+        if not _require_script(script_id, project_id):
+            return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
+
+        if "file" not in request.files:
+            return jsonify({"ok": False, "error": "No file uploaded (field: 'file')"}), 400
+        f = request.files["file"]
+        basename = os.path.basename(f.filename or "")
+        if not basename:
+            return jsonify({"ok": False, "error": "File has no name"}), 400
+
+        from cli.config import UPLOADS_DIR, get_upload_size_cap_mb
+        cap_bytes = get_upload_size_cap_mb() * 1024 * 1024
+
+        data = f.read()
+        if len(data) > cap_bytes:
+            return jsonify({
+                "ok": False,
+                "error": f"File is {len(data)} bytes, over the {get_upload_size_cap_mb()}MB cap",
+            }), 400
+
+        script_upload_dir = os.path.join(UPLOADS_DIR, script_id)
+        os.makedirs(script_upload_dir, exist_ok=True)
+        with open(os.path.join(script_upload_dir, basename), "wb") as out:
+            out.write(data)
+
+        return jsonify({"ok": True, "file": {"name": basename, "size": len(data)}})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/scripts/<script_id>/uploads/<path:filename>', methods=['DELETE'])
+def delete_script_upload(script_id, filename):
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+        if not _require_script(script_id, project_id):
+            return jsonify({"ok": False, "error": f"Script {script_id} not found"}), 404
+
+        from cli.config import UPLOADS_DIR
+        basename = os.path.basename(filename)
+        target = os.path.join(UPLOADS_DIR, script_id, basename)
+        if os.path.isfile(target):
+            os.unlink(target)
 
         return jsonify({"ok": True})
     except Exception as e:
@@ -941,6 +1038,10 @@ def run_script_solo(script_id):
             child_env["QACLAN_SCREENSHOT_PATH"] = str(screenshot_path)
             child_env["QACLAN_BROWSER"] = browser_type
             child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
+            # Solo quick-run has no options UI (browser/resolution/headless are also
+            # hardcoded here) — capture is opt-in via the suite-run modal only.
+            # See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md Section 0.
+            child_env["QACLAN_CAPTURE_REQUESTS"] = "0"
             child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
             child_env["QACLAN_EXPECT_TIMEOUT"] = "15000"
             child_env["QACLAN_ACTION_TIMEOUT"] = "15000"

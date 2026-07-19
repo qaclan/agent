@@ -12,7 +12,6 @@ logger = logging.getLogger("qaclan.har_parser")
 _STATIC_EXT_RE = re.compile(r"\.(css|js|png|jpg|jpeg|gif|ico|woff|woff2|ttf|svg|webp|map)$", re.IGNORECASE)
 _STATIC_PATH_RE = re.compile(r"/static/|/assets/|/_next/|/favicon")
 _BEACON_PATH_RE = re.compile(r"/cdn-cgi/|/__utm|/beacon/?$|/collect/?$|/pixel/?$", re.IGNORECASE)
-_SENSITIVE_RE = re.compile(r"(password|secret|token|authorization|api.?key|auth)", re.IGNORECASE)
 _STATIC_CONTENT_TYPES = {
     "text/css", "text/javascript", "application/javascript",
     "image/png", "image/jpeg", "image/gif", "image/svg+xml",
@@ -64,13 +63,6 @@ def _should_skip(entry: dict) -> bool:
                 return True
             break
     return _is_static(entry)
-
-
-def _redact_sensitive(key: str, value: str) -> str:
-    if _SENSITIVE_RE.search(key):
-        safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", key).upper()
-        return "{{" + safe_key + "}}"
-    return value
 
 
 def parse_multipart_text(mime: str, text: str) -> list[dict]:
@@ -137,7 +129,7 @@ def parse_multipart_text(mime: str, text: str) -> list[dict]:
             if ct_m:
                 field["content_type"] = ct_m.group(1).strip()
         else:
-            field = {"key": name, "value": _redact_sensitive(name, value), "enabled": True}
+            field = {"key": name, "value": value, "enabled": True}
         fields.append(field)
     return fields
 
@@ -199,7 +191,7 @@ def parse_multipart_bytes(mime: str, data: bytes) -> list[dict]:
                 field["content_type"] = ct_m.group(1).strip()
         else:
             text_value = value.decode("utf-8", errors="replace")
-            field = {"key": name, "value": _redact_sensitive(name, text_value), "enabled": True}
+            field = {"key": name, "value": text_value, "enabled": True}
         fields.append(field)
     return fields
 
@@ -271,7 +263,7 @@ def parse_har(har_json: dict) -> list[dict]:
         params = []
         for qs in req.get("queryString", []):
             k = qs.get("name", "")
-            v = _redact_sensitive(k, qs.get("value", ""))
+            v = qs.get("value", "")
             params.append({"key": k, "value": v, "enabled": True})
 
         # Headers — skip pseudo-headers and common browser headers
@@ -284,7 +276,7 @@ def parse_har(har_json: dict) -> list[dict]:
             name = h.get("name", "")
             if name.lower() in skip_headers or name.startswith(":"):
                 continue
-            v = _redact_sensitive(name, h.get("value", ""))
+            v = h.get("value", "")
             headers.append({"key": name, "value": v, "enabled": True})
 
         # Body
@@ -310,7 +302,7 @@ def parse_har(har_json: dict) -> list[dict]:
                         if p.get("contentType"):
                             field["content_type"] = p.get("contentType")
                     else:
-                        field = {"key": name, "value": _redact_sensitive(name, p.get("value", "")), "enabled": True}
+                        field = {"key": name, "value": p.get("value", ""), "enabled": True}
                     params_list.append(field)
                 if not params_list:
                     raw_bytes = post_data.get("_raw_bytes")
@@ -324,14 +316,14 @@ def parse_har(har_json: dict) -> list[dict]:
                 params_list = []
                 for p in post_data.get("params", []):
                     k = p.get("name", "")
-                    v = _redact_sensitive(k, p.get("value", ""))
+                    v = p.get("value", "")
                     params_list.append({"key": k, "value": v, "enabled": True})
                 if not params_list and text:
                     # Playwright's HAR recorder leaves postData.params empty for
                     # urlencoded bodies too (not just multipart) — fall back to
                     # decoding the raw text, same as the multipart branch above.
                     params_list = [
-                        {"key": k, "value": _redact_sensitive(k, v), "enabled": True}
+                        {"key": k, "value": v, "enabled": True}
                         for k, v in parse_qsl(text, keep_blank_values=True)
                     ]
                 body = json.dumps(params_list)

@@ -151,7 +151,9 @@ def init_db():
     _migrate_collection_run_progress(conn)
     _migrate_api_request_examples(conn)
     _migrate_nested_folders(conn)
+    _migrate_captured_requests(conn)
     _migrate_api_cloud_id(conn)
+    _migrate_collection_var_secret(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -220,6 +222,23 @@ def _migrate_nested_folders(conn):
         conn.execute("ALTER TABLE api_collections ADD COLUMN order_index INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass  # already exists
+    conn.commit()
+
+
+def _migrate_captured_requests(conn):
+    """Add captured_requests_count to script_runs (count only — the redacted
+    array itself is never persisted, it only ever exists in execute_run()'s
+    own response, see spec Section 0.5), and the opt-in capture_requests
+    flag to suite_runs (same pattern as suite_runs.headless).
+    See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md."""
+    try:
+        conn.execute("ALTER TABLE script_runs ADD COLUMN captured_requests_count INTEGER DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE suite_runs ADD COLUMN capture_requests INTEGER DEFAULT 0")
+    except Exception:
+        pass  # Column already exists
     conn.commit()
 
 
@@ -544,6 +563,15 @@ def _migrate_api_cloud_id(conn):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN cloud_id TEXT")
         except Exception:
             pass  # already exists
+    conn.commit()
+
+
+def _migrate_collection_var_secret(conn):
+    """Add is_secret to collection_vars, mirroring env_vars.is_secret."""
+    try:
+        conn.execute("ALTER TABLE collection_vars ADD COLUMN is_secret INTEGER DEFAULT 0")
+    except Exception:
+        pass  # already exists
     conn.commit()
 
 

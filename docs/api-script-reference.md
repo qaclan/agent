@@ -173,6 +173,37 @@ qc.test("users not empty", check)
 
 ---
 
+## Postman/Bruno import & export script conversion
+
+Source of truth: `cli/api_discovery/script_rewrite.py` (`foreign_script_to_qc` for import, `qc_script_to_foreign` for export), consumed by `cli/api_discovery/postman_parser.py`, `bruno_parser.py`, and `postman_exporter.py`.
+
+**Maintenance rule:** whenever the call tables in `script_rewrite.py` change (a new foreign call mapped/unmapped, a new `.expect()` chain ending supported, a new reverse mapping added), update this section in the same change.
+
+Foreign scripts (Postman's `pm.*`, Bruno's `bru.*`/bare `test()`/`expect()`) are **not run through a compatibility shim at execution time**. Instead, import rewrites the stored script text once, in place, so `pre_script`/`post_script` always hold native `qc.*` JS in the DB — the single point of truth. Export reverses the same table to regenerate foreign syntax deterministically; it does not preserve or fall back to original foreign text, since after import there no longer is one for the converted portion.
+
+**Import — literal call rewrite** (`foreign_script_to_qc`):
+
+| Foreign call | → qc.* |
+|---|---|
+| `pm.environment.set(k,v)`, `pm.variables.set(k,v)`, `bru.setVar(k,v)`, `bru.setEnvVar(k,v)` | `qc.set(k,v)` |
+| `pm.test(name,fn)`, bare `test(name,fn)` (Bruno/chai) | `qc.test(name,fn)` |
+| `req.setHeader(k,v)` | `qc.setHeader(k,v)` |
+| `req.getHeader(k)`, `pm.request.headers.get(k)` | `qc.getHeader(k)` |
+| `pm.request.url.query.get(k)` | `qc.getParam(k)` |
+| `pm.response.json(...)` | `response.json(...)` |
+| `pm.response.text(...)` | `response.text(...)` |
+| `pm.response.headers`, `res.headers` | `response.headers` |
+| `pm.response.status`/`.code`, `res.status` | `response.status` |
+| `res.body` | `response.json()` |
+
+`.expect()` chains (`pm.expect(EXPR).to.CHAIN(...)` / bare `expect(EXPR).to.CHAIN(...)`) are pattern-matched by chain ending — `equal`, `eql`, `be.true`, `be.false`, `exist`, `include`, `match`, each with an optional `.not.` — and rewritten to `qc.expect(<condition>, "<original line>")`. Anything outside these two tables (`pm.sendRequest`, `pm.cookies`, `pm.iterationData`, `bru.runRequest`, an unrecognized `.expect()` chain) is left as raw, unconverted text and reported in the import warnings list — it will throw a `ReferenceError` at run time under qaclan's `qc`-only sandbox (no `pm`/`bru`/`expect` globals are bound), same as it would today, but the import UI now says why instead of silently producing a broken script.
+
+**Export — reverse rewrite** (`qc_script_to_foreign`, `target: "postman" | "bruno"`): reverses the table above (`qc.set` → `pm.environment.set`/`bru.setVar`, `qc.test` → `pm.test`/bare `test`, `qc.setHeader`/`qc.setParam` → Postman's object-literal call shape `pm.request.headers.add({key,value})`/`req.setHeader` for Bruno, `response.*` → `pm.response.*`/`res.*`). `qc.expect(condition, message)` has no recoverable original chain (it was collapsed to a boolean at import time), so export regenerates a generic, always-valid equivalent: a named `pm.test(message, () => { if (!(condition)) throw new Error(message); })` when the `qc.expect(...)` call is the entire statement (preserves "this is a distinct recorded result" semantics), or an in-place `if (!(condition)) throw new Error(message);` when it's already nested inside another call's block (e.g. inside a `qc.test(...)` callback) — avoids double-wrapping a nested check in a redundant second named test. Call matching uses real paren/quote-aware scanning (`_find_matching_paren`/`_split_top_level_args` in `script_rewrite.py`), not a greedy regex, specifically so nested same-line calls don't get mis-split.
+
+**Python** `pre_script`/`post_script` (`pre_lang`/`post_lang == "python"`) have no foreign-script equivalent in either direction — Postman/Bruno only support JS. Import never produces Python scripts from foreign input (both parsers hardcode `pre_lang`/`post_lang: "js"`); export omits Python scripts entirely rather than attempting a JS translation, and reports it as an export warning.
+
+---
+
 ## What writes to `state.json` / how downstream steps read it
 
 Any `qc.set("key", value)` call (script or extractor) lands in `qaclan_vars` inside the shared run state. Downstream:
@@ -181,7 +212,16 @@ Any `qc.set("key", value)` call (script or extractor) lands in `qaclan_vars` ins
 
 ---
 
+## Variable secrecy
+
+Both environment variables (`env_vars.is_secret`) and collection variables (`collection_vars.is_secret`) support secret storage: Fernet-encrypted at rest (`cli/crypto.py`, key at `~/.qaclan/secret.key`), masked as `••••••••` in list/suggestion responses, and decrypted only when actually needed — at request-resolution time (`resolve_vars`, fed by `env_loader.load_env_vars` for environment vars and `CollectionVarsRepo.as_seed_dict` for collection vars) or via an explicit reveal endpoint (`GET /api/envs/<env_name>/vars/<key>/reveal`, `GET /api/collections/<col_id>/vars/<key>/reveal`), both responding with `Cache-Control: no-store`.
+
+**Export caveat:** exporting a collection to Postman JSON or Bruno `.bru` writes secret collection vars as **decrypted plaintext** (matching the fidelity-first behavior of the rest of collection export). Treat an exported file containing secret vars with the same care as a `.env` file — avoid committing it to git or pasting it into chat.
+
+---
+
 ## Known gaps (accurate as of this writing — update if closed)
 
 - No `pm.sendRequest()` equivalent — scripts can't issue additional HTTP calls (nothing blocks it technically, but no helper is provided). Non-trivial to add: would need `resolve_vars`/`_apply_auth` reachable from inside the subprocess, or an IPC round-trip back to the parent process, which breaks the current one-shot write-file-and-exit sandbox model.
-- No 4-tier variable scoping (global/collection/environment/local) — one flat `qaclan_vars` bucket plus the active environment's `env_vars`. Likely intentional given the local-first/single-active-environment model rather than a bug.
+- No 4-tier variable scoping (global/collection/environment/local) — one flat `qaclan_vars` bucket plus the active environment's `env_vars`. Likely intentional given the local-first/single-active-environment model rather than a bug. Both tiers support secret values (`is_secret`) — see "Variable secrecy" above.
+- `response.text()` exported to Bruno becomes a `res.body`-based ternary (no direct Bruno equivalent — Bruno auto-parses JSON, no separate raw-text accessor). If that exported `.bru` file is later re-imported, the import table's `res.body` → `response.json()` mapping rewrites the ternary's `res.body` references too, so the round-tripped script calls `response.json()` instead of `response.text()` — functionally near-identical when the body actually is JSON, but `json()` throws where `text()` wouldn't on a non-JSON body. Only surfaces on export-then-reimport of qaclan's own output, not on a first import from a real Postman/Bruno collection.

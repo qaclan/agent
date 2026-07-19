@@ -4,6 +4,7 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
+import { createGraphqlEditor, formatGraphQL } from '../components/graphql-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
 import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
@@ -57,7 +58,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     if (_effectiveCollectionId) {
       try {
         const res = await window.api('GET', `/collections/${_effectiveCollectionId}/vars`);
-        (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: false, group: 'Collection' }));
+        (res.vars || []).forEach(v => results.push({ key: v.key, value: v.initial_value || '', is_secret: !!v.is_secret, group: 'Collection' }));
       } catch(e) { /* no collection vars */ }
     }
     return results;
@@ -70,6 +71,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _scriptTextareaOverlays = [];
   let _bodyFallbackOverlay = null;
   let _extractorNameInputs = [];
+  // Every var-picker/inline-var-drop instance created below registers itself
+  // here so its 30s suggestion cache can be busted whenever the underlying
+  // env/collection var data actually changes (see _refreshKnownVarNames) —
+  // without this a dropdown opened before a var edit/env switch can keep
+  // showing stale contents for up to 30s.
+  let _varSuggestUIs = [];
 
   // Extractor "Variable Name" fields hold a bare name (no {{ }}), so they're
   // styled by exact match against known var names rather than token scanning.
@@ -97,6 +104,9 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _extractorNameInputs.forEach(inp => _styleExtractorNameInput(inp));
     assertionBuilder.restyleAll();
     _cmEditor?.refresh?.();
+    _gqlQueryEditor?.refresh?.();
+    _gqlVariablesEditor?.refresh?.();
+    _varSuggestUIs.forEach(u => u.invalidate());
   }
 
   container.innerHTML = '';
@@ -225,8 +235,37 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   });
   urlInput.value = r.url || '';
 
+  // {{ autocomplete — contenteditable has no .selectionStart/.setSelectionRange,
+  // so this can't use watchInput() (built for real <input>/<textarea>); wire the
+  // same open/handleKeydown primitives by hand against the caret-offset helpers above.
+  const _urlInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_urlInlineDrop);
   urlInput.addEventListener('input', _renderUrlTokens);
+  urlInput.addEventListener('input', (e) => {
+    if (!e.isTrusted) return;
+    const val = urlInput.value;
+    const caret = _urlCaretOffset();
+    if (caret == null) { _urlInlineDrop.close(); return; }
+    const before = val.slice(0, caret);
+    const openAt = before.lastIndexOf('{{');
+    if (openAt !== -1 && !val.slice(openAt + 2).includes('}}')) {
+      const partial = before.slice(openAt + 2);
+      _urlInlineDrop.open(urlInput, (varToken) => {
+        const cv = urlInput.value;
+        const cc = _urlCaretOffset() ?? cv.length;
+        const cb = cv.slice(0, cc);
+        const oa = cb.lastIndexOf('{{');
+        const at = oa !== -1 ? oa : cc;
+        urlInput.value = cv.slice(0, at) + varToken + cv.slice(cc);
+        _setUrlCaretOffset(at + varToken.length);
+        urlInput.focus();
+      }, partial);
+    } else {
+      _urlInlineDrop.close();
+    }
+  });
   urlInput.addEventListener('keydown', (e) => {
+    if (_urlInlineDrop.handleKeydown(e)) return;
     if (e.key === 'Enter') e.preventDefault(); // single-line field, no inserted linebreaks
   });
 
@@ -271,6 +310,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
     if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    _rawValue = parsed.body || '';
     bodyTextarea.value = parsed.body || '';
     _setBodyType(parsed.body_type || 'none');
 
@@ -555,6 +595,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
   const _bodyInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_bodyVarPicker, _bodyInlineDrop);
   const bodyVarBtn = document.createElement('button');
   bodyVarBtn.type = 'button';
   bodyVarBtn.title = 'Insert variable at cursor';
@@ -587,6 +628,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _cmEditor = null; // CodeMirror view instance (null when unavailable or non-raw type)
   let _cmActive = false;
 
+  // Raw body gets its own private cache, mirroring _formRows/_multipartRows/
+  // _gqlQuery — otherwise switching away to graphql (which continuously
+  // overwrites the shared bodyTextarea via _syncGqlBodyTextarea) and back
+  // would read back the other type's content instead of raw's own text.
+  let _rawValue = r.body || '';
+
   function _parseBodyWithVarSub(text) {
     const vars = [];
     const subbed = text.replace(/"\{\{[^}]+\}\}"|\{\{[^}]+\}\}/g, (m) => { vars.push(m); return `"__QCVAR_${vars.length - 1}__"`; });
@@ -600,6 +647,21 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   function _setBodyValue(val) {
+    if (activeBodyType === 'graphql') {
+      try {
+        const gql = JSON.parse(val || '{}');
+        _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+        _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+        _gqlLastValidVariables = gql.variables ?? {};
+      } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; }
+      if (_gqlQueryEditor) _gqlQueryEditor.setValue(_gqlQuery);
+      else if (_gqlQueryFallback) _gqlQueryFallback.value = formatGraphQL(_gqlQuery);
+      if (_gqlVariablesEditor) _gqlVariablesEditor.setValue(_gqlVariables);
+      else if (_gqlVariablesFallback) _gqlVariablesFallback.value = _gqlVariables;
+      _syncGqlBodyTextarea();
+      return;
+    }
+    _rawValue = val;
     bodyTextarea.value = val; // always keep hidden textarea in sync for _save()
     if (_cmActive && _cmEditor) { _cmEditor.setValue(val); return; }
     if (_cmActive) { bodyFallback.value = val; return; }
@@ -661,6 +723,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         const start = bodyFallback.selectionStart;
         const end = bodyFallback.selectionEnd;
         bodyFallback.value = bodyFallback.value.slice(0, start) + varToken + bodyFallback.value.slice(end);
+        _rawValue = bodyFallback.value;
         bodyTextarea.value = bodyFallback.value;
         bodyFallback.setSelectionRange(start + varToken.length, start + varToken.length);
         bodyFallback.focus();
@@ -689,6 +752,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   });
 
   bodyFallback.addEventListener('input', (e) => {
+    _rawValue = bodyFallback.value;
     bodyTextarea.value = bodyFallback.value;
     _validateFallback();
   });
@@ -701,7 +765,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       parent: cmWrap,
       value: val,
       isDark,
-      onChange: (v) => { bodyTextarea.value = v; }, // keep hidden textarea in sync
+      onChange: (v) => { _rawValue = v; bodyTextarea.value = v; }, // keep private cache + hidden textarea in sync
       getVarsList: () => _allVarsList,
     });
     if (!_cmEditor) {
@@ -738,6 +802,102 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   formBodyTable.el.style.display = 'none';
   multipartBodyTable.el.style.display = 'none';
 
+  // GraphQL body gets its own two-pane state (query text + variables JSON),
+  // independent from the raw/JSON body's _cmEditor — this is what makes
+  // switching raw<->graphql stop leaking content into each other, the bug
+  // this refactor fixes. Wire format is unchanged: on save/send/curl-copy
+  // this still collapses to a single {"query":...,"variables":{...}} JSON
+  // string in bodyTextarea.value, exactly as cli/api_runner.py expects.
+  let _gqlQuery = '';
+  let _gqlVariables = '{}';
+  let _gqlLastValidVariables = {};
+  try {
+    if (r.body_type === 'graphql') {
+      const gql = JSON.parse(r.body || '{}');
+      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+      _gqlLastValidVariables = gql.variables ?? {};
+    }
+  } catch (e) { /* malformed saved body — start both panes empty */ }
+
+  let _gqlQueryEditor = null;
+  let _gqlVariablesEditor = null;
+  let _gqlQueryFallback = null;
+  let _gqlVariablesFallback = null;
+
+  const gqlWrap = document.createElement('div');
+  gqlWrap.style.display = 'none';
+
+  const gqlQueryLabel = document.createElement('div');
+  gqlQueryLabel.textContent = 'Query';
+  gqlQueryLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
+  const gqlQueryMount = document.createElement('div');
+
+  const gqlVariablesLabel = document.createElement('div');
+  gqlVariablesLabel.textContent = 'Variables';
+  gqlVariablesLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
+  const gqlVariablesMount = document.createElement('div');
+
+  gqlWrap.append(gqlQueryLabel, gqlQueryMount, gqlVariablesLabel, gqlVariablesMount);
+
+  function _syncGqlBodyTextarea() {
+    try {
+      _gqlLastValidVariables = JSON.parse(_gqlVariables || '{}');
+    } catch (e) { /* keep last-valid variables — do not overwrite _gqlLastValidVariables */ }
+    bodyTextarea.value = JSON.stringify({ query: _gqlQuery, variables: _gqlLastValidVariables });
+  }
+
+  async function _mountGqlEditors() {
+    gqlQueryMount.innerHTML = '';
+    gqlVariablesMount.innerHTML = '';
+    const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+
+    _gqlQueryEditor = await createGraphqlEditor({
+      parent: gqlQueryMount, value: _gqlQuery, isDark,
+      onChange: (v) => { _gqlQuery = v; _syncGqlBodyTextarea(); },
+      getVarsList: () => _allVarsList,
+    });
+    if (!_gqlQueryEditor) {
+      _gqlQueryFallback = document.createElement('textarea');
+      _gqlQueryFallback.className = 'input-sm body-json-editor';
+      _gqlQueryFallback.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:vertical;';
+      _gqlQueryFallback.spellcheck = false;
+      _gqlQueryFallback.value = formatGraphQL(_gqlQuery);
+      _gqlQueryFallback.placeholder = '{ users { id name } }';
+      _gqlQueryFallback.addEventListener('input', () => { _gqlQuery = _gqlQueryFallback.value; _syncGqlBodyTextarea(); });
+      gqlQueryMount.appendChild(_gqlQueryFallback);
+    }
+
+    _gqlVariablesEditor = await createJsonEditor({
+      parent: gqlVariablesMount, value: _gqlVariables, isDark,
+      onChange: (v) => { _gqlVariables = v; _syncGqlBodyTextarea(); },
+      getVarsList: () => _allVarsList,
+    });
+    if (!_gqlVariablesEditor) {
+      _gqlVariablesFallback = document.createElement('textarea');
+      _gqlVariablesFallback.className = 'input-sm body-json-editor';
+      _gqlVariablesFallback.style.cssText = 'width:100%;min-height:100px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:vertical;';
+      _gqlVariablesFallback.spellcheck = false;
+      _gqlVariablesFallback.value = _gqlVariables;
+      _gqlVariablesFallback.placeholder = '{\n  "id": "1"\n}';
+      _gqlVariablesFallback.addEventListener('input', () => { _gqlVariables = _gqlVariablesFallback.value; _syncGqlBodyTextarea(); });
+      gqlVariablesMount.appendChild(_gqlVariablesFallback);
+    }
+
+    _syncGqlBodyTextarea();
+  }
+
+  function _unmountGqlEditors() {
+    _gqlQueryEditor?.destroy();
+    _gqlVariablesEditor?.destroy();
+    _gqlQueryEditor = null;
+    _gqlVariablesEditor = null;
+    _gqlQueryFallback = null;
+    _gqlVariablesFallback = null;
+    gqlQueryMount.innerHTML = '';
+    gqlVariablesMount.innerHTML = '';
+  }
+
   // Called once unconditionally at load (line below) to mount the editor for
   // whatever type is already saved, and from the type-button click handler
   // for genuine switches — never called redundantly with the same type.
@@ -745,16 +905,19 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const prevType = activeBodyType;
     if (prevType === 'form') _formRows = formBodyTable.getRows();
     else if (prevType === 'multipart') _multipartRows = multipartBodyTable.getRows();
+    else if (prevType === 'graphql') _unmountGqlEditors();
 
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.type === type);
     });
-    const isText = type === 'raw' || type === 'graphql';
+    const isRawText = type === 'raw';
+    const isGraphql = type === 'graphql';
 
-    if (!isText && _cmEditor) {
-      // Leaving text mode — read current value before destroying
-      bodyTextarea.value = _cmEditor.getValue();
+    if (!isRawText && _cmEditor) {
+      // Leaving raw text mode — read current value before destroying
+      _rawValue = _cmEditor.getValue();
+      bodyTextarea.value = _rawValue;
       _cmEditor.destroy();
       _cmEditor = null;
       cmWrap.style.display = 'none';
@@ -766,18 +929,26 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     else if (type === 'multipart') multipartBodyTable.setRows(_multipartRows);
     formBodyTable.el.style.display = type === 'form' ? '' : 'none';
     multipartBodyTable.el.style.display = type === 'multipart' ? '' : 'none';
-    bodyVarBtn.style.display = isText ? '' : 'none';
-    formatBtn.style.display = isText ? '' : 'none';
-    minifyBtn.style.display = isText ? '' : 'none';
+    gqlWrap.style.display = isGraphql ? '' : 'none';
+    bodyVarBtn.style.display = isRawText ? '' : 'none';
+    formatBtn.style.display = isRawText ? '' : 'none';
+    minifyBtn.style.display = isRawText ? '' : 'none';
     jsonErrorEl.style.display = 'none';
 
-    if (isText) {
+    if (isRawText) {
       _cmActive = true;
       cmWrap.style.display = '';
       _bodyFallbackOverlay.el.style.display = 'none';
-      _activateCmEditor(bodyTextarea.value);
-      if (type === 'graphql') bodyFallback.placeholder = '{ "query": "{ users { id name } }" }';
-      else bodyFallback.placeholder = '{\n  "key": "value"\n}';
+      // Restore the shared hidden textarea from the private cache immediately
+      // on entry — mirrors _mountGqlEditors()'s immediate _syncGqlBodyTextarea()
+      // call. Without this, bodyTextarea (the actual source of truth read by
+      // _save()/_copyAsCurl/the dirty-check) would keep whatever the previous
+      // type last wrote to it until the user's next keystroke in raw.
+      bodyTextarea.value = _rawValue;
+      _activateCmEditor(_rawValue);
+      bodyFallback.placeholder = '{\n  "key": "value"\n}';
+    } else if (isGraphql) {
+      _mountGqlEditors();
     }
   }
 
@@ -790,6 +961,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
   bodySection.appendChild(multipartBodyTable.el);
+  bodySection.appendChild(gqlWrap);
 
   // ── Auth section ──
   const authSection = document.createElement('div');
@@ -820,6 +992,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     : (r.auth_config || '{}');
 
   const _authInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_authInlineDrop);
 
   function _makeField(labelText, placeholder, getValue, setValue) {
     const wrap = document.createElement('div');
@@ -1101,6 +1274,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Script sections ──
   const _scriptInlineDrop = createInlineVarDrop(getAllVars);
+  _varSuggestUIs.push(_scriptInlineDrop);
   function makeScriptSection(lang, code, hint) {
     const div = document.createElement('div');
 
@@ -1314,6 +1488,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const div = document.createElement('div');
     const _namePicker = createVarPicker({ getVars: getAllVars });
     const _nameDrop = createInlineVarDrop(getAllVars);
+    _varSuggestUIs.push(_namePicker, _nameDrop);
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';

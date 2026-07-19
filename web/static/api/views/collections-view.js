@@ -107,13 +107,51 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     runBtn.onclick = (e) => { e.stopPropagation(); _runCollection(col.id, col.name, col.env_name); };
     rightSide.appendChild(runBtn);
 
-    const delBtn = document.createElement('button');
-    delBtn.className = 'btn btn-xs btn-ghost';
-    delBtn.title = 'Delete collection';
-    delBtn.style.color = 'var(--danger,#e53e3e)';
-    delBtn.textContent = '🗑';
-    delBtn.onclick = (e) => { e.stopPropagation(); _deleteCollection(col.id, col.name); };
-    rightSide.appendChild(delBtn);
+    const menuWrap = document.createElement('span');
+    menuWrap.style.cssText = 'position:relative;';
+    const menuBtn = document.createElement('button');
+    menuBtn.className = 'btn btn-xs btn-ghost';
+    menuBtn.title = 'More';
+    menuBtn.textContent = '⋯';
+    menuWrap.appendChild(menuBtn);
+
+    const menuDropdown = document.createElement('div');
+    menuDropdown.className = 'project-dropdown hidden';
+    menuDropdown.style.cssText = 'right:0;min-width:170px;';
+    menuDropdown.innerHTML = `
+      <div class="project-dropdown-item" data-action="new-request">+ New Request</div>
+      <div class="project-dropdown-item" data-action="new-folder">+ New Folder</div>
+      <div class="project-dropdown-divider"></div>
+      <div class="project-dropdown-item" data-action="delete" style="color:var(--danger,#e53e3e)">Delete Collection</div>`;
+    menuWrap.appendChild(menuDropdown);
+    rightSide.appendChild(menuWrap);
+
+    function _closeMenu() {
+      menuDropdown.classList.add('hidden');
+      document.removeEventListener('click', _onMenuDocClick, true);
+    }
+    function _onMenuDocClick(e) {
+      if (!menuWrap.contains(e.target)) _closeMenu();
+    }
+    menuBtn.onclick = (e) => {
+      e.stopPropagation();
+      const willOpen = menuDropdown.classList.contains('hidden');
+      if (willOpen) {
+        menuDropdown.classList.remove('hidden');
+        document.addEventListener('click', _onMenuDocClick, true);
+      } else {
+        _closeMenu();
+      }
+    };
+    menuDropdown.onclick = async (e) => {
+      e.stopPropagation();
+      const action = e.target.closest('[data-action]')?.dataset.action;
+      if (!action) return;
+      _closeMenu();
+      if (action === 'new-request') await _triggerNewRequest();
+      else if (action === 'new-folder') await _triggerNewFolder();
+      else if (action === 'delete') _deleteCollection(col.id, col.name);
+    };
 
     const expandBtn = document.createElement('button');
     expandBtn.className = 'btn btn-xs btn-ghost';
@@ -144,6 +182,24 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     let allFolders = [];
     let allRequests = [];
     const rerender = () => _renderTreeLevel(treeRoot, col, null, allFolders, allRequests);
+
+    async function _triggerNewRequest() {
+      const proceed = await onSelectRequest(null, col.id, col.id, col.env_name, null);
+      if (proceed === false) return;
+      container.querySelectorAll('.api-request-item').forEach(i => i.classList.remove('active'));
+      _activeRequestId = null;
+    }
+
+    async function _triggerNewFolder() {
+      const name = await window._promptDialog('Folder name:');
+      if (!name) return;
+      const res = await window.api('POST', `/collections/${col.id}/folders`, {
+        name: name.trim(), parent_folder_id: null,
+      });
+      if (res.ok === false) { await window._alertDialog('Error: ' + res.error); return; }
+      allFolders.push(res.folder);
+      rerender();
+    }
 
     window.api('GET', `/collections/${col.id}/tree`).then(treeRes => {
       allFolders = treeRes.folders || [];
@@ -176,8 +232,10 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
         : _renderRequestNode(col, node.data, parentFolderId));
     });
 
-    containerEl.appendChild(_renderNewRequestRow(col, parentFolderId));
-    containerEl.appendChild(_renderNewFolderRow(col, parentFolderId, allFolders, allRequests, containerEl));
+    if (parentFolderId) {
+      containerEl.appendChild(_renderNewRequestRow(col, parentFolderId));
+      containerEl.appendChild(_renderNewFolderRow(col, parentFolderId, allFolders, allRequests, containerEl));
+    }
   }
 
   function _renderFolderNode(col, folder, allFolders, allRequests) {
