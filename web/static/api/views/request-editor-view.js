@@ -4,6 +4,7 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
+import { createGraphqlEditor } from '../components/graphql-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
 import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
@@ -97,6 +98,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _extractorNameInputs.forEach(inp => _styleExtractorNameInput(inp));
     assertionBuilder.restyleAll();
     _cmEditor?.refresh?.();
+    _gqlQueryEditor?.refresh?.();
+    _gqlVariablesEditor?.refresh?.();
   }
 
   container.innerHTML = '';
@@ -628,6 +631,19 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   function _setBodyValue(val) {
+    if (activeBodyType === 'graphql') {
+      try {
+        const gql = JSON.parse(val || '{}');
+        _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+        _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+      } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; }
+      if (_gqlQueryEditor) _gqlQueryEditor.setValue(_gqlQuery);
+      else if (_gqlQueryFallback) _gqlQueryFallback.value = _gqlQuery;
+      if (_gqlVariablesEditor) _gqlVariablesEditor.setValue(_gqlVariables);
+      else if (_gqlVariablesFallback) _gqlVariablesFallback.value = _gqlVariables;
+      _syncGqlBodyTextarea();
+      return;
+    }
     bodyTextarea.value = val; // always keep hidden textarea in sync for _save()
     if (_cmActive && _cmEditor) { _cmEditor.setValue(val); return; }
     if (_cmActive) { bodyFallback.value = val; return; }
@@ -766,6 +782,100 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   formBodyTable.el.style.display = 'none';
   multipartBodyTable.el.style.display = 'none';
 
+  // GraphQL body gets its own two-pane state (query text + variables JSON),
+  // independent from the raw/JSON body's _cmEditor — this is what makes
+  // switching raw<->graphql stop leaking content into each other, the bug
+  // this refactor fixes. Wire format is unchanged: on save/send/curl-copy
+  // this still collapses to a single {"query":...,"variables":{...}} JSON
+  // string in bodyTextarea.value, exactly as cli/api_runner.py expects.
+  let _gqlQuery = '';
+  let _gqlVariables = '{}';
+  try {
+    if (r.body_type === 'graphql') {
+      const gql = JSON.parse(r.body || '{}');
+      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+    }
+  } catch (e) { /* malformed saved body — start both panes empty */ }
+
+  let _gqlQueryEditor = null;
+  let _gqlVariablesEditor = null;
+  let _gqlQueryFallback = null;
+  let _gqlVariablesFallback = null;
+
+  const gqlWrap = document.createElement('div');
+  gqlWrap.style.display = 'none';
+
+  const gqlQueryLabel = document.createElement('div');
+  gqlQueryLabel.textContent = 'Query';
+  gqlQueryLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
+  const gqlQueryMount = document.createElement('div');
+
+  const gqlVariablesLabel = document.createElement('div');
+  gqlVariablesLabel.textContent = 'Variables';
+  gqlVariablesLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
+  const gqlVariablesMount = document.createElement('div');
+
+  gqlWrap.append(gqlQueryLabel, gqlQueryMount, gqlVariablesLabel, gqlVariablesMount);
+
+  function _syncGqlBodyTextarea() {
+    let variables = {};
+    try { variables = JSON.parse(_gqlVariables || '{}'); }
+    catch (e) { /* keep last-valid variables in bodyTextarea until the user fixes the syntax error */ }
+    bodyTextarea.value = JSON.stringify({ query: _gqlQuery, variables });
+  }
+
+  async function _mountGqlEditors() {
+    gqlQueryMount.innerHTML = '';
+    gqlVariablesMount.innerHTML = '';
+    const isDark = (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+
+    _gqlQueryEditor = await createGraphqlEditor({
+      parent: gqlQueryMount, value: _gqlQuery, isDark,
+      onChange: (v) => { _gqlQuery = v; _syncGqlBodyTextarea(); },
+      getVarsList: () => _allVarsList,
+    });
+    if (!_gqlQueryEditor) {
+      _gqlQueryFallback = document.createElement('textarea');
+      _gqlQueryFallback.className = 'input-sm body-json-editor';
+      _gqlQueryFallback.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:vertical;';
+      _gqlQueryFallback.spellcheck = false;
+      _gqlQueryFallback.value = _gqlQuery;
+      _gqlQueryFallback.placeholder = '{ users { id name } }';
+      _gqlQueryFallback.addEventListener('input', () => { _gqlQuery = _gqlQueryFallback.value; _syncGqlBodyTextarea(); });
+      gqlQueryMount.appendChild(_gqlQueryFallback);
+    }
+
+    _gqlVariablesEditor = await createJsonEditor({
+      parent: gqlVariablesMount, value: _gqlVariables, isDark,
+      onChange: (v) => { _gqlVariables = v; _syncGqlBodyTextarea(); },
+      getVarsList: () => _allVarsList,
+    });
+    if (!_gqlVariablesEditor) {
+      _gqlVariablesFallback = document.createElement('textarea');
+      _gqlVariablesFallback.className = 'input-sm body-json-editor';
+      _gqlVariablesFallback.style.cssText = 'width:100%;min-height:100px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:vertical;';
+      _gqlVariablesFallback.spellcheck = false;
+      _gqlVariablesFallback.value = _gqlVariables;
+      _gqlVariablesFallback.placeholder = '{\n  "id": "1"\n}';
+      _gqlVariablesFallback.addEventListener('input', () => { _gqlVariables = _gqlVariablesFallback.value; _syncGqlBodyTextarea(); });
+      gqlVariablesMount.appendChild(_gqlVariablesFallback);
+    }
+
+    _syncGqlBodyTextarea();
+  }
+
+  function _unmountGqlEditors() {
+    _gqlQueryEditor?.destroy();
+    _gqlVariablesEditor?.destroy();
+    _gqlQueryEditor = null;
+    _gqlVariablesEditor = null;
+    _gqlQueryFallback = null;
+    _gqlVariablesFallback = null;
+    gqlQueryMount.innerHTML = '';
+    gqlVariablesMount.innerHTML = '';
+  }
+
   // Called once unconditionally at load (line below) to mount the editor for
   // whatever type is already saved, and from the type-button click handler
   // for genuine switches — never called redundantly with the same type.
@@ -773,15 +883,17 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     const prevType = activeBodyType;
     if (prevType === 'form') _formRows = formBodyTable.getRows();
     else if (prevType === 'multipart') _multipartRows = multipartBodyTable.getRows();
+    else if (prevType === 'graphql') _unmountGqlEditors();
 
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
       b.classList.toggle('active', b.dataset.type === type);
     });
-    const isText = type === 'raw' || type === 'graphql';
+    const isRawText = type === 'raw';
+    const isGraphql = type === 'graphql';
 
-    if (!isText && _cmEditor) {
-      // Leaving text mode — read current value before destroying
+    if (!isRawText && _cmEditor) {
+      // Leaving raw text mode — read current value before destroying
       bodyTextarea.value = _cmEditor.getValue();
       _cmEditor.destroy();
       _cmEditor = null;
@@ -794,18 +906,20 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     else if (type === 'multipart') multipartBodyTable.setRows(_multipartRows);
     formBodyTable.el.style.display = type === 'form' ? '' : 'none';
     multipartBodyTable.el.style.display = type === 'multipart' ? '' : 'none';
-    bodyVarBtn.style.display = isText ? '' : 'none';
-    formatBtn.style.display = isText ? '' : 'none';
-    minifyBtn.style.display = isText ? '' : 'none';
+    gqlWrap.style.display = isGraphql ? '' : 'none';
+    bodyVarBtn.style.display = isRawText ? '' : 'none';
+    formatBtn.style.display = isRawText ? '' : 'none';
+    minifyBtn.style.display = isRawText ? '' : 'none';
     jsonErrorEl.style.display = 'none';
 
-    if (isText) {
+    if (isRawText) {
       _cmActive = true;
       cmWrap.style.display = '';
       _bodyFallbackOverlay.el.style.display = 'none';
       _activateCmEditor(bodyTextarea.value);
-      if (type === 'graphql') bodyFallback.placeholder = '{ "query": "{ users { id name } }" }';
-      else bodyFallback.placeholder = '{\n  "key": "value"\n}';
+      bodyFallback.placeholder = '{\n  "key": "value"\n}';
+    } else if (isGraphql) {
+      _mountGqlEditors();
     }
   }
 
@@ -818,6 +932,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   bodySection.appendChild(jsonErrorEl);
   bodySection.appendChild(formBodyTable.el);
   bodySection.appendChild(multipartBodyTable.el);
+  bodySection.appendChild(gqlWrap);
 
   // ── Auth section ──
   const authSection = document.createElement('div');
