@@ -833,7 +833,23 @@ In the Query pane, type `query GetCharacters($page: Int!, $name: String!) {` and
 - [ ] **Step 5: Verify send works end-to-end**
 
 1. On the same request (URL `https://rickandmortyapi.graphcdn.app/`, method `POST`, body type `graphql`), set:
-   - Query: `query GetCharacters($page: Int!, $name: String!) { characters(page: $page, filter: { name: $name }) { info { count pages } results { id status species image } } }`
+   - Query:
+     ```graphql
+     query GetCharacters($page: Int!, $name: String!) {
+       characters(page: $page, filter: { name: $name }) {
+         info {
+           count
+           pages
+         }
+         results {
+           id
+           status
+           species
+           image
+         }
+       }
+     }
+     ```
    - Variables: `{"page": 1, "name": "Rick"}`
 2. Click **Send**.
 3. Confirm the response is a `200` with a JSON body containing `data.characters.results` — this is the same live GraphQL API from the curl example that originally motivated this plan, so a successful response confirms `cli/api_runner.py`'s existing `body_type == "graphql"` handling (query/variables serialization, `Content-Type: application/json` override) still works unchanged against the new editor's output.

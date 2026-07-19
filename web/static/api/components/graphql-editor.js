@@ -10,6 +10,72 @@
  */
 import { tokenSpansIn, escapeHtml } from './var-style.js';
 
+/**
+ * Pretty-prints a GraphQL document (one-liner or minified) into indented
+ * multi-line form. Brace-depth based, not a full GraphQL parser: braces
+ * inside parens (input object arguments, e.g. `filter: { name: $name }`)
+ * are kept inline since they're argument values, not selection sets.
+ */
+export function formatGraphQL(src) {
+  if (typeof src !== 'string') return src;
+  const trimmed = src.trim();
+  if (!trimmed) return src;
+  const tokens = trimmed.match(/"""[\s\S]*?"""|"(?:\\.|[^"\\])*"|[{}()]|[^{}()"]+/g) || [];
+  const IND = '  ';
+  let indent = 0;
+  let parenDepth = 0;
+  let out = '';
+  let atLineStart = true;
+
+  const trimTrailingSpace = () => { out = out.replace(/[ \t]+$/, ''); };
+  const newLine = () => {
+    trimTrailingSpace();
+    if (!out.endsWith('\n')) out += '\n';
+    atLineStart = true;
+  };
+  const appendInline = (text) => {
+    if (atLineStart) {
+      text = text.replace(/^ +/, '');
+      if (!text) return;
+      out += IND.repeat(indent) + text;
+      atLineStart = false;
+    } else {
+      out += text;
+    }
+  };
+
+  for (const tok of tokens) {
+    if (tok === '(') { parenDepth++; appendInline(tok); continue; }
+    if (tok === ')') { parenDepth = Math.max(0, parenDepth - 1); appendInline(tok); continue; }
+    if (tok === '{' && parenDepth === 0) {
+      trimTrailingSpace();
+      out += (out.length ? ' {\n' : '{\n');
+      indent++;
+      atLineStart = true;
+      continue;
+    }
+    if (tok === '}' && parenDepth === 0) {
+      indent = Math.max(0, indent - 1);
+      newLine();
+      out += IND.repeat(indent) + '}\n';
+      atLineStart = true;
+      continue;
+    }
+    if (tok === '{' || tok === '}') { appendInline(tok); continue; }
+
+    if (parenDepth === 0 && indent > 0) {
+      const words = tok.trim().split(/\s+/).filter(Boolean);
+      words.forEach((w, i) => {
+        if (i > 0) newLine();
+        appendInline(w);
+      });
+    } else {
+      appendInline(tok.replace(/\s+/g, ' '));
+    }
+  }
+  return out.replace(/\s+$/, '') + '\n';
+}
+
 export async function createGraphqlEditor({ parent, value = '', isDark = true, onChange, getVarsList }) {
   try {
     const CM = window.CM6;
@@ -139,14 +205,14 @@ export async function createGraphqlEditor({ parent, value = '', isDark = true, o
     }
 
     const view = new EditorView({
-      state: EditorState.create({ doc: value, extensions }),
+      state: EditorState.create({ doc: formatGraphQL(value), extensions }),
       parent,
     });
 
     return {
       getValue: () => view.state.doc.toString(),
       setValue: (val) => {
-        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: val } });
+        view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: formatGraphQL(val) } });
       },
       refresh: () => { if (forceRedecorate) view.dispatch({ effects: forceRedecorate.of(null) }); },
       focus: () => view.focus(),

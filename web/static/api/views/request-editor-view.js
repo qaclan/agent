@@ -4,7 +4,7 @@ import { createResponsePanel } from '../components/response-panel.js';
 import { createVarPicker } from '../components/var-picker.js';
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { createJsonEditor } from '../components/json-editor.js';
-import { createGraphqlEditor } from '../components/graphql-editor.js';
+import { createGraphqlEditor, formatGraphQL } from '../components/graphql-editor.js';
 import { buildCurlCommand } from '../curl-builder.js';
 import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
@@ -655,7 +655,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         _gqlLastValidVariables = gql.variables ?? {};
       } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; }
       if (_gqlQueryEditor) _gqlQueryEditor.setValue(_gqlQuery);
-      else if (_gqlQueryFallback) _gqlQueryFallback.value = _gqlQuery;
+      else if (_gqlQueryFallback) _gqlQueryFallback.value = formatGraphQL(_gqlQuery);
       if (_gqlVariablesEditor) _gqlVariablesEditor.setValue(_gqlVariables);
       else if (_gqlVariablesFallback) _gqlVariablesFallback.value = _gqlVariables;
       _syncGqlBodyTextarea();
@@ -862,7 +862,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _gqlQueryFallback.className = 'input-sm body-json-editor';
       _gqlQueryFallback.style.cssText = 'width:100%;min-height:140px;font-family:var(--font-mono);font-size:12px;line-height:1.6;resize:vertical;';
       _gqlQueryFallback.spellcheck = false;
-      _gqlQueryFallback.value = _gqlQuery;
+      _gqlQueryFallback.value = formatGraphQL(_gqlQuery);
       _gqlQueryFallback.placeholder = '{ users { id name } }';
       _gqlQueryFallback.addEventListener('input', () => { _gqlQuery = _gqlQueryFallback.value; _syncGqlBodyTextarea(); });
       gqlQueryMount.appendChild(_gqlQueryFallback);
