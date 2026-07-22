@@ -170,6 +170,30 @@ No transliteration attempted — out of scope, too unreliable to be worth it.
 - `cli/commands/api_cmd.py`'s `qaclan api export <collection> -o <dir>`
   gains `--format postman|bruno` (default `bruno`, same reasoning).
 
+## UI
+
+`web/static/api/views/collections-view.js`'s per-collection `⋯` dropdown
+(built in `_renderCollectionSection`, alongside the existing `+ New
+Request` / `+ New Folder` / `Delete Collection` items) gains two flat
+items: `Export as Postman` and `Export as Bruno`. No submenu, no modal —
+symmetric with the existing flat-item style of that dropdown. No
+environment picker is exposed here since environment export (§D) isn't
+implemented backend-side.
+
+Download mechanism: `window.api()` (this file's shared JSON fetch helper)
+can't be reused — it calls `res.json()` unconditionally, but the export
+route returns a binary `send_file` response (`application/json` or
+`application/zip`) via `POST`, which a plain `<a href>` can't trigger
+either (GET-only). A new `_exportCollection(colId, colName, format)`
+helper does a raw `fetch('/api/collections/<id>/export?format=<fmt>',
+{method:'POST'})`, reads the response as a `Blob`, derives the filename
+from the response's `Content-Disposition` header (falling back to
+`<name>.postman_collection.json` / `<name>.zip` if the header is
+missing), and triggers the download via a temporary `URL.createObjectURL`
+`<a>` click (revoked immediately after). A non-OK response is read as
+JSON and surfaced through the existing `window._alertDialog('Export
+failed: ' + error)` pattern already used elsewhere in this file.
+
 ## Testing
 
 No automated test suite in this repo. Manual: build one qaclan collection
