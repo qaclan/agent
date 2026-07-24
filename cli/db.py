@@ -154,6 +154,7 @@ def init_db():
     _migrate_captured_requests(conn)
     _migrate_api_cloud_id(conn)
     _migrate_collection_var_secret(conn)
+    _migrate_request_body_columns(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -369,6 +370,9 @@ def _migrate_api_tables(conn):
             params TEXT NOT NULL DEFAULT '[]',
             body_type TEXT DEFAULT NULL,
             body TEXT DEFAULT NULL,
+            body_form TEXT DEFAULT NULL,
+            body_multipart TEXT DEFAULT NULL,
+            body_graphql TEXT DEFAULT NULL,
             auth_type TEXT NOT NULL DEFAULT 'none',
             auth_config TEXT NOT NULL DEFAULT '{}',
             pre_script TEXT DEFAULT NULL,
@@ -572,6 +576,21 @@ def _migrate_collection_var_secret(conn):
         conn.execute("ALTER TABLE collection_vars ADD COLUMN is_secret INTEGER DEFAULT 0")
     except Exception:
         pass  # already exists
+    conn.commit()
+
+
+def _migrate_request_body_columns(conn):
+    """Split api_requests.body into per-mode columns — body stays raw-only,
+    body_form/body_multipart/body_graphql hold the other 3 modes. body_type
+    stays a pure mode-selector. See docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md."""
+    for col in ("body_form", "body_multipart", "body_graphql"):
+        try:
+            conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+        except Exception:
+            pass
+    conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
+    conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
+    conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
     conn.commit()
 
 
