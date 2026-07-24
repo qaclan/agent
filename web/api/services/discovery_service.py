@@ -229,7 +229,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
                 example = example_repo.create(saved_req["id"], {
                     "label": suggest_label(r, diff_fields, i),
                     "params": r.get("params", []),
-                    "body": r.get("body"),
+                    "body": r.get("body") or r.get("body_form") or r.get("body_multipart") or r.get("body_graphql"),
                     "response_status": r.get("response_status"),
                     "response_headers": r.get("response_headers"),
                     "response_body": r.get("response_body"),
