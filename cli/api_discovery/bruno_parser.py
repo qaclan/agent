@@ -192,6 +192,9 @@ def parse_bruno(bru_text: str) -> dict:
     # body section
     body_type = None
     body = None
+    body_form = None
+    body_multipart = None
+    body_graphql = None
     if "body:json" in sections:
         body_type, body = "raw", "\n".join(sections["body:json"]).strip()
     elif any(k in sections for k in ("body:text", "body:xml", "body:sparql")):
@@ -199,7 +202,7 @@ def parse_bruno(bru_text: str) -> dict:
         body_type, body = "raw", "\n".join(sections[key]).strip()
     elif "body:form-urlencoded" in sections:
         body_type = "form"
-        body = json.dumps(_parse_kv_block(sections["body:form-urlencoded"]))
+        body_form = json.dumps(_parse_kv_block(sections["body:form-urlencoded"]))
     elif "body:multipart-form" in sections:
         body_type = "multipart"
         items = []
@@ -208,7 +211,7 @@ def parse_bruno(bru_text: str) -> dict:
             if is_file:
                 warnings.append(f"{context}: multipart file field '{kv['key']}' needs manual re-attach")
             items.append({**kv, "is_file": is_file})
-        body = json.dumps(items)
+        body_multipart = json.dumps(items)
     elif "body:graphql" in sections:
         gql_vars = {}
         if "body:graphql:vars" in sections:
@@ -221,7 +224,7 @@ def parse_bruno(bru_text: str) -> dict:
                 # ambiguous which form a given Bruno version writes here.
                 gql_vars = {kv["key"]: kv["value"] for kv in _parse_kv_block(sections["body:graphql:vars"]) if kv["enabled"]}
         body_type = "graphql"
-        body = json.dumps({"query": "\n".join(sections["body:graphql"]).strip(), "variables": gql_vars})
+        body_graphql = json.dumps({"query": "\n".join(sections["body:graphql"]).strip(), "variables": gql_vars})
 
     # script:pre-request / script:post-response sections
     pre_script = None
@@ -246,6 +249,9 @@ def parse_bruno(bru_text: str) -> dict:
         "path_params": path_params,
         "body_type": body_type,
         "body": body,
+        "body_form": body_form,
+        "body_multipart": body_multipart,
+        "body_graphql": body_graphql,
         "auth_type": auth_type,
         "auth_config": auth_config,
         "assertions": assertions,
