@@ -113,7 +113,8 @@ Same shape, since `cloud_api_requests` mirrors `api_requests` 1:1 for cloud sync
 - `CloudApiRequest` model + `to_dict()` (`api/app/models/cloud_metadata.py:330,367`): add the 3 fields.
 - `POST /api-request` route (`api/app/routes/sync.py:729-730`): add 3 fields to the upsert dict.
 - `GET /api/pull/workspace` needs no separate change — it calls `to_dict()`, which already picks up the new fields.
-- `cli/sync.py` (agent's push side, ~line 323, 343): extend the SELECT and payload dict to include the 3 new fields — otherwise they're captured locally but never reach the cloud.
+- `cli/sync.py` (agent's **push** side, ~line 323, 343): extend the SELECT and payload dict to include the 3 new fields — otherwise they're captured locally but never reach the cloud.
+- `cli/commands/pull.py` (agent's **pull**/restore side, ~lines 231-278): this is the reverse direction — importing a fresh `GET /api/pull/workspace` response into a local (or new-machine) DB. Its `row_values` tuple and both the `INSERT`/`UPDATE` column lists currently carry `body_type`/`body` only (lines 237-240, 255-256, 268-269) — extend all three to include `r.get("body_form")`, `r.get("body_multipart")`, `r.get("body_graphql")`. Without this, a workspace restore silently drops form/multipart/graphql bodies even though the server now returns them.
 - Next.js docs viewer (`web/src/app/api-collections/[id]/requests/[requestId]/page.tsx:38-39,189-199`): Body tab reads the field matching `body_type` instead of always `request.body`.
 
 ### Rollout ordering
@@ -131,5 +132,5 @@ A **new CLI → unmigrated server** is not: the new CLI would push `body: null` 
 - Set Raw content → switch body type to "none" → save → refresh browser → switch back to Raw → content still present.
 - Run a collection containing a multipart-body request after the change → still executes correctly (regression check on the `api_runner.py` dispatch change).
 - Open a request captured *before* this fix, after the migration has run → confirm the backfill correctly relocated its content into the right tab and Raw is empty.
-- Server: push a request with all 4 body fields populated (edge case — user filled raw + form + graphql across tabs before settling on one), then pull it back down (simulating a restore on a new machine) → all 4 fields round-trip via `/api/pull/workspace`.
+- Server: push a request with all 4 body fields populated (edge case — user filled raw + form + graphql across tabs before settling on one), then run `qaclan pull` (or the equivalent restore command backed by `cli/commands/pull.py`) on a clean DB → all 4 fields round-trip through `/api/pull/workspace` and land correctly in the local `api_requests` row, not just `body_type`/`body`.
 - Server: POST to `/api-request` without the 3 new fields (simulating an old CLI binary) → still 200, unaffected.
