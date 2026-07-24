@@ -107,7 +107,7 @@ Downstream call sites in `web/api/services/discovery_service.py` and `web/api/ro
 
 ## Section 5: Server (qaclan-server) — sync mirror
 
-Same shape, since `cloud_api_requests` mirrors `api_requests` 1:1 for cloud sync/restore. Full detail in the companion spec at `qaclan-server/docs/2026-07-24-request-body-multi-format-storage-design.md` — summary:
+Same shape, since `cloud_api_requests` mirrors `api_requests` 1:1 for cloud sync/restore. Full detail in the companion spec at `qaclan-server/docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md` — summary:
 
 - Alembic migration: 3 nullable Text columns on `cloud_api_requests`, same backfill.
 - `CloudApiRequest` model + `to_dict()` (`api/app/models/cloud_metadata.py:330,367`): add the 3 fields.
