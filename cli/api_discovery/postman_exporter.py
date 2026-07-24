@@ -52,20 +52,30 @@ def _auth_block(auth_type: str | None, auth_config: dict | str) -> dict | None:
     return builder(_as_dict(auth_config)) if builder else {"type": "noauth"}
 
 
-def _body_block(body_type: str | None, body: str | None) -> dict | None:
-    if not body_type or body is None:
+def _body_block(body_type: str | None, body: str | None, body_form: str | None = None,
+                 body_multipart: str | None = None, body_graphql: str | None = None) -> dict | None:
+    if not body_type:
         return None
     if body_type == "raw":
+        if body is None:
+            return None
         return {"mode": "raw", "raw": body}
     if body_type == "graphql":
-        gql = _as_dict(body)
+        if body_graphql is None:
+            return None
+        gql = _as_dict(body_graphql)
         return {"mode": "graphql", "graphql": {"query": gql.get("query", ""), "variables": gql.get("variables", {})}}
-    items = _as_list(body)
     if body_type == "form":
+        if body_form is None:
+            return None
+        items = _as_list(body_form)
         return {"mode": "urlencoded", "urlencoded": [
             {"key": i.get("key", ""), "value": i.get("value", ""), "disabled": not i.get("enabled", True)} for i in items
         ]}
     if body_type == "multipart":
+        if body_multipart is None:
+            return None
+        items = _as_list(body_multipart)
         formdata = []
         for i in items:
             if i.get("is_file"):
@@ -140,7 +150,10 @@ def _request_item(req: dict) -> dict:
             ],
         },
     }
-    body = _body_block(req.get("body_type"), req.get("body"))
+    body = _body_block(
+        req.get("body_type"), req.get("body"),
+        req.get("body_form"), req.get("body_multipart"), req.get("body_graphql"),
+    )
     if body:
         item_request["body"] = body
     auth = _auth_block(req.get("auth_type", "inherit"), req.get("auth_config") or {})
