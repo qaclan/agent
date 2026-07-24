@@ -308,10 +308,17 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _updateAuthBanner();
     }
 
-    if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
-    if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    _formRows = JSON.parse(parsed.body_form || '[]');
+    _multipartRows = JSON.parse(parsed.body_multipart || '[]');
     _rawValue = parsed.body || '';
     bodyTextarea.value = parsed.body || '';
+    if (parsed.body_type === 'graphql') {
+      try {
+        const gql = JSON.parse(parsed.body_graphql || '{}');
+        _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+        _gqlLastValidVariables = gql.variables ?? {};
+      } catch (e) { /* malformed — leave graphql panes empty */ }
+    }
     _setBodyType(parsed.body_type || 'none');
 
     _syncPathVars();
@@ -783,12 +790,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _formRows = [];
   let _multipartRows = [];
   try {
-    const parsed = JSON.parse(r.body || '[]');
-    if (Array.isArray(parsed)) {
-      if (r.body_type === 'multipart') _multipartRows = parsed;
-      else if (r.body_type === 'form') _formRows = parsed;
-    }
-  } catch(e) { /* leave both empty */ }
+    const parsedForm = JSON.parse(r.body_form || '[]');
+    if (Array.isArray(parsedForm)) _formRows = parsedForm;
+  } catch(e) { /* leave empty */ }
+  try {
+    const parsedMultipart = JSON.parse(r.body_multipart || '[]');
+    if (Array.isArray(parsedMultipart)) _multipartRows = parsedMultipart;
+  } catch(e) { /* leave empty */ }
   const formBodyTable = createKeyValueTable({
     placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars,
     getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
@@ -812,12 +820,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _gqlVariables = '{}';
   let _gqlLastValidVariables = {};
   try {
-    if (r.body_type === 'graphql') {
-      const gql = JSON.parse(r.body || '{}');
-      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
-      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
-      _gqlLastValidVariables = gql.variables ?? {};
-    }
+    const gql = JSON.parse(r.body_graphql || '{}');
+    _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+    _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+    _gqlLastValidVariables = gql.variables ?? {};
   } catch (e) { /* malformed saved body — start both panes empty */ }
 
   let _gqlQueryEditor = null;
