@@ -320,7 +320,7 @@ def sync_api_request_to_cloud(request_id):
     from cli.db import get_conn
     row = get_conn().execute(
         "SELECT project_id, feature_id, collection_id, folder_id, name, method, url, headers, "
-        "params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, "
+        "params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, "
         "pre_extractor, post_script, post_lang, post_extractor, request_schema, response_schema, "
         "assertions, follow_redirects, timeout_ms, include_in_docs, order_index "
         "FROM api_requests WHERE id = ?", (request_id,)
@@ -342,6 +342,9 @@ def sync_api_request_to_cloud(request_id):
         "path_params": json.loads(row["path_params"] or "[]"),
         "body_type": row["body_type"],
         "body": row["body"],
+        "body_form": row["body_form"],
+        "body_multipart": row["body_multipart"],
+        "body_graphql": row["body_graphql"],
         "auth_type": row["auth_type"],
         "auth_config": json.loads(row["auth_config"] or "{}"),
         "pre_script": row["pre_script"],
