@@ -31,15 +31,10 @@ def _params_signature(params: list[dict]) -> tuple:
 
 
 def _body_signature(body_type, body, body_form=None, body_multipart=None, body_graphql=None):
-    if body_type == "form":
+    if body_type in ("form", "multipart"):
+        raw_rows = body_form if body_type == "form" else body_multipart
         try:
-            rows = json.loads(body_form) if isinstance(body_form, str) else (body_form or [])
-        except (ValueError, TypeError):
-            rows = []
-        return _params_signature(rows)
-    if body_type == "multipart":
-        try:
-            rows = json.loads(body_multipart) if isinstance(body_multipart, str) else (body_multipart or [])
+            rows = json.loads(raw_rows) if isinstance(raw_rows, str) else (raw_rows or [])
         except (ValueError, TypeError):
             rows = []
         return _params_signature(rows)
