@@ -282,6 +282,8 @@ def parse_har(har_json: dict) -> list[dict]:
         # Body
         body_type = None
         body = None
+        body_form = None
+        body_multipart = None
         post_data = req.get("postData", {})
         if post_data:
             mime = post_data.get("mimeType", "")
@@ -310,7 +312,7 @@ def parse_har(har_json: dict) -> list[dict]:
                         params_list = parse_multipart_bytes(mime, raw_bytes)
                     else:
                         params_list = parse_multipart_text(mime, text)
-                body = json.dumps(params_list)
+                body_multipart = json.dumps(params_list)
             elif "form" in mime:
                 body_type = "form"
                 params_list = []
@@ -326,7 +328,7 @@ def parse_har(har_json: dict) -> list[dict]:
                         {"key": k, "value": v, "enabled": True}
                         for k, v in parse_qsl(text, keep_blank_values=True)
                     ]
-                body = json.dumps(params_list)
+                body_form = json.dumps(params_list)
             else:
                 body_type = "raw"
                 body = text
@@ -389,6 +391,8 @@ def parse_har(har_json: dict) -> list[dict]:
             "params": params,
             "body_type": body_type,
             "body": body,
+            "body_form": body_form,
+            "body_multipart": body_multipart,
             "auth_type": "none",
             "auth_config": "{}",
             "assertions": "[]",
