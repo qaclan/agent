@@ -15,6 +15,9 @@ _DEFAULTS = {
     "folder_id": None,
     "body_type": None,
     "body": None,
+    "body_form": None,
+    "body_multipart": None,
+    "body_graphql": None,
     "auth_type": "inherit",
     "auth_config": "{}",
     "pre_script": None,
@@ -108,15 +111,15 @@ class RequestRepo:
 
         conn.execute(
             "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, order_index, name, method, url, "
-            "headers, params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
+            "headers, params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
             "post_script, post_lang, post_extractor, request_schema, response_schema, "
             "assertions, follow_redirects, timeout_ms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, project_id,
              merged.get("feature_id"), collection_id, folder_id, order_index,
              merged.get("name", "Unnamed"), merged["method"], merged["url"],
              merged["headers"], merged["params"], merged["path_params"],
-             merged["body_type"], merged["body"],
+             merged["body_type"], merged["body"], merged["body_form"], merged["body_multipart"], merged["body_graphql"],
              merged["auth_type"], merged["auth_config"],
              merged["pre_script"], merged["pre_lang"], merged["pre_extractor"],
              merged["post_script"], merged["post_lang"], merged["post_extractor"],
@@ -132,6 +135,7 @@ class RequestRepo:
         conn = get_conn()
         s = _serialize(data)
         fields = ["name", "method", "url", "headers", "params", "path_params", "body_type", "body",
+                  "body_form", "body_multipart", "body_graphql",
                   "auth_type", "auth_config", "pre_script", "pre_lang", "pre_extractor", "post_script",
                   "post_lang", "post_extractor", "request_schema", "response_schema",
                   "assertions", "follow_redirects", "timeout_ms",
