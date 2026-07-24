@@ -1698,9 +1698,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: activeBodyType === 'form' ? JSON.stringify(formBodyTable.getRows())
-        : activeBodyType === 'multipart' ? JSON.stringify(multipartBodyTable.getRows())
-        : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
+      body: _rawValue || null,
+      body_form: JSON.stringify(activeBodyType === 'form' ? formBodyTable.getRows() : _formRows),
+      body_multipart: JSON.stringify(activeBodyType === 'multipart' ? multipartBodyTable.getRows() : _multipartRows),
+      body_graphql: JSON.stringify({ query: _gqlQuery, variables: _gqlLastValidVariables }),
       auth_type: authTypeSelect.value,
       auth_config: parsedAuth,
       pre_lang: preScriptSection._getLang(),
