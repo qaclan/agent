@@ -316,6 +316,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       try {
         const gql = JSON.parse(parsed.body_graphql || '{}');
         _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+        _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
         _gqlLastValidVariables = gql.variables ?? {};
       } catch (e) { /* malformed — leave graphql panes empty */ }
     }
