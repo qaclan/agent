@@ -101,7 +101,9 @@ Same one-line-per-type fix in each — route content into the matching dedicated
 | `cli/api_discovery/bruno_parser.py` (`_bru_body_block`, ~376-397, exporter side) | reads `body` for all types | read the matching field per type |
 | `cli/api_discovery/variant_grouper.py` (`_body_signature`, ~33-45, and ~79-172) | reads `body` for all types | read the matching field per type |
 
-Downstream call sites in `web/api/services/discovery_service.py` and `web/api/routes/discovery.py` that currently forward a parser's `{body_type, body}` pair into `RequestRepo.create()` need to forward all 4 fields instead.
+Downstream call sites in `web/api/services/discovery_service.py` (`_save_requests`, `save_library`) do `data = dict(req)` — a generic shallow copy, not an explicit field allowlist — so they automatically forward `body_form`/`body_multipart`/`body_graphql` once the parsers above start emitting them. No code change needed there. Same for `web/api/routes/discovery.py`'s `/api/discover/save-requests` route — it passes the client-supplied `requests` list straight through, no field-level handling.
+
+**Additional gap found during implementation planning:** `web/static/api/views/request-review-modal.js` (`_detailHTML`, ~lines 59-64) renders a body preview in the pre-save discovery/import review modal by reading `req.body`/`req.body_type` — the same "always reads the shared column" bug pattern as the request editor's Raw tab, just in a different view. Once the parsers above stop writing form/multipart/graphql content into `body`, this modal's preview would go blank for those types unless it's updated to read the matching field per `body_type`, same fix shape as the other frontend touch points.
 
 ---
 
