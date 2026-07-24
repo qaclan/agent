@@ -43,16 +43,19 @@ def _convert_auth(auth_obj: dict | None, warnings: list[str], context: str) -> t
     return "none", {}
 
 
-def _convert_body(body_obj: dict, warnings: list[str], context: str) -> tuple[str | None, str | None]:
+def _convert_body(body_obj: dict, warnings: list[str], context: str) -> dict:
+    """Returns {'body_type', 'body', 'body_form', 'body_multipart', 'body_graphql'} —
+    exactly one of the 4 body_* keys is non-None, matching body_type."""
+    empty = {"body_type": None, "body": None, "body_form": None, "body_multipart": None, "body_graphql": None}
     if not body_obj:
-        return None, None
+        return empty
     mode = body_obj.get("mode", "")
     if mode == "raw":
-        return "raw", body_obj.get("raw", "")
+        return {**empty, "body_type": "raw", "body": body_obj.get("raw", "")}
     if mode == "urlencoded":
         items = [{"key": p.get("key", ""), "value": p.get("value", ""), "enabled": True}
                  for p in body_obj.get("urlencoded", []) if not p.get("disabled", False)]
-        return "form", json.dumps(items)
+        return {**empty, "body_type": "form", "body_form": json.dumps(items)}
     if mode == "formdata":
         items = []
         for p in body_obj.get("formdata", []):
@@ -66,11 +69,11 @@ def _convert_body(body_obj: dict, warnings: list[str], context: str) -> tuple[st
                 warnings.append(f"{context}: formdata file field '{p.get('key')}' needs manual re-attach")
             else:
                 items.append({"key": p.get("key", ""), "value": p.get("value", ""), "enabled": True, "is_file": False})
-        return "multipart", json.dumps(items)
+        return {**empty, "body_type": "multipart", "body_multipart": json.dumps(items)}
     if mode == "graphql":
         gql = body_obj.get("graphql", {})
-        return "graphql", json.dumps({"query": gql.get("query", ""), "variables": gql.get("variables", {})})
-    return None, None
+        return {**empty, "body_type": "graphql", "body_graphql": json.dumps({"query": gql.get("query", ""), "variables": gql.get("variables", {})})}
+    return empty
 
 
 def _convert_events(item: dict) -> tuple[str | None, str | None, list[str]]:
@@ -139,7 +142,7 @@ def _process_item(item: dict, folder_path: list[str], results: list, warnings: l
         for h in req.get("header", []) if not h.get("disabled", False)
     ]
 
-    body_type, body = _convert_body(req.get("body", {}), warnings, context)
+    body_fields = _convert_body(req.get("body", {}), warnings, context)
     auth_type, auth_config = _convert_auth(req.get("auth"), warnings, context)
     pre_script, post_script, script_warnings = _convert_events(item)
     warnings.extend(f"{context}: {w}" for w in script_warnings)
@@ -151,8 +154,7 @@ def _process_item(item: dict, folder_path: list[str], results: list, warnings: l
         "headers": headers,
         "params": query_params,
         "path_params": path_params,
-        "body_type": body_type,
-        "body": body,
+        **body_fields,
         "auth_type": auth_type,
         "auth_config": auth_config,
         "assertions": [],
