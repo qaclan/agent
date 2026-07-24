@@ -56,11 +56,16 @@ function _detailHTML(req) {
   const headersSection = _section('Headers', _kvTable(req.headers));
   const paramsSection  = _section('Query Params', _kvTable(req.params));
 
-  const bodyContent = !req.body
+  const _bodyPreviewValue =
+    req.body_type === 'form' ? req.body_form
+    : req.body_type === 'multipart' ? req.body_multipart
+    : req.body_type === 'graphql' ? req.body_graphql
+    : req.body;
+  const bodyContent = !_bodyPreviewValue
     ? '<span style="color:var(--text-muted);font-size:12px;font-style:italic;">—</span>'
     : (req.body_type === 'form' || req.body_type === 'multipart')
-      ? _kvTable(req.body)
-      : `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(req.body))}</pre>`;
+      ? _kvTable(_bodyPreviewValue)
+      : `<pre style="margin:0;padding:10px 12px;border-left:3px solid var(--accent);background:var(--bg-base);font-size:11px;font-family:var(--font-mono,monospace);white-space:pre-wrap;word-break:break-all;max-height:150px;overflow-y:auto;color:var(--text-primary);border-radius:0 4px 4px 0;">${_esc(_fmt(_bodyPreviewValue))}</pre>`;
   const bodySection = _section('Request Body', bodyContent);
 
   const assertionsSection = assertions.length ? _section('Assertions',
