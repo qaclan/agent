@@ -543,7 +543,8 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         # 4. Build request body
         body_type = req.get("body_type")
-        body_raw = req.get("body")
+        _body_column = {"raw": "body", "form": "body_form", "multipart": "body_multipart", "graphql": "body_graphql"}.get(body_type)
+        body_raw = req.get(_body_column) if _body_column else None
         content = None
         data = None
         files = None
