@@ -183,9 +183,10 @@ def _parse_one(command: str) -> dict | None:
 
     body_type = None
     body = None
+    body_multipart = None
     if is_multipart:
         body_type = "multipart"
-        body = json.dumps(form_rows)
+        body_multipart = json.dumps(form_rows)
     elif raw_data_parts:
         if force_query:
             for part in raw_data_parts:
@@ -206,6 +207,7 @@ def _parse_one(command: str) -> dict | None:
         "params": params,
         "body_type": body_type,
         "body": body,
+        "body_multipart": body_multipart,
         "auth_type": auth_type,
         "auth_config": auth_config,
     }

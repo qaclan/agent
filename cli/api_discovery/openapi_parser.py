@@ -81,6 +81,7 @@ def _parse_openapi3(spec: dict) -> list[dict]:
             # Request body
             body_type = None
             body = None
+            body_form = None
             req_body = op.get("requestBody", {})
             if "$ref" in req_body:
                 req_body = _resolve_ref(spec, req_body["$ref"])
@@ -97,7 +98,7 @@ def _parse_openapi3(spec: dict) -> list[dict]:
                 form_items = []
                 if isinstance(example, dict):
                     form_items = [{"key": k, "value": str(v), "enabled": True} for k, v in example.items()]
-                body = json.dumps(form_items)
+                body_form = json.dumps(form_items)
 
             # Generate status assertion from responses
             assertions = []
@@ -120,6 +121,7 @@ def _parse_openapi3(spec: dict) -> list[dict]:
                 "params": params,
                 "body_type": body_type,
                 "body": body,
+                "body_form": body_form,
                 "auth_type": "none",
                 "auth_config": "{}",
                 "assertions": json.dumps(assertions),

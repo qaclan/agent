@@ -27,7 +27,7 @@
 - Produces: `revert_path_vars(url: str, path_params: list[dict]) -> str` — replaces `{key}` with `:key` for every known path param.
 - Produces: `qc_script_to_foreign(script: str | None, target: str) -> str | None` — `target` is `"postman"` or `"bruno"`. Used by Task 2 (Postman exporter) and Task 3 (Bruno exporter extension).
 
-- [ ] **Step 1: Add `revert_path_vars` to `path_vars.py`**
+- [x] **Step 1: Add `revert_path_vars` to `path_vars.py`**
 
 Append to `cli/api_discovery/path_vars.py`:
 
@@ -41,7 +41,7 @@ def revert_path_vars(url: str, path_params: list[dict] | None) -> str:
     return url
 ```
 
-- [ ] **Step 2: Add a bracket/quote-aware top-level argument splitter and the reverse script rewriter to `script_rewrite.py`**
+- [x] **Step 2: Add a bracket/quote-aware top-level argument splitter and the reverse script rewriter to `script_rewrite.py`**
 
 Append to `cli/api_discovery/script_rewrite.py`:
 
@@ -165,7 +165,7 @@ def qc_script_to_foreign(script: str | None, target: str) -> str | None:
     return "\n".join(out_lines)
 ```
 
-- [ ] **Step 3: Verify with a manual smoke script**
+- [x] **Step 3: Verify with a manual smoke script**
 
 ```bash
 python3 -c "
@@ -196,7 +196,7 @@ call; `qc.setHeader(...)` becomes `pm.request.headers.add({key: ..., value:
 ...})`. Bruno output uses `bru.setVar(`, bare `test(`, `res.body`/`res.status`.
 Path var output: `https://api.example.com/users/:id/posts/:postId`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add cli/api_discovery/path_vars.py cli/api_discovery/script_rewrite.py
@@ -214,7 +214,7 @@ git commit -m "feat(api-discovery): add reverse (qc.* -> foreign) script and pat
 - Consumes: `revert_path_vars`, `qc_script_to_foreign` (Task 1).
 - Produces: `to_postman_collection(collection: dict, requests: list[dict], folders: list[dict], collection_vars: list[dict]) -> dict` — returns the full Postman v2.1 JSON as a Python dict, ready for `json.dumps`. `collection` is an `api_collections` row (has `name`, `auth_type`, `auth_config`), `requests`/`folders` are `RequestRepo.list()`/`FolderRepo.list_for_collection()` output, `collection_vars` is `CollectionVarsRepo.list()` output.
 
-- [ ] **Step 1: Write the exporter**
+- [x] **Step 1: Write the exporter**
 
 ```python
 # cli/api_discovery/postman_exporter.py
@@ -397,7 +397,7 @@ def to_postman_collection(collection: dict, requests: list[dict], folders: list[
     return result
 ```
 
-- [ ] **Step 2: Verify with a manual round-trip against a real collection**
+- [x] **Step 2: Verify with a manual round-trip against a real collection**
 
 ```bash
 python3 -c "
@@ -457,7 +457,7 @@ to `pm.environment.set("userId", pm.response.json().id);`, and top-level
 request named "Get User" inside `folder_path: ["Auth"]` with `path_params`
 containing `id`.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cli/api_discovery/postman_exporter.py
@@ -475,7 +475,7 @@ git commit -m "feat(api-discovery): add Postman v2.1 collection exporter"
 - Consumes: `revert_path_vars`, `qc_script_to_foreign` (Task 1).
 - Produces: `request_to_bru(req: dict) -> str` (extended, same name/signature as today — now includes params:path, params:query, auth, all body modes, both scripts, assert block). `collection_bru(collection: dict, collection_vars: list[dict]) -> str` (new). `export_bruno_tree(collection: dict, requests: list[dict], folders: list[dict], collection_vars: list[dict]) -> dict[str, str]` (new) — returns `{relative_file_path: file_content}` for the whole collection, used by Task 4's zip writer.
 
-- [ ] **Step 1: Replace `request_to_bru` and add the new functions**
+- [x] **Step 1: Replace `request_to_bru` and add the new functions**
 
 Replace the existing `request_to_bru` function (bottom of `cli/api_discovery/bruno_parser.py`) with:
 
@@ -692,7 +692,7 @@ def export_bruno_tree(collection: dict, requests: list[dict], folders: list[dict
     return files
 ```
 
-- [ ] **Step 2: Verify with a manual round-trip**
+- [x] **Step 2: Verify with a manual round-trip**
 
 ```bash
 python3 -c "
@@ -747,7 +747,7 @@ and `auth { mode: bearer }` + `auth:bearer { token: {{tok}} }`) and
 eq 200 }` block, and `script:post-response { bru.setVar("userId", res.body.id); }`).
 Reimport recovers `auth_type: bearer`, `path_params` with `id`, one assertion.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add cli/api_discovery/bruno_parser.py
@@ -765,7 +765,7 @@ git commit -m "feat(api-discovery): extend Bruno exporter (folders, auth, all bo
 **Interfaces:**
 - Consumes: `to_postman_collection` (Task 2), `export_bruno_tree` (Task 3).
 
-- [ ] **Step 1: Extend the export route**
+- [x] **Step 1: Extend the export route**
 
 Replace `export_collection` in `web/api/routes/collections.py` with:
 
@@ -816,7 +816,7 @@ def export_collection(col_id):
 Confirm `json` is already imported at the top of `web/api/routes/collections.py`
 (`grep -n "^import json" web/api/routes/collections.py`); add it if missing.
 
-- [ ] **Step 2: Extend the CLI command**
+- [x] **Step 2: Extend the CLI command**
 
 Run `grep -n "def api_export\|@click.option\|api export" cli/commands/api_cmd.py`
 to find the exact command definition, read it in full, and add a
@@ -826,7 +826,7 @@ actual code once you've read the real function; this plan cannot show an
 exact diff without knowing the current option list around it (unlike
 Tasks 1–3, whose target functions were read in full during spec research).
 
-- [ ] **Step 3: Verify with a manual HTTP round-trip**
+- [x] **Step 3: Verify with a manual HTTP round-trip**
 
 ```bash
 python3 -c "
@@ -864,11 +864,95 @@ Expected: both requests return 200; the Postman one has `content_type:
 application/json` and valid collection JSON; the Bruno one has
 `content_type: application/zip` and a non-zero byte count.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add web/api/routes/collections.py cli/commands/api_cmd.py
 git commit -m "feat(api): wire Postman/Bruno export format switch into export route and CLI command"
+```
+
+---
+
+### Task 5: Export UI in collections-view.js
+
+**Files:**
+- Modify: `web/static/api/views/collections-view.js`
+
+**Interfaces:**
+- Consumes: `POST /api/collections/<id>/export?format=postman|bruno` (Task 4, already live).
+- No backend changes — this task only adds a client trigger for the existing route.
+
+**Design reference:** see "## UI" section in
+`docs/superpowers/specs/2026-07-18-postman-bruno-export-design.md`.
+
+- [ ] **Step 1: Add two dropdown items**
+
+In `_renderCollectionSection`, extend the `menuDropdown.innerHTML` template
+(around the existing `+ New Request` / `+ New Folder` items, before the
+divider) to add:
+
+```html
+<div class="project-dropdown-item" data-action="export-postman">Export as Postman</div>
+<div class="project-dropdown-item" data-action="export-bruno">Export as Bruno</div>
+```
+
+Extend the existing `menuDropdown.onclick` action switch with:
+
+```js
+else if (action === 'export-postman') await _exportCollection(col.id, col.name, 'postman');
+else if (action === 'export-bruno') await _exportCollection(col.id, col.name, 'bruno');
+```
+
+- [ ] **Step 2: Add the `_exportCollection` helper**
+
+Add near the other collection-level action functions (`_deleteCollection`,
+`_createCollection`):
+
+```js
+async function _exportCollection(colId, colName, fmt) {
+  const res = await fetch(`/api/collections/${encodeURIComponent(colId)}/export?format=${fmt}`, { method: 'POST' });
+  if (!res.ok) {
+    let msg = res.statusText;
+    try { msg = (await res.json()).error || msg; } catch (_) {}
+    await window._alertDialog('Export failed: ' + msg);
+    return;
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get('Content-Disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const filename = match ? match[1] : `${colName}.${fmt === 'postman' ? 'postman_collection.json' : 'zip'}`;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+```
+
+Confirm `send_file(..., as_attachment=True, download_name=...)` in
+`web/api/routes/collections.py`'s `export_collection` actually sets a
+`Content-Disposition` header with `filename=` (Flask does this by
+default) — if the header comes back empty in Step 3's manual check, keep
+the `filename` fallback above as the only source of the name.
+
+- [ ] **Step 3: Verify manually in the browser**
+
+Start the dev server (`python qaclan.py serve --port 7823`), open the API
+tab, click a collection's `⋯` menu, click "Export as Postman" — confirm a
+`.json` file downloads and its `info.schema` is the v2.1.0 URL. Click
+"Export as Bruno" — confirm a `.zip` downloads and contains `.bru` files.
+Trigger a failure case (e.g. stop the server mid-request or export a
+just-deleted collection id) and confirm the alert dialog shows an error
+instead of downloading a broken file.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add web/static/api/views/collections-view.js
+git commit -m "feat(api): add Postman/Bruno export menu items to collections view"
 ```
 
 ---
@@ -897,3 +981,9 @@ git commit -m "feat(api): wire Postman/Bruno export format switch into export ro
   (`collection, requests, folders, collection_vars`) for symmetry between
   the two exporters — checked against Task 4's route code, which fetches
   all four the same way before branching on `fmt`.
+- **Task 5 addendum (2026-07-21)**: Tasks 1–4 were already implemented
+  (verified directly in the codebase) but had no UI trigger — the export
+  route was reachable only via raw HTTP or the CLI. Task 5 closes that
+  gap with two dropdown items in `collections-view.js`. Still no
+  environment picker (see "Known scope cut" above) since environment
+  export remains unimplemented backend-side.

@@ -308,10 +308,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _updateAuthBanner();
     }
 
-    if (parsed.body_type === 'form') _formRows = JSON.parse(parsed.body || '[]');
-    if (parsed.body_type === 'multipart') _multipartRows = JSON.parse(parsed.body || '[]');
+    _formRows = JSON.parse(parsed.body_form || '[]');
+    _multipartRows = JSON.parse(parsed.body_multipart || '[]');
     _rawValue = parsed.body || '';
     bodyTextarea.value = parsed.body || '';
+    try {
+      const gql = JSON.parse(parsed.body_graphql || '{}');
+      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+      _gqlLastValidVariables = gql.variables ?? {};
+    } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; _gqlLastValidVariables = {}; }
     _setBodyType(parsed.body_type || 'none');
 
     _syncPathVars();
@@ -352,12 +358,16 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       const chosen = examples.find(ex => ex.id === examplesSelect.value);
       if (!chosen) {
         paramsTable.setRows(r.params || []);
-        _setBodyValue(r.body || '');
+        const ownSrc = r.body_type === 'form' ? r.body_form
+          : r.body_type === 'multipart' ? r.body_multipart
+          : r.body_type === 'graphql' ? r.body_graphql
+          : r.body;
+        _loadBodyForType(r.body_type, ownSrc);
         responsePanel.el.style.display = 'none';
         return;
       }
       paramsTable.setRows(chosen.params || []);
-      _setBodyValue(chosen.body || '');
+      _loadBodyForType(r.body_type, chosen.body);
       responsePanel.show({
         status_code: chosen.response_status,
         duration_ms: null,
@@ -667,6 +677,23 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     if (_cmActive) { bodyFallback.value = val; return; }
   }
 
+  // Loads a body payload (from an example snapshot or the request's own
+  // saved columns) into whichever draft matches `type` — form/multipart
+  // rows must land in their own tables, not the raw textarea, or a
+  // form/multipart example's content shows up on the Raw tab instead of
+  // being applied where it belongs.
+  function _loadBodyForType(type, src) {
+    if (type === 'form') {
+      try { const rows = JSON.parse(src || '[]'); _formRows = Array.isArray(rows) ? rows : []; } catch (e) { _formRows = []; }
+      formBodyTable.setRows(_formRows);
+    } else if (type === 'multipart') {
+      try { const rows = JSON.parse(src || '[]'); _multipartRows = Array.isArray(rows) ? rows : []; } catch (e) { _multipartRows = []; }
+      multipartBodyTable.setRows(_multipartRows);
+    } else {
+      _setBodyValue(src || '');
+    }
+  }
+
   function _validateFallback() {
     const val = bodyFallback.value.trim();
     if (!val) { jsonErrorEl.style.display = 'none'; bodyFallback.style.borderColor = ''; return; }
@@ -783,12 +810,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _formRows = [];
   let _multipartRows = [];
   try {
-    const parsed = JSON.parse(r.body || '[]');
-    if (Array.isArray(parsed)) {
-      if (r.body_type === 'multipart') _multipartRows = parsed;
-      else if (r.body_type === 'form') _formRows = parsed;
-    }
-  } catch(e) { /* leave both empty */ }
+    const parsedForm = JSON.parse(r.body_form || '[]');
+    if (Array.isArray(parsedForm)) _formRows = parsedForm;
+  } catch(e) { /* leave empty */ }
+  try {
+    const parsedMultipart = JSON.parse(r.body_multipart || '[]');
+    if (Array.isArray(parsedMultipart)) _multipartRows = parsedMultipart;
+  } catch(e) { /* leave empty */ }
   const formBodyTable = createKeyValueTable({
     placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars,
     getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
@@ -812,12 +840,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   let _gqlVariables = '{}';
   let _gqlLastValidVariables = {};
   try {
-    if (r.body_type === 'graphql') {
-      const gql = JSON.parse(r.body || '{}');
-      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
-      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
-      _gqlLastValidVariables = gql.variables ?? {};
-    }
+    const gql = JSON.parse(r.body_graphql || '{}');
+    _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+    _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+    _gqlLastValidVariables = gql.variables ?? {};
   } catch (e) { /* malformed saved body — start both panes empty */ }
 
   let _gqlQueryEditor = null;
@@ -909,7 +935,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     activeBodyType = type;
     bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
-      b.classList.toggle('active', b.dataset.type === type);
+      const isActive = b.dataset.type === type;
+      b.classList.toggle('active', isActive);
+      b.title = isActive
+        ? (type === 'none' ? 'No body — nothing sent when you Run this request' : 'Active — sent when you Run this request')
+        : '';
     });
     const isRawText = type === 'raw';
     const isGraphql = type === 'graphql';
@@ -1691,9 +1721,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       headers: headersTable.getRows(),
       path_params: pathVarsTable.getRows(),
       body_type: activeBodyType !== 'none' ? activeBodyType : null,
-      body: activeBodyType === 'form' ? JSON.stringify(formBodyTable.getRows())
-        : activeBodyType === 'multipart' ? JSON.stringify(multipartBodyTable.getRows())
-        : (activeBodyType !== 'none' ? (bodyTextarea.value || null) : null),
+      body: _rawValue || null,
+      body_form: JSON.stringify(activeBodyType === 'form' ? formBodyTable.getRows() : _formRows),
+      body_multipart: JSON.stringify(activeBodyType === 'multipart' ? multipartBodyTable.getRows() : _multipartRows),
+      body_graphql: JSON.stringify({ query: _gqlQuery, variables: _gqlLastValidVariables }),
       auth_type: authTypeSelect.value,
       auth_config: parsedAuth,
       pre_lang: preScriptSection._getLang(),

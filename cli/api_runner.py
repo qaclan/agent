@@ -50,14 +50,18 @@ def _substitute_path_params(url: str, path_params: list, env_vars: dict, state: 
 # ---------------------------------------------------------------------------
 
 def resolve_vars(text: str, env_vars: dict, state: dict) -> str:
-    """Replace {{var_name}} in text. Order: env_vars → state.qaclan_vars → empty+warn."""
+    """Replace {{var_name}} in text. Order: env_vars → state.qaclan_vars → empty+warn.
+    An env var with an empty value (unset placeholder) does not shadow a
+    populated qaclan_vars entry of the same key — only a real value takes
+    precedence.
+    """
     if not text:
         return text or ""
     qc_vars = state.get("qaclan_vars", {}) if isinstance(state, dict) else {}
 
     def _replace(m):
         key = m.group(1).strip()
-        if key in env_vars:
+        if env_vars.get(key):
             return str(env_vars[key])
         if key in qc_vars:
             return str(qc_vars[key])
@@ -543,7 +547,8 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
 
         # 4. Build request body
         body_type = req.get("body_type")
-        body_raw = req.get("body")
+        _body_column = {"raw": "body", "form": "body_form", "multipart": "body_multipart", "graphql": "body_graphql"}.get(body_type)
+        body_raw = req.get(_body_column) if _body_column else None
         content = None
         data = None
         files = None

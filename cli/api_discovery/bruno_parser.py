@@ -192,6 +192,9 @@ def parse_bruno(bru_text: str) -> dict:
     # body section
     body_type = None
     body = None
+    body_form = None
+    body_multipart = None
+    body_graphql = None
     if "body:json" in sections:
         body_type, body = "raw", "\n".join(sections["body:json"]).strip()
     elif any(k in sections for k in ("body:text", "body:xml", "body:sparql")):
@@ -199,7 +202,7 @@ def parse_bruno(bru_text: str) -> dict:
         body_type, body = "raw", "\n".join(sections[key]).strip()
     elif "body:form-urlencoded" in sections:
         body_type = "form"
-        body = json.dumps(_parse_kv_block(sections["body:form-urlencoded"]))
+        body_form = json.dumps(_parse_kv_block(sections["body:form-urlencoded"]))
     elif "body:multipart-form" in sections:
         body_type = "multipart"
         items = []
@@ -208,7 +211,7 @@ def parse_bruno(bru_text: str) -> dict:
             if is_file:
                 warnings.append(f"{context}: multipart file field '{kv['key']}' needs manual re-attach")
             items.append({**kv, "is_file": is_file})
-        body = json.dumps(items)
+        body_multipart = json.dumps(items)
     elif "body:graphql" in sections:
         gql_vars = {}
         if "body:graphql:vars" in sections:
@@ -221,7 +224,7 @@ def parse_bruno(bru_text: str) -> dict:
                 # ambiguous which form a given Bruno version writes here.
                 gql_vars = {kv["key"]: kv["value"] for kv in _parse_kv_block(sections["body:graphql:vars"]) if kv["enabled"]}
         body_type = "graphql"
-        body = json.dumps({"query": "\n".join(sections["body:graphql"]).strip(), "variables": gql_vars})
+        body_graphql = json.dumps({"query": "\n".join(sections["body:graphql"]).strip(), "variables": gql_vars})
 
     # script:pre-request / script:post-response sections
     pre_script = None
@@ -246,6 +249,9 @@ def parse_bruno(bru_text: str) -> dict:
         "path_params": path_params,
         "body_type": body_type,
         "body": body,
+        "body_form": body_form,
+        "body_multipart": body_multipart,
+        "body_graphql": body_graphql,
         "auth_type": auth_type,
         "auth_config": auth_config,
         "assertions": assertions,
@@ -337,7 +343,10 @@ def request_to_bru(req: dict) -> str:
             lines.extend(auth_lines)
             lines.append("")
 
-    body_lines = _bru_body_block(req.get("body_type"), req.get("body"))
+    body_lines = _bru_body_block(
+        req.get("body_type"), req.get("body"),
+        req.get("body_form"), req.get("body_multipart"), req.get("body_graphql"),
+    )
     if body_lines:
         lines.extend(body_lines)
         lines.append("")
@@ -373,28 +382,41 @@ def _bru_body_mode(body_type: str | None) -> str:
     return {"raw": "json", "form": "form-urlencoded", "multipart": "multipart-form", "graphql": "graphql"}.get(body_type, "none")
 
 
-def _bru_body_block(body_type: str | None, body: str | None) -> list[str]:
+def _bru_body_block(body_type: str | None, body: str | None, body_form: str | None = None,
+                     body_multipart: str | None = None, body_graphql: str | None = None) -> list[str]:
     import json as _json
-    if not body_type or body is None:
+    if not body_type:
         return []
     if body_type == "raw":
+        if body is None:
+            return []
         return ["body:json {"] + [f"  {l}" for l in body.splitlines()] + ["}"]
     if body_type == "graphql":
+        if body_graphql is None:
+            return []
         try:
-            gql = _json.loads(body)
+            gql = _json.loads(body_graphql)
         except (ValueError, TypeError):
             gql = {"query": "", "variables": {}}
         out = ["body:graphql {"] + [f"  {l}" for l in gql.get("query", "").splitlines()] + ["}"]
         if gql.get("variables"):
             out += ["", "body:graphql:vars {"] + [f"  {l}" for l in _json.dumps(gql["variables"], indent=2).splitlines()] + ["}"]
         return out
-    try:
-        items = _json.loads(body)
-    except (ValueError, TypeError):
-        items = []
     if body_type == "form":
+        if body_form is None:
+            return []
+        try:
+            items = _json.loads(body_form)
+        except (ValueError, TypeError):
+            items = []
         return ["body:form-urlencoded {"] + [f"  {'' if i.get('enabled', True) else '~'}{i.get('key', '')}: {i.get('value', '')}" for i in items] + ["}"]
     if body_type == "multipart":
+        if body_multipart is None:
+            return []
+        try:
+            items = _json.loads(body_multipart)
+        except (ValueError, TypeError):
+            items = []
         out = ["body:multipart-form {"]
         for i in items:
             prefix = "" if i.get("enabled", True) else "~"

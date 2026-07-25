@@ -122,6 +122,9 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       <div class="project-dropdown-item" data-action="new-request">+ New Request</div>
       <div class="project-dropdown-item" data-action="new-folder">+ New Folder</div>
       <div class="project-dropdown-divider"></div>
+      <div class="project-dropdown-item" data-action="export-postman">Export as Postman</div>
+      <div class="project-dropdown-item" data-action="export-bruno">Export as Bruno</div>
+      <div class="project-dropdown-divider"></div>
       <div class="project-dropdown-item" data-action="delete" style="color:var(--danger,#e53e3e)">Delete Collection</div>`;
     menuWrap.appendChild(menuDropdown);
     rightSide.appendChild(menuWrap);
@@ -150,6 +153,8 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       _closeMenu();
       if (action === 'new-request') await _triggerNewRequest();
       else if (action === 'new-folder') await _triggerNewFolder();
+      else if (action === 'export-postman') await _exportCollection(col.id, col.name, 'postman');
+      else if (action === 'export-bruno') await _exportCollection(col.id, col.name, 'bruno');
       else if (action === 'delete') _deleteCollection(col.id, col.name);
     };
 
@@ -585,6 +590,28 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     if (onRunStarted && res.run_id) {
       onRunStarted(res.run_id, colId, colName);
     }
+  }
+
+  async function _exportCollection(colId, colName, fmt) {
+    const res = await fetch(`/api/collections/${encodeURIComponent(colId)}/export?format=${fmt}`, { method: 'POST' });
+    if (!res.ok) {
+      let msg = res.statusText;
+      try { msg = (await res.json()).error || msg; } catch (_) {}
+      await window._alertDialog('Export failed: ' + msg);
+      return;
+    }
+    const blob = await res.blob();
+    const disposition = res.headers.get('Content-Disposition') || '';
+    const match = disposition.match(/filename="?([^";]+)"?/);
+    const filename = match ? match[1] : `${colName}.${fmt === 'postman' ? 'postman_collection.json' : 'zip'}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   async function _deleteCollection(colId, colName) {
