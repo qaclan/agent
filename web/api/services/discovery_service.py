@@ -80,6 +80,116 @@ _ROUTE_ARM_SRC = (
     "    await ctx.route('**/*', _route_handler)\n"
 )
 
+# Embedded (as literal source) alongside the blocks above. Playwright's own
+# record_har drops the response body whenever the page navigates shortly
+# after the response arrives — Chromium destroys the resource, and the
+# body read then fails with "No resource with given identifier found"
+# (upstream, unfixed: https://github.com/microsoft/playwright/issues/7348).
+# A login that redirects on success is the textbook trigger: its HAR entry
+# has no content.text, so no response schema is ever inferred for it.
+#
+# Reading the body eagerly from the 'response' event does NOT fix this, and
+# neither does delaying the navigation to buy the read more time. Both were
+# measured against a real login: a route handler that stalls the navigation
+# also stalls the body read behind it, so the read finishes a hair *later*
+# than the hold it was waiting on and still loses the resource. Read
+# latency tracked hold duration exactly (no hold ~160ms, 500ms hold ~660ms,
+# 800ms hold ~980ms) and the body was lost in every one of nine trials.
+#
+# So don't race the teardown — take the body while the response is still
+# paused and cannot be torn down. CDP's Fetch domain pauses at the response
+# stage, where Fetch.getResponseBody is guaranteed to succeed; the request
+# is resumed immediately after. Same nine-trial harness: captured every
+# time, in 2-4ms. Only XHR/Fetch responses are paused (patterns filter on
+# resourceType), so documents, images, scripts and styles are never
+# intercepted and pay nothing.
+#
+# Results go to a sidecar keyed by (method, url) for
+# cli.api_discovery.har_parser.merge_response_bodies to backfill into the
+# HAR. This runs alongside — not instead of — _arm_interception: verified
+# that Playwright's ctx.route and this CDP session coexist, and dropping
+# ctx.route silently breaks multipart post_data_buffer capture.
+_RESPONSE_BODY_CAPTURE_SRC = (
+    "async def _install_response_body_capture(ctx):\n"
+    "    captured = []\n"
+    "    pending = set()\n"
+    # Bodies accumulate in memory for the whole session, on top of the copy
+    # Playwright's HAR recorder already holds. Past the cap we stop keeping
+    # the backfill copy; the HAR keeps whatever Playwright captured itself.
+    "    budget = [64 * 1024 * 1024]\n"
+    "    async def _attach(page):\n"
+    "        try:\n"
+    "            cdp = await ctx.new_cdp_session(page)\n"
+    "        except Exception:\n"
+    "            return\n"
+    "        async def _on_paused(ev):\n"
+    "            rid = ev.get('requestId')\n"
+    "            try:\n"
+    "                if 'responseStatusCode' not in ev or budget[0] <= 0:\n"
+    "                    return\n"
+    "                try:\n"
+    "                    got = await cdp.send('Fetch.getResponseBody', {'requestId': rid})\n"
+    "                except Exception:\n"
+    "                    return\n"
+    "                raw = got.get('body') or ''\n"
+    "                if got.get('base64Encoded'):\n"
+    "                    body_b64, size = raw, (len(raw) * 3) // 4\n"
+    "                else:\n"
+    "                    data = raw.encode('utf-8', errors='surrogateescape')\n"
+    "                    body_b64, size = base64.b64encode(data).decode('ascii'), len(data)\n"
+    "                budget[0] -= size\n"
+    "                mime = ''\n"
+    "                for h in ev.get('responseHeaders') or []:\n"
+    "                    if (h.get('name') or '').lower() == 'content-type':\n"
+    "                        mime = (h.get('value') or '').split(';')[0].strip()\n"
+    "                        break\n"
+    "                req = ev.get('request') or {}\n"
+    "                captured.append({\n"
+    "                    'method': req.get('method', ''),\n"
+    "                    'url': req.get('url', ''),\n"
+    "                    'mimeType': mime,\n"
+    "                    'body_b64': body_b64,\n"
+    "                })\n"
+    "            finally:\n"
+    # The page stalls forever on any paused request that is never resumed,
+    # so this must run on every path out, including the error ones.
+    "                try:\n"
+    "                    await cdp.send('Fetch.continueRequest', {'requestId': rid})\n"
+    "                except Exception:\n"
+    "                    pass\n"
+    "        def _dispatch(ev):\n"
+    "            task = asyncio.ensure_future(_on_paused(ev))\n"
+    "            pending.add(task)\n"
+    "            task.add_done_callback(pending.discard)\n"
+    "        cdp.on('Fetch.requestPaused', _dispatch)\n"
+    "        try:\n"
+    "            await cdp.send('Fetch.enable', {'patterns': [\n"
+    "                {'urlPattern': '*', 'requestStage': 'Response', 'resourceType': 'XHR'},\n"
+    "                {'urlPattern': '*', 'requestStage': 'Response', 'resourceType': 'Fetch'},\n"
+    "            ]})\n"
+    "        except Exception:\n"
+    "            pass\n"
+    # Tabs and popups opened mid-recording each need their own session.
+    "    ctx.on('page', lambda p: asyncio.ensure_future(_attach(p)))\n"
+    "    for existing in ctx.pages:\n"
+    "        await _attach(existing)\n"
+    "    return captured, pending\n"
+    "\n"
+    "async def _flush_response_body_capture(captured, pending):\n"
+    "    if pending:\n"
+    "        try:\n"
+    "            await asyncio.wait(set(pending), timeout=4)\n"
+    "        except Exception:\n"
+    "            pass\n"
+    "    if not captured:\n"
+    "        return\n"
+    "    try:\n"
+    "        with open(os.environ['QACLAN_HAR_PATH'] + '.bodies.json', 'w') as sf:\n"
+    "            json.dump(captured, sf)\n"
+    "    except Exception:\n"
+    "        pass\n"
+)
+
 # Embedded (as literal source, not imported) in the generated recording
 # harnesses below. Playwright's own HAR export never captures postData for
 # multipart/form-data bodies — Chrome's Network.requestWillBeSent omits it.
@@ -229,7 +339,7 @@ def save_library(project_id: str, groups: list[dict], collection_name: str, incl
                 example = example_repo.create(saved_req["id"], {
                     "label": suggest_label(r, diff_fields, i),
                     "params": r.get("params", []),
-                    "body": r.get("body"),
+                    "body": r.get("body") or r.get("body_form") or r.get("body_multipart") or r.get("body_graphql"),
                     "response_status": r.get("response_status"),
                     "response_headers": r.get("response_headers"),
                     "response_body": r.get("response_body"),
@@ -361,6 +471,7 @@ class DiscoveryService:
             "from playwright.async_api import async_playwright\n"
             f"{_MULTIPART_CAPTURE_SRC}\n"
             f"{_ROUTE_ARM_SRC}\n"
+            f"{_RESPONSE_BODY_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
@@ -375,6 +486,7 @@ class DiscoveryService:
             "        ctx = await browser.new_context(**ctx_opts)\n"
             "        page = await ctx.new_page()\n"
             "        captured = _install_multipart_capture(ctx)\n"
+            "        body_captured, body_pending = await _install_response_body_capture(ctx)\n"
             "        await _arm_interception(ctx)\n"
             # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
             "        if sys.platform != 'win32':\n"
@@ -393,6 +505,9 @@ class DiscoveryService:
             "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
             "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
             "                await asyncio.sleep(0.3)\n"
+            # Drain still-paused body reads and write the sidecar BEFORE
+            # ctx.close() — the CDP session dies with the context.
+            "        await _flush_response_body_capture(body_captured, body_pending)\n"
             "        try:\n"
             "            await ctx.close()\n"
             "        except Exception:\n"
@@ -416,18 +531,21 @@ class DiscoveryService:
             "from playwright.async_api import async_playwright\n"
             f"{_MULTIPART_CAPTURE_SRC}\n"
             f"{_ROUTE_ARM_SRC}\n"
+            f"{_RESPONSE_BODY_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
             "        captured = _install_multipart_capture(ctx)\n"
+            "        body_captured, body_pending = await _install_response_body_capture(ctx)\n"
             "        await _arm_interception(ctx)\n"
             "        try:\n"
             "            await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        except Exception:\n"
             "            traceback.print_exc()\n"
             "        await browser.wait_for_event('disconnected')\n"
+            "        await _flush_response_body_capture(body_captured, body_pending)\n"
             "        await ctx.close()\n"
             "        _write_multipart_sidecar(captured)\n"
             "asyncio.run(main())\n"

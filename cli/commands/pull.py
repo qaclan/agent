@@ -7,6 +7,7 @@ from rich.console import Console
 from cli.config import get_auth_key, set_active_project_id, get_active_project_id, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli import api
+from cli.crypto import encrypt
 from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 
 console = Console()
@@ -238,6 +239,7 @@ def pull_workspace():
             r["name"], r.get("method", "GET"), r.get("url", ""),
             json.dumps(r.get("headers", [])), json.dumps(r.get("params", [])),
             json.dumps(r.get("path_params", [])), r.get("body_type"), r.get("body"),
+            r.get("body_form"), r.get("body_multipart"), r.get("body_graphql"),
             r.get("auth_type", "none"), json.dumps(r.get("auth_config", {})),
             r.get("pre_script"), r.get("pre_lang", "js"),
             json.dumps(r["pre_extractor"]) if r.get("pre_extractor") else None,
@@ -253,7 +255,7 @@ def pull_workspace():
         if existing:
             conn.execute(
                 "UPDATE api_requests SET name=?, method=?, url=?, headers=?, params=?, path_params=?, "
-                "body_type=?, body=?, auth_type=?, auth_config=?, pre_script=?, pre_lang=?, pre_extractor=?, "
+                "body_type=?, body=?, body_form=?, body_multipart=?, body_graphql=?, auth_type=?, auth_config=?, pre_script=?, pre_lang=?, pre_extractor=?, "
                 "post_script=?, post_lang=?, post_extractor=?, request_schema=?, response_schema=?, "
                 "assertions=?, follow_redirects=?, timeout_ms=?, include_in_docs=?, order_index=?, "
                 "feature_id=?, collection_id=?, folder_id=? WHERE id=?",
@@ -266,11 +268,11 @@ def pull_workspace():
             local_id = generate_id("apireq")
             conn.execute(
                 "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, name, "
-                "method, url, headers, params, path_params, body_type, body, auth_type, auth_config, "
+                "method, url, headers, params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, "
                 "pre_script, pre_lang, pre_extractor, post_script, post_lang, post_extractor, "
                 "request_schema, response_schema, assertions, follow_redirects, timeout_ms, "
                 "include_in_docs, order_index, created_at, cloud_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (local_id, local_project_id, local_feature_id, local_collection_id, local_folder_id)
                 + row_values + (now, cloud_id),
             )
@@ -325,6 +327,12 @@ def pull_workspace():
         local_env_id = env_map.get(v["environment_id"])
         if not local_env_id:
             continue
+        is_secret = bool(v.get("is_secret"))
+        # Server sends plaintext (its own at-rest encryption is a server-side concern).
+        # Re-encrypt with this machine's local key so reveal/decrypt works regardless
+        # of which machine originally pushed the value.
+        raw_value = v["value"]
+        value = encrypt(raw_value) if is_secret and raw_value else raw_value
         existing = conn.execute(
             "SELECT id FROM env_vars WHERE environment_id = ? AND key = ?",
             (local_env_id, v["key"]),
@@ -332,13 +340,13 @@ def pull_workspace():
         if existing:
             conn.execute(
                 "UPDATE env_vars SET value = ?, is_secret = ? WHERE id = ?",
-                (v["value"], 1 if v.get("is_secret") else 0, existing["id"]),
+                (value, 1 if is_secret else 0, existing["id"]),
             )
         else:
             local_id = generate_id("evar")
             conn.execute(
                 "INSERT INTO env_vars (id, environment_id, key, value, is_secret) VALUES (?, ?, ?, ?, ?)",
-                (local_id, local_env_id, v["key"], v["value"], 1 if v.get("is_secret") else 0),
+                (local_id, local_env_id, v["key"], value, 1 if is_secret else 0),
             )
             counts["env_vars"] += 1
 

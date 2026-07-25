@@ -154,6 +154,7 @@ def init_db():
     _migrate_captured_requests(conn)
     _migrate_api_cloud_id(conn)
     _migrate_collection_var_secret(conn)
+    _migrate_request_body_columns(conn)
 
 
 def _migrate_collection_run_progress(conn):
@@ -369,6 +370,9 @@ def _migrate_api_tables(conn):
             params TEXT NOT NULL DEFAULT '[]',
             body_type TEXT DEFAULT NULL,
             body TEXT DEFAULT NULL,
+            body_form TEXT DEFAULT NULL,
+            body_multipart TEXT DEFAULT NULL,
+            body_graphql TEXT DEFAULT NULL,
             auth_type TEXT NOT NULL DEFAULT 'none',
             auth_config TEXT NOT NULL DEFAULT '{}',
             pre_script TEXT DEFAULT NULL,
@@ -573,6 +577,36 @@ def _migrate_collection_var_secret(conn):
     except Exception:
         pass  # already exists
     conn.commit()
+
+
+def _migrate_request_body_columns(conn):
+    """Split api_requests.body into per-mode columns — body stays raw-only,
+    body_form/body_multipart/body_graphql hold the other 3 modes. body_type
+    stays a pure mode-selector. Backfill only runs once, on the transition
+    that first adds these columns — it must never re-run on a DB that
+    already has them, since a legitimately-saved row can have non-null
+    body alongside a non-raw body_type once every save writes all 4
+    fields (see docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md)."""
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(api_requests)").fetchall()}
+    needs_backfill = "body_form" not in existing_cols
+    # ALTER + backfill commit as one transaction — otherwise a crash between
+    # the ALTERs and the UPDATEs leaves the columns present but the backfill
+    # permanently skipped (needs_backfill is derived from column presence).
+    conn.execute("BEGIN")
+    try:
+        for col in ("body_form", "body_multipart", "body_graphql"):
+            try:
+                conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass
+        if needs_backfill:
+            conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _migrate_cascade(conn):

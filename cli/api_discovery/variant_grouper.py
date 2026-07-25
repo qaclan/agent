@@ -30,13 +30,16 @@ def _params_signature(params: list[dict]) -> tuple:
     return tuple(pairs)
 
 
-def _body_signature(body_type, body):
+def _body_signature(body_type, body, body_form=None, body_multipart=None, body_graphql=None):
     if body_type in ("form", "multipart"):
+        raw_rows = body_form if body_type == "form" else body_multipart
         try:
-            rows = json.loads(body) if isinstance(body, str) else (body or [])
+            rows = json.loads(raw_rows) if isinstance(raw_rows, str) else (raw_rows or [])
         except (ValueError, TypeError):
             rows = []
         return _params_signature(rows)
+    if body_type == "graphql":
+        return ("graphql", body_graphql)
     if body_type == "raw" and body:
         try:
             return ("json", json.dumps(json.loads(body), sort_keys=True))
@@ -52,7 +55,7 @@ def _signature(req: dict) -> tuple:
         normalize_url(req.get("url", "")),
         tuple(sorted(strip_ignored_headers(req.get("headers", [])).items())),
         _params_signature(req.get("params", [])),
-        _body_signature(req.get("body_type"), req.get("body")),
+        _body_signature(req.get("body_type"), req.get("body"), req.get("body_form"), req.get("body_multipart"), req.get("body_graphql")),
     )
 
 
@@ -79,8 +82,9 @@ def _diffable_fields(req: dict) -> dict:
     body_type = req.get("body_type")
     body = req.get("body")
     if body_type in ("form", "multipart"):
+        raw_rows = req.get("body_form") if body_type == "form" else req.get("body_multipart")
         try:
-            rows = json.loads(body) if isinstance(body, str) else (body or [])
+            rows = json.loads(raw_rows) if isinstance(raw_rows, str) else (raw_rows or [])
         except (ValueError, TypeError):
             rows = []
         for row in rows:
@@ -89,6 +93,8 @@ def _diffable_fields(req: dict) -> dict:
             key = row.get("key") or row.get("name") or ""
             if key:
                 fields[f"body:{key}"] = row.get("value", "")
+    elif body_type == "graphql":
+        fields["body:__raw__"] = req.get("body_graphql")
     elif body_type == "raw" and body:
         try:
             parsed = json.loads(body)
@@ -161,14 +167,15 @@ def templatize_request(request: dict, checked_field_keys: set) -> dict:
         elif kind == "body":
             body_type = out.get("body_type")
             if body_type in ("form", "multipart"):
+                body_column = "body_form" if body_type == "form" else "body_multipart"
                 try:
-                    rows = json.loads(out["body"]) if isinstance(out.get("body"), str) else (out.get("body") or [])
+                    rows = json.loads(out[body_column]) if isinstance(out.get(body_column), str) else (out.get(body_column) or [])
                 except (ValueError, TypeError):
                     rows = []
                 for row in rows:
                     if (row.get("key") or row.get("name")) == name:
                         row["value"] = var
-                out["body"] = json.dumps(rows)
+                out[body_column] = json.dumps(rows)
             elif body_type == "raw" and out.get("body"):
                 try:
                     parsed = json.loads(out["body"])
