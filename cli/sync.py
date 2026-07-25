@@ -11,6 +11,7 @@ import threading
 from rich.console import Console
 from cli.config import get_auth_key
 from cli import api
+from cli.crypto import decrypt
 
 console = Console()
 
@@ -320,7 +321,7 @@ def sync_api_request_to_cloud(request_id):
     from cli.db import get_conn
     row = get_conn().execute(
         "SELECT project_id, feature_id, collection_id, folder_id, name, method, url, headers, "
-        "params, path_params, body_type, body, auth_type, auth_config, pre_script, pre_lang, "
+        "params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, "
         "pre_extractor, post_script, post_lang, post_extractor, request_schema, response_schema, "
         "assertions, follow_redirects, timeout_ms, include_in_docs, order_index "
         "FROM api_requests WHERE id = ?", (request_id,)
@@ -342,6 +343,9 @@ def sync_api_request_to_cloud(request_id):
         "path_params": json.loads(row["path_params"] or "[]"),
         "body_type": row["body_type"],
         "body": row["body"],
+        "body_form": row["body_form"],
+        "body_multipart": row["body_multipart"],
+        "body_graphql": row["body_graphql"],
         "auth_type": row["auth_type"],
         "auth_config": json.loads(row["auth_config"] or "{}"),
         "pre_script": row["pre_script"],
@@ -637,10 +641,16 @@ def sync_env_vars_to_cloud(env_id):
         "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?", (env_id,)
     ).fetchall()
     cloud_env_id = _get_cloud_id("environments", env_id)
+    # Values are encrypted at rest locally (per-machine key, never synced) — decrypt
+    # before sending so the server (and any other machine that later pulls) gets the
+    # real plaintext rather than ciphertext no other installation's key can open.
     return _try_sync("env vars", lambda: api.sync_env_vars(key, {
         "cli_environment_id": str(env_id),
         "cloud_environment_id": cloud_env_id,
-        "vars": [{"key": r["key"], "value": r["value"], "is_secret": bool(r["is_secret"])} for r in rows],
+        "vars": [
+            {"key": r["key"], "value": decrypt(r["value"]) if r["is_secret"] else r["value"], "is_secret": bool(r["is_secret"])}
+            for r in rows
+        ],
     }))
 
 

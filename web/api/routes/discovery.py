@@ -479,7 +479,7 @@ def record_stop():
             try:
                 with open(har_file) as hf:
                     har_json = json.load(hf)
-                from cli.api_discovery.har_parser import parse_har, merge_multipart_postdata
+                from cli.api_discovery.har_parser import parse_har, merge_multipart_postdata, merge_response_bodies
                 sidecar_file = har_file + ".multipart.json"
                 if os.path.exists(sidecar_file):
                     try:
@@ -487,6 +487,13 @@ def record_stop():
                             merge_multipart_postdata(har_json, json.load(sf))
                     except Exception as e:
                         logger.warning("record_stop: multipart sidecar merge failed: %s", e)
+                bodies_file = har_file + ".bodies.json"
+                if os.path.exists(bodies_file):
+                    try:
+                        with open(bodies_file) as bf:
+                            merge_response_bodies(har_json, json.load(bf))
+                    except Exception as e:
+                        logger.warning("record_stop: response body sidecar merge failed: %s", e)
                 requests_list = parse_har(har_json)
             except Exception as e:
                 logger.warning("record_stop: HAR parse failed (partial capture?): %s", e)
