@@ -240,6 +240,48 @@ def merge_multipart_postdata(har_json: dict, sidecar_entries: list[dict]) -> Non
         }
 
 
+def merge_response_bodies(har_json: dict, sidecar_entries: list[dict]) -> None:
+    """Patch HAR entries in place with response bodies captured out-of-band.
+
+    Chromium can destroy a response's body buffer before Playwright's HAR
+    tracer reads it — a race documented upstream at
+    https://github.com/microsoft/playwright/issues/7348 — most often when
+    the page navigates away right after the response (e.g. a post-login
+    redirect). The affected HAR entry ends up with no content.text at all.
+    There's no upstream fix, so our recording harness reads each xhr/fetch
+    response body itself, eagerly, on the 'response' event — well before
+    HAR finalization — into `sidecar_entries`, base64-encoded for JSON
+    transport. This backfills any HAR entry that still ended up empty,
+    matching by (method, url) in occurrence order, same as
+    merge_multipart_postdata, since HAR carries no request id to
+    correlate on.
+    """
+    if not sidecar_entries:
+        return
+    queues: dict = {}
+    for item in sidecar_entries:
+        b64 = item.get("body_b64")
+        if not b64:
+            continue
+        key = (item.get("method"), item.get("url"))
+        queues.setdefault(key, []).append(item)
+
+    for entry in har_json.get("log", {}).get("entries", []):
+        resp = entry.get("response", {})
+        content = resp.setdefault("content", {})
+        if content.get("text"):
+            continue
+        req = entry.get("request", {})
+        queue = queues.get((req.get("method"), req.get("url")))
+        if not queue:
+            continue
+        item = queue.pop(0)
+        content["text"] = item["body_b64"]
+        content["encoding"] = "base64"
+        if not content.get("mimeType"):
+            content["mimeType"] = item.get("mimeType", "")
+
+
 def parse_har(har_json: dict) -> list[dict]:
     """Parse HAR JSON → list of api_request dicts."""
     entries = har_json.get("log", {}).get("entries", [])

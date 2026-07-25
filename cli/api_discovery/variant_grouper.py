@@ -167,15 +167,15 @@ def templatize_request(request: dict, checked_field_keys: set) -> dict:
         elif kind == "body":
             body_type = out.get("body_type")
             if body_type in ("form", "multipart"):
-                field_key = "body_form" if body_type == "form" else "body_multipart"
+                body_column = "body_form" if body_type == "form" else "body_multipart"
                 try:
-                    rows = json.loads(out[field_key]) if isinstance(out.get(field_key), str) else (out.get(field_key) or [])
+                    rows = json.loads(out[body_column]) if isinstance(out.get(body_column), str) else (out.get(body_column) or [])
                 except (ValueError, TypeError):
                     rows = []
                 for row in rows:
                     if (row.get("key") or row.get("name")) == name:
                         row["value"] = var
-                out[field_key] = json.dumps(rows)
+                out[body_column] = json.dumps(rows)
             elif body_type == "raw" and out.get("body"):
                 try:
                     parsed = json.loads(out["body"])

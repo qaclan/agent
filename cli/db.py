@@ -589,16 +589,24 @@ def _migrate_request_body_columns(conn):
     fields (see docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md)."""
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(api_requests)").fetchall()}
     needs_backfill = "body_form" not in existing_cols
-    for col in ("body_form", "body_multipart", "body_graphql"):
-        try:
-            conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
-        except Exception:
-            pass
-    if needs_backfill:
-        conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
-        conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
-        conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
-    conn.commit()
+    # ALTER + backfill commit as one transaction — otherwise a crash between
+    # the ALTERs and the UPDATEs leaves the columns present but the backfill
+    # permanently skipped (needs_backfill is derived from column presence).
+    conn.execute("BEGIN")
+    try:
+        for col in ("body_form", "body_multipart", "body_graphql"):
+            try:
+                conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass
+        if needs_backfill:
+            conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _migrate_cascade(conn):

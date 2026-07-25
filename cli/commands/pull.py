@@ -7,6 +7,7 @@ from rich.console import Console
 from cli.config import get_auth_key, set_active_project_id, get_active_project_id, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli import api
+from cli.crypto import encrypt
 from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 
 console = Console()
@@ -326,6 +327,12 @@ def pull_workspace():
         local_env_id = env_map.get(v["environment_id"])
         if not local_env_id:
             continue
+        is_secret = bool(v.get("is_secret"))
+        # Server sends plaintext (its own at-rest encryption is a server-side concern).
+        # Re-encrypt with this machine's local key so reveal/decrypt works regardless
+        # of which machine originally pushed the value.
+        raw_value = v["value"]
+        value = encrypt(raw_value) if is_secret and raw_value else raw_value
         existing = conn.execute(
             "SELECT id FROM env_vars WHERE environment_id = ? AND key = ?",
             (local_env_id, v["key"]),
@@ -333,13 +340,13 @@ def pull_workspace():
         if existing:
             conn.execute(
                 "UPDATE env_vars SET value = ?, is_secret = ? WHERE id = ?",
-                (v["value"], 1 if v.get("is_secret") else 0, existing["id"]),
+                (value, 1 if is_secret else 0, existing["id"]),
             )
         else:
             local_id = generate_id("evar")
             conn.execute(
                 "INSERT INTO env_vars (id, environment_id, key, value, is_secret) VALUES (?, ?, ?, ?, ?)",
-                (local_id, local_env_id, v["key"], v["value"], 1 if v.get("is_secret") else 0),
+                (local_id, local_env_id, v["key"], value, 1 if is_secret else 0),
             )
             counts["env_vars"] += 1
 

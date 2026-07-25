@@ -11,6 +11,7 @@ import threading
 from rich.console import Console
 from cli.config import get_auth_key
 from cli import api
+from cli.crypto import decrypt
 
 console = Console()
 
@@ -640,10 +641,16 @@ def sync_env_vars_to_cloud(env_id):
         "SELECT key, value, is_secret FROM env_vars WHERE environment_id = ?", (env_id,)
     ).fetchall()
     cloud_env_id = _get_cloud_id("environments", env_id)
+    # Values are encrypted at rest locally (per-machine key, never synced) — decrypt
+    # before sending so the server (and any other machine that later pulls) gets the
+    # real plaintext rather than ciphertext no other installation's key can open.
     return _try_sync("env vars", lambda: api.sync_env_vars(key, {
         "cli_environment_id": str(env_id),
         "cloud_environment_id": cloud_env_id,
-        "vars": [{"key": r["key"], "value": r["value"], "is_secret": bool(r["is_secret"])} for r in rows],
+        "vars": [
+            {"key": r["key"], "value": decrypt(r["value"]) if r["is_secret"] else r["value"], "is_secret": bool(r["is_secret"])}
+            for r in rows
+        ],
     }))
 
 

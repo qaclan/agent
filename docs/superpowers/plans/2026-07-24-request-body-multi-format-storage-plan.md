@@ -11,6 +11,7 @@
 ## Global Constraints
 
 - Spec: `docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md`.
+- Task 16 spec: `docs/superpowers/specs/2026-07-25-body-format-active-indicator-design.md` — depends on Tasks 11-13 (frontend already reading the correct per-type column).
 - Companion server-repo plan: `qaclan-server/docs/superpowers/plans/2026-07-24-request-body-multi-format-storage-plan.md` — **must be deployed to production before this plan's Task 11 (cloud sync push) ships to users**, per the spec's rollout-ordering requirement. Every other task in this plan (1-10, 12-13, 15) has no cross-repo dependency and can proceed regardless of server deploy status.
 - No automated test suite exists in this repo (confirmed in `CLAUDE.md`: "There are no automated tests or linting configured"). Every "test" step below is a real runnable command — `sqlite3` queries, `python3 -c` snippets, `curl` against the local Flask dev server (`python qaclan.py serve --port 7823`), or a manual browser check — not a persisted pytest file.
 - Column naming/types must exactly match the server repo's Postgres columns: `body_form TEXT DEFAULT NULL`, `body_multipart TEXT DEFAULT NULL`, `body_graphql TEXT DEFAULT NULL`.
@@ -36,16 +37,31 @@ Add this function anywhere among the other `_migrate_*` functions in `cli/db.py`
 def _migrate_request_body_columns(conn):
     """Split api_requests.body into per-mode columns — body stays raw-only,
     body_form/body_multipart/body_graphql hold the other 3 modes. body_type
-    stays a pure mode-selector. See docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md."""
-    for col in ("body_form", "body_multipart", "body_graphql"):
-        try:
-            conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
-        except Exception:
-            pass
-    conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
-    conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
-    conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
-    conn.commit()
+    stays a pure mode-selector. Backfill only runs once, on the transition
+    that first adds these columns — it must never re-run on a DB that
+    already has them, since a legitimately-saved row can have non-null
+    body alongside a non-raw body_type once every save writes all 4
+    fields (see docs/superpowers/specs/2026-07-24-request-body-multi-format-storage-design.md)."""
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(api_requests)").fetchall()}
+    needs_backfill = "body_form" not in existing_cols
+    # ALTER + backfill commit as one transaction — otherwise a crash between
+    # the ALTERs and the UPDATEs leaves the columns present but the backfill
+    # permanently skipped (needs_backfill is derived from column presence).
+    conn.execute("BEGIN")
+    try:
+        for col in ("body_form", "body_multipart", "body_graphql"):
+            try:
+                conn.execute(f"ALTER TABLE api_requests ADD COLUMN {col} TEXT DEFAULT NULL")
+            except Exception:
+                pass
+        if needs_backfill:
+            conn.execute("UPDATE api_requests SET body_form = body, body = NULL WHERE body_type = 'form' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_multipart = body, body = NULL WHERE body_type = 'multipart' AND body IS NOT NULL")
+            conn.execute("UPDATE api_requests SET body_graphql = body, body = NULL WHERE body_type = 'graphql' AND body IS NOT NULL")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 ```
 
 - [ ] **Step 2: Register it in the migration call list**
@@ -1642,17 +1658,18 @@ to:
     _multipartRows = JSON.parse(parsed.body_multipart || '[]');
     _rawValue = parsed.body || '';
     bodyTextarea.value = parsed.body || '';
-    if (parsed.body_type === 'graphql') {
-      try {
-        const gql = JSON.parse(parsed.body_graphql || '{}');
-        _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
-        _gqlLastValidVariables = gql.variables ?? {};
-      } catch (e) { /* malformed — leave graphql panes empty */ }
-    }
+    try {
+      const gql = JSON.parse(parsed.body_graphql || '{}');
+      _gqlQuery = typeof gql.query === 'string' ? gql.query : '';
+      _gqlVariables = JSON.stringify(gql.variables ?? {}, null, 2);
+      _gqlLastValidVariables = gql.variables ?? {};
+    } catch (e) { _gqlQuery = ''; _gqlVariables = '{}'; _gqlLastValidVariables = {}; }
     _setBodyType(parsed.body_type || 'none');
 ```
 
-(This requires `curl_parser.py`'s output — from Task 6 — to include `body_form: null` always, since curl never produces `"form"` today; `JSON.parse(null || '[]')` safely yields `[]`. Confirmed safe.)
+The graphql reseed must run unconditionally (not gated on `parsed.body_type === 'graphql'`): `curl_parser.py`'s `_parse_one` never emits `body_type: "graphql"` (curl produces only `"multipart"`/`"raw"`), so a type-gated branch is dead code, and — worse — leaves a stale graphql draft from a prior import surviving into the new one and still getting persisted on save.
+
+(This requires `curl_parser.py`'s output — from Task 6 — to include `body_form: null` and `body_graphql: null` always, since curl never produces `"form"` or `"graphql"` today; `JSON.parse(null || '[]')` / `JSON.parse(null || '{}')` safely yield `[]` / `{}`. Confirmed safe.)
 
 - [ ] **Step 5: Manual browser verification**
 
@@ -1989,3 +2006,86 @@ Expected: the re-imported request still has its multipart fields, not an empty b
 - [ ] **Step 6: Sign off**
 
 Confirm `git log --oneline -15` shows all 14 prior commits, and that the companion server-repo plan was deployed before Task 14 was exercised against production/staging.
+
+---
+
+### Task 16: Body-format active indicator (editor tab bar + review modal)
+
+**Files:**
+- Modify: `web/static/api/views/request-editor-view.js:936-939` (`_setBodyType`)
+- Modify: `web/static/style.css:1788` (`.req-body-type-btn.active`)
+- Modify: `web/static/api/views/request-review-modal.js` (top-of-file label map, `_detailHTML` body heading)
+
+**Interfaces:**
+- Consumes: Tasks 11-13 — both files already read the body content matching `req.body_type`/`activeBodyType` per-type; this task only adds a non-color signal of which type that is.
+- Produces: a `title` tooltip + CSS checkmark on the active body-type tab in the editor, and a format suffix on the review modal's "Request Body" heading.
+
+- [ ] **Step 1: Add the tooltip in `_setBodyType`**
+
+Change:
+```javascript
+    activeBodyType = type;
+    bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.type === type);
+    });
+```
+to:
+```javascript
+    activeBodyType = type;
+    bodyTypeGroup.querySelectorAll('.req-body-type-btn').forEach(b => {
+      const isActive = b.dataset.type === type;
+      b.classList.toggle('active', isActive);
+      b.title = isActive
+        ? (type === 'none' ? 'No body — nothing sent when you Run this request' : 'Active — sent when you Run this request')
+        : '';
+    });
+```
+
+- [ ] **Step 2: Add the checkmark in CSS**
+
+In `web/static/style.css`, next to the existing rule:
+```css
+.req-body-type-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+```
+add:
+```css
+.req-body-type-btn.active::before { content: "✓ "; }
+```
+
+- [ ] **Step 3: Add the format label to the review modal heading**
+
+In `web/static/api/views/request-review-modal.js`, add a local label map near the top of the file (mirrors the editor's own labels, kept local per this file's existing pattern of duplicating small helpers rather than importing from the editor):
+```javascript
+const _BODY_TYPE_LABELS = { form: 'x-www-form-urlencoded', multipart: 'form-data/multipart', graphql: 'GraphQL' };
+```
+
+Change:
+```javascript
+  const bodySection = _section('Request Body', bodyContent);
+```
+to:
+```javascript
+  const _bodyTypeLabel = req.body_type && req.body_type !== 'raw' ? _BODY_TYPE_LABELS[req.body_type] || req.body_type : null;
+  const bodySection = _section(_bodyTypeLabel ? `Request Body — ${_bodyTypeLabel}` : 'Request Body', bodyContent);
+```
+`raw` and null/undefined `body_type` both keep the plain "Request Body" heading — raw is the implicit default and doesn't need calling out.
+
+- [ ] **Step 4: Manual verification**
+
+Open the request editor on a request with `body_type = 'multipart'` — the form-data/multipart tab shows the checkmark and accent highlight, hovering shows the tooltip. Click through Raw → x-www-form-urlencoded → GraphQL → none without saving — checkmark follows the click on each tab immediately, and the "none" pill shows the "No body" tooltip.
+Then run a HAR/Postman/cURL import that produces a mix of raw, form, multipart, and graphql requests, and open the pre-save review modal — each request's body section heading shows the correct format suffix (or plain "Request Body" for raw), matching the content rendered below it.
+Expected: all of the above match, no console errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/static/api/views/request-editor-view.js web/static/style.css web/static/api/views/request-review-modal.js
+git commit -m "$(cat <<'EOF'
+feat(editor): add non-color active-format indicator to body tabs + review modal
+
+Tab highlight was color-only. Adds a title tooltip + CSS checkmark on
+the active body-type tab, and a format suffix on the review modal's
+Request Body heading, per docs/superpowers/specs/2026-07-25-body-format-active-indicator-design.md.
+EOF
+)"
+```

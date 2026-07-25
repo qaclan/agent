@@ -71,13 +71,80 @@ def _apply_collection_extras(project_id: str, collection_id: str, collection_var
 # postData text field regardless of interception). So a no-op route handler
 # must be installed purely to arm interception before postData is readable.
 _ROUTE_ARM_SRC = (
-    "async def _arm_interception(ctx):\n"
+    "async def _arm_interception(ctx, pending_body_tasks):\n"
     "    async def _route_handler(route):\n"
     "        try:\n"
+    "            req = route.request\n"
+    # Measured against a real app: a post-login redirect can fire ~40ms
+    # after the response — faster than an eager response.body() read can
+    # complete (Python asyncio -> Node driver -> CDP round trip). Racing
+    # the navigation loses even when the read starts immediately, so hold
+    # navigation requests briefly until pending body reads finish instead —
+    # see _RESPONSE_BODY_CAPTURE_SRC for why the read exists at all.
+    "            if req.is_navigation_request():\n"
+    "                for _ in range(16):\n"
+    "                    if all(t.done() for t in pending_body_tasks):\n"
+    "                        break\n"
+    "                    await asyncio.sleep(0.05)\n"
     "            await route.continue_()\n"
     "        except Exception:\n"
     "            pass\n"
     "    await ctx.route('**/*', _route_handler)\n"
+)
+
+# Embedded (as literal source) alongside the blocks above. Playwright's own
+# record_har loses response bodies for requests whose page navigates away
+# shortly after the response arrives — Chromium destroys the resource
+# before Playwright's (apparently deferred/batched) HAR body fetch runs,
+# surfacing upstream as "No resource with given identifier found"
+# (https://github.com/microsoft/playwright/issues/7348). A post-login
+# redirect is the textbook trigger: the HAR entry ends up with no
+# content.text at all. There is no upstream fix, so this reads each
+# xhr/fetch response body itself, eagerly, in the same tick as the
+# 'response' event — well before HAR finalization — and stashes it in a
+# sidecar keyed by (method, url) for merge_response_bodies() to backfill
+# into the HAR afterward. Must be flushed (awaited) before ctx.close():
+# once the context closes, any body() call still in flight dies with it.
+_RESPONSE_BODY_CAPTURE_SRC = (
+    "def _install_response_body_capture(ctx):\n"
+    "    captured = []\n"
+    "    tasks = []\n"
+    "    def on_response(resp):\n"
+    "        req = resp.request\n"
+    "        if req.resource_type not in ('xhr', 'fetch'):\n"
+    "            return\n"
+    "        async def _grab():\n"
+    "            try:\n"
+    # resp.body() has no built-in timeout — some responses (analytics
+    # beacons, keepalive requests) never signal completion, and an
+    # unbounded await here would hang the flush below, which runs before
+    # ctx.close() and would eat into the harness's outer kill-timeout.
+    "                body = await asyncio.wait_for(resp.body(), timeout=3)\n"
+    "            except Exception:\n"
+    "                return\n"
+    "            captured.append({\n"
+    "                'method': req.method,\n"
+    "                'url': req.url,\n"
+    "                'mimeType': (resp.headers.get('content-type', '') or '').split(';')[0].strip(),\n"
+    "                'body_b64': base64.b64encode(body).decode('ascii'),\n"
+    "            })\n"
+    "        tasks.append(asyncio.ensure_future(_grab()))\n"
+    "    ctx.on('response', on_response)\n"
+    "    return captured, tasks\n"
+    "\n"
+    "async def _flush_response_body_capture(captured, tasks):\n"
+    "    if tasks:\n"
+    "        try:\n"
+    "            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=4)\n"
+    "        except asyncio.TimeoutError:\n"
+    "            pass\n"
+    "    if not captured:\n"
+    "        return\n"
+    "    try:\n"
+    "        with open(os.environ['QACLAN_HAR_PATH'] + '.bodies.json', 'w') as sf:\n"
+    "            json.dump(captured, sf)\n"
+    "    except Exception:\n"
+    "        pass\n"
 )
 
 # Embedded (as literal source, not imported) in the generated recording
@@ -361,6 +428,7 @@ class DiscoveryService:
             "from playwright.async_api import async_playwright\n"
             f"{_MULTIPART_CAPTURE_SRC}\n"
             f"{_ROUTE_ARM_SRC}\n"
+            f"{_RESPONSE_BODY_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
@@ -375,7 +443,8 @@ class DiscoveryService:
             "        ctx = await browser.new_context(**ctx_opts)\n"
             "        page = await ctx.new_page()\n"
             "        captured = _install_multipart_capture(ctx)\n"
-            "        await _arm_interception(ctx)\n"
+            "        body_captured, body_tasks = _install_response_body_capture(ctx)\n"
+            "        await _arm_interception(ctx, body_tasks)\n"
             # Register signal handlers BEFORE goto() so SIGTERM during navigation is caught
             "        if sys.platform != 'win32':\n"
             "            stop = asyncio.Event()\n"
@@ -393,6 +462,9 @@ class DiscoveryService:
             "            sf = os.environ.get('QACLAN_STOP_FILE', '')\n"
             "            while browser.is_connected() and not (sf and os.path.exists(sf)):\n"
             "                await asyncio.sleep(0.3)\n"
+            # Flush pending response.body() reads BEFORE ctx.close() — once the
+            # context is closed any in-flight body() call dies with it.
+            "        await _flush_response_body_capture(body_captured, body_tasks)\n"
             "        try:\n"
             "            await ctx.close()\n"
             "        except Exception:\n"
@@ -416,18 +488,21 @@ class DiscoveryService:
             "from playwright.async_api import async_playwright\n"
             f"{_MULTIPART_CAPTURE_SRC}\n"
             f"{_ROUTE_ARM_SRC}\n"
+            f"{_RESPONSE_BODY_CAPTURE_SRC}\n"
             "async def main():\n"
             "    async with async_playwright() as pw:\n"
             "        browser = await pw.chromium.launch(headless=False)\n"
             "        ctx = await browser.new_context(record_har_path=os.environ['QACLAN_HAR_PATH'])\n"
             "        page = await ctx.new_page()\n"
             "        captured = _install_multipart_capture(ctx)\n"
-            "        await _arm_interception(ctx)\n"
+            "        body_captured, body_tasks = _install_response_body_capture(ctx)\n"
+            "        await _arm_interception(ctx, body_tasks)\n"
             "        try:\n"
             "            await page.goto(os.environ['QACLAN_START_URL'])\n"
             "        except Exception:\n"
             "            traceback.print_exc()\n"
             "        await browser.wait_for_event('disconnected')\n"
+            "        await _flush_response_body_capture(body_captured, body_tasks)\n"
             "        await ctx.close()\n"
             "        _write_multipart_sidecar(captured)\n"
             "asyncio.run(main())\n"

@@ -20,7 +20,7 @@ Adopt Postman's model: the body object holds **all** modes' content simultaneous
 | Storage shape | 3 new columns (`body_form`, `body_multipart`, `body_graphql`) alongside the existing `body`. `body` becomes raw-only, forever. `body_type` keeps its existing role as pure mode-selector. |
 | "None" behavior | Sets `body_type = NULL`. All 4 content columns keep their last saved value — nothing is cleared. Switching back to any prior type (even after a refresh) restores its content. |
 | Existing captured requests (pre-fix) | One-time backfill migration relocates `body` into the correct new column for rows where `body_type` is form/multipart/graphql, then nulls `body` for those rows. Without this, already-captured requests keep leaking into Raw forever. |
-| `api_request_examples` | Out of scope — it's an immutable point-in-time snapshot (no tabbed editing UI), single `body` column stays as-is. |
+| `api_request_examples` | Keeps its single `body` column as-is — it's an immutable point-in-time snapshot, not a 4-field split. When an example is loaded into the (tabbed) request editor, its `body` content is interpreted against the parent request's `body_type` and routed to the matching draft (form/multipart rows, graphql query+variables, or raw text) rather than dumped into the Raw tab unconditionally. |
 | Server (qaclan-server) | Mirrors the same 3-column split — it's the sync target for this same table. |
 | Rollout order | Server migration + route support ships **first**, agent fix ships after. See "Rollout ordering" below. |
 

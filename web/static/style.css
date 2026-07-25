@@ -1786,6 +1786,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 }
 .req-body-type-btn:hover { background: var(--bg-panel); color: var(--text-secondary); }
 .req-body-type-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.req-body-type-btn.active::before { content: "✓ "; }
 
 /* Section labels & hints */
 .req-section-label {
