@@ -50,17 +50,17 @@ def _substitute_path_params(url: str, path_params: list, env_vars: dict, state: 
 # ---------------------------------------------------------------------------
 
 def resolve_vars(text: str, env_vars: dict, state: dict) -> str:
-    """Replace {{var_name}} in text. Order: env_vars → state.qaclan_vars → empty+warn."""
+    """Replace {{var_name}} in text. Order: state.qaclan_vars → env_vars → empty+warn."""
     if not text:
         return text or ""
     qc_vars = state.get("qaclan_vars", {}) if isinstance(state, dict) else {}
 
     def _replace(m):
         key = m.group(1).strip()
-        if key in env_vars:
-            return str(env_vars[key])
         if key in qc_vars:
             return str(qc_vars[key])
+        if key in env_vars:
+            return str(env_vars[key])
         logger.warning("resolve_vars: variable '%s' not found in env or state", key)
         return ""
 

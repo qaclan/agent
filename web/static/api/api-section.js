@@ -226,6 +226,7 @@ function renderApiPage(container) {
       window.__qaclanApi.isCurrentEditorDirty = null;
       window.__qaclanApi.getCurrentEditorRequestId = null;
       _currentlyViewedRunId = null;
+      _clearActiveRequest?.();
     }
 
     // Guards navigation away from a dirty request editor — prompts to
@@ -267,6 +268,7 @@ function renderApiPage(container) {
     const {
       reload: _reloadCollections,
       setActiveRequestId: _setActiveRequestId,
+      clearActiveRequest: _clearActiveRequest,
       updateRunningRuns: _updateRunningRuns,
     } = renderCollectionsView(
       document.getElementById('api-collections-panel'),

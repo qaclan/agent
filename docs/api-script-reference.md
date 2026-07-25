@@ -210,6 +210,8 @@ Any `qc.set("key", value)` call (script or extractor) lands in `qaclan_vars` ins
 - Other API requests read it via `{{key}}` in URL/headers/params/body.
 - Playwright scripts read it via `os.environ["QACLAN_STATE_key"]`.
 
+**Precedence when a key exists in both tiers:** `resolve_vars` (`cli/api_runner.py`) checks `qaclan_vars` (this run's `qc.set` values) before the active environment's `env_vars`. A `qc.set("access_token", ...)` in a `/login` post_script overrides a same-named environment variable for the rest of the run — e.g. a Bearer auth token of `{{access_token}}` picks up the freshly-set value on every subsequent request, not a stale value stored in the environment.
+
 ---
 
 ## Variable secrecy

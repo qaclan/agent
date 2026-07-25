@@ -638,6 +638,15 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     _activeRequestId = requestId || null;
   }
 
+  // Called when the main panel switches to a non-editor view (run detail,
+  // collection detail, empty state) so the sidebar highlight doesn't lie
+  // about what's actually open — otherwise re-clicking that same request
+  // no-ops (see the `.active` early-return in _renderRequestNode).
+  function clearActiveRequest() {
+    _activeRequestId = null;
+    container.querySelectorAll('.api-request-item.active').forEach(i => i.classList.remove('active'));
+  }
+
   reload();
-  return { reload, setActiveRequestId, updateRunningRuns };
+  return { reload, setActiveRequestId, clearActiveRequest, updateRunningRuns };
 }
