@@ -33,25 +33,37 @@ esac
 
 info "Detected platform: ${OS}-${ARCH}"
 
-# Get latest release tag from GitHub API
-info "Fetching latest release..."
-LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
-
-if command -v curl >/dev/null 2>&1; then
-    RELEASE_JSON=$(curl -fsSL "$LATEST_URL")
-elif command -v wget >/dev/null 2>&1; then
-    RELEASE_JSON=$(wget -qO- "$LATEST_URL")
-else
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     error "curl or wget is required"
 fi
 
-# Parse tag name and download URL
-TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
 ASSET_NAME="qaclan-${OS}-${ARCH}"
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET_NAME}"
 
+# Pin to a specific release with QACLAN_VERSION=v1.4.0 sh install.sh — skips the
+# api.github.com lookup entirely (also sidesteps its 60/req-hour rate limit).
+# Default (unset) resolves latest via the API, falling back to the
+# unauthenticated releases/latest/download alias (served from github.com, not
+# the rate-limited API) so a single 403 doesn't block install.
+TAG="${QACLAN_VERSION:-}"
 if [ -z "$TAG" ]; then
-    error "Could not determine latest release. Check https://github.com/${REPO}/releases"
+    info "Fetching latest release..."
+    LATEST_URL="https://api.github.com/repos/${REPO}/releases/latest"
+    if command -v curl >/dev/null 2>&1; then
+        RELEASE_JSON=$(curl -fsSL "$LATEST_URL" 2>/dev/null) || RELEASE_JSON=""
+    else
+        RELEASE_JSON=$(wget -qO- "$LATEST_URL" 2>/dev/null) || RELEASE_JSON=""
+    fi
+    if [ -n "$RELEASE_JSON" ]; then
+        TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
+    fi
+fi
+
+if [ -n "$TAG" ]; then
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET_NAME}"
+else
+    warn "GitHub API unreachable (rate limited or blocked on this network) — using direct latest-release link."
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+    TAG="latest"
 fi
 
 info "Installing qaclan ${TAG} (${OS}-${ARCH})..."
