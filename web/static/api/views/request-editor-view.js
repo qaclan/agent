@@ -846,6 +846,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _gqlLastValidVariables = gql.variables ?? {};
   } catch (e) { /* malformed saved body — start both panes empty */ }
 
+  // Set true the first time _setBodyType('graphql') attempts to seed the
+  // editors from _rawValue — gates on this flag, not live emptiness of
+  // _gqlQuery, so a deliberate user-clear of the query field is never
+  // silently re-filled on a later tab revisit.
+  let _gqlSeedAttempted = false;
+
   let _gqlQueryEditor = null;
   let _gqlVariablesEditor = null;
   let _gqlQueryFallback = null;
@@ -857,6 +863,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const gqlQueryLabel = document.createElement('div');
   gqlQueryLabel.textContent = 'Query';
   gqlQueryLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
+
+  const gqlHintEl = document.createElement('div');
+  gqlHintEl.textContent = "Raw body doesn't look like GraphQL — start typing your query below.";
+  gqlHintEl.style.cssText = 'font-size:12px;color:var(--text-muted);font-style:italic;margin:0 0 6px;display:none;';
+
   const gqlQueryMount = document.createElement('div');
 
   const gqlVariablesLabel = document.createElement('div');
@@ -864,7 +875,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   gqlVariablesLabel.style.cssText = 'font-size:10px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted);margin:8px 0 2px;';
   const gqlVariablesMount = document.createElement('div');
 
-  gqlWrap.append(gqlQueryLabel, gqlQueryMount, gqlVariablesLabel, gqlVariablesMount);
+  gqlWrap.append(gqlQueryLabel, gqlHintEl, gqlQueryMount, gqlVariablesLabel, gqlVariablesMount);
 
   function _syncGqlBodyTextarea() {
     try {
@@ -880,7 +891,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     _gqlQueryEditor = await createGraphqlEditor({
       parent: gqlQueryMount, value: _gqlQuery, isDark,
-      onChange: (v) => { _gqlQuery = v; _syncGqlBodyTextarea(); },
+      onChange: (v) => { _gqlQuery = v; _syncGqlBodyTextarea(); gqlHintEl.style.display = 'none'; },
       getVarsList: () => _allVarsList,
     });
     if (!_gqlQueryEditor) {
@@ -890,7 +901,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _gqlQueryFallback.spellcheck = false;
       _gqlQueryFallback.value = formatGraphQL(_gqlQuery);
       _gqlQueryFallback.placeholder = '{ users { id name } }';
-      _gqlQueryFallback.addEventListener('input', () => { _gqlQuery = _gqlQueryFallback.value; _syncGqlBodyTextarea(); });
+      _gqlQueryFallback.addEventListener('input', () => { _gqlQuery = _gqlQueryFallback.value; _syncGqlBodyTextarea(); gqlHintEl.style.display = 'none'; });
       gqlQueryMount.appendChild(_gqlQueryFallback);
     }
 
@@ -978,6 +989,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       _activateCmEditor(_rawValue);
       bodyFallback.placeholder = '{\n  "key": "value"\n}';
     } else if (isGraphql) {
+      if (!_gqlSeedAttempted && !_gqlQuery && _rawValue) {
+        _gqlSeedAttempted = true;
+        _setBodyValue(_rawValue);
+        gqlHintEl.style.display = _gqlQuery ? 'none' : '';
+      }
       _mountGqlEditors();
     }
   }
