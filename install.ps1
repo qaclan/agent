@@ -43,19 +43,30 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
 Info "Detected platform: windows-$arch"
 
 # ── Fetch latest release ─────────────────────────────────────────────
-Info "Fetching latest release..."
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
-} catch {
-    Fail "Could not fetch release info: $($_.Exception.Message)"
+# Pin to a specific release with $env:QACLAN_VERSION = 'v1.4.0' before running —
+# skips the api.github.com lookup entirely (also sidesteps its 60/req-hour rate
+# limit). Default (unset) resolves latest via the API, falling back to the
+# unauthenticated releases/latest/download alias (served from github.com, not
+# the rate-limited API) so a single 403 doesn't block install.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+$tag = $env:QACLAN_VERSION
+if (-not $tag) {
+    Info "Fetching latest release..."
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repo/releases/latest" -UseBasicParsing
+        $tag = $release.tag_name
+    } catch {
+        Warn "GitHub API unreachable (rate limited or blocked on this network) — using direct latest-release link."
+    }
 }
 
-$tag         = $release.tag_name
-$assetName   = "qaclan-windows-$arch.exe"
-$downloadUrl = "https://github.com/$Repo/releases/download/$tag/$assetName"
-
-if (-not $tag) { Fail "Could not determine latest release. Check https://github.com/$Repo/releases" }
+$assetName = "qaclan-windows-$arch.exe"
+if ($tag) {
+    $downloadUrl = "https://github.com/$Repo/releases/download/$tag/$assetName"
+} else {
+    $downloadUrl = "https://github.com/$Repo/releases/latest/download/$assetName"
+    $tag = "latest"
+}
 
 Info "Installing qaclan $tag (windows-$arch)..."
 
