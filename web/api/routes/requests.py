@@ -123,6 +123,34 @@ def send_request(req_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/api-requests/<req_id>/response-schema", methods=["POST"])
+def set_response_schema(req_id):
+    """Save the current/last response shape as the request's frozen
+    response_schema baseline (the "Update response schema" action).
+
+    Body may carry an already-inferred `schema` (preferred — the UI passes the
+    last send's inferred shape) or a `response_body` (+ optional
+    `response_headers`) to infer from.
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        schema = _runner_svc.set_response_schema(
+            req_id, _project_id(),
+            schema=data.get("schema"),
+            response_body=data.get("response_body"),
+            response_headers=data.get("response_headers"),
+        )
+        enqueue("api_request", req_id, "upsert")
+        return jsonify({"ok": True, "response_schema": schema})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("set_response_schema")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/api-requests/<req_id>/examples", methods=["GET"])
 def list_request_examples(req_id):
     try:

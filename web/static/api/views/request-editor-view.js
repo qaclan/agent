@@ -396,7 +396,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(urlBar);
 
   // ── Tab bar ──
-  const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions'];
+  const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions', 'Schema Check'];
   const tabBar = document.createElement('div');
   tabBar.className = 'req-tab-bar';
   const sectionContent = document.createElement('div');
@@ -1671,6 +1671,117 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     r.post_lang, r.post_script, r.post_extractor || [], r.response_schema || null
   );
 
+  // ── Schema Check section (response-schema drift detection) ──
+  let _schemaCheck = r.schema_check || 'inherit';   // 'inherit' | 'on' | 'off'
+  let _lastResult = null;                            // last send result (for Update expected)
+  let _collectionSchemaDefault = null;               // fetched lazily for the effective label
+
+  function makeSchemaCheckSection() {
+    const div = document.createElement('div');
+    div.className = 'sc-panel';
+    div.style.padding = '4px 2px';
+    div.innerHTML = `
+      <p class="sc-desc">Compares each response to a saved <strong>expected shape</strong>.
+        Breaking changes — a field removed or retyped — <strong>fail</strong> the request;
+        new fields only warn. The first successful response is saved automatically.</p>
+      <div class="sc-row">
+        <div class="sc-row__label">Schema check</div>
+        <div class="sc-row__body">
+          <div class="sc-seg" role="group" aria-label="Schema check for this request">
+            <button type="button" class="sc-seg__btn" data-val="inherit">Inherit</button>
+            <button type="button" class="sc-seg__btn" data-val="on">On</button>
+            <button type="button" class="sc-seg__btn" data-val="off">Off</button>
+          </div>
+          <div class="sc-state" data-role="eff"><span class="sc-state__dot"></span><span data-role="eff-text"></span></div>
+        </div>
+      </div>
+      <div class="sc-row">
+        <div class="sc-row__label">Response schema</div>
+        <div class="sc-row__body">
+          <div class="sc-expected">
+            <span class="sc-expected__badge" data-role="exp-badge"></span>
+            <button type="button" class="sc-btn-ghost" data-role="exp-btn">Update response schema</button>
+          </div>
+          <div class="sc-row__hint">The saved shape drift is checked against. Captured from the first response; update it to accept a new shape.</div>
+        </div>
+      </div>`;
+
+    const seg = div.querySelector('.sc-seg');
+    const effEl = div.querySelector('[data-role="eff"]');
+    const effText = div.querySelector('[data-role="eff-text"]');
+    const expBadge = div.querySelector('[data-role="exp-badge"]');
+    const updBtn = div.querySelector('[data-role="exp-btn"]');
+
+    function paint() {
+      seg.querySelectorAll('.sc-seg__btn').forEach(b =>
+        b.classList.toggle('is-active', b.dataset.val === _schemaCheck));
+      _refreshEffective();
+    }
+    seg.querySelectorAll('.sc-seg__btn').forEach(b => {
+      b.onclick = () => { if (_schemaCheck !== b.dataset.val) { _schemaCheck = b.dataset.val; _markDirty?.(); paint(); } };
+    });
+
+    function _refreshEffective() {
+      let on, text;
+      if (_schemaCheck === 'on') { on = true; text = 'On · overriding collection'; }
+      else if (_schemaCheck === 'off') { on = false; text = 'Off · overriding collection'; }
+      else {
+        const def = _collectionSchemaDefault;
+        if (def == null) { on = false; effText.textContent = 'Following collection default…'; effEl.classList.remove('is-on'); return; }
+        on = def === 'on';
+        text = on ? 'On · from collection default' : 'Off · from collection default';
+      }
+      effText.textContent = text;
+      effEl.classList.toggle('is-on', on);
+    }
+
+    function _refreshExpected(captured) {
+      expBadge.classList.toggle('is-captured', !!captured);
+      expBadge.classList.toggle('is-empty', !captured);
+      expBadge.textContent = captured ? 'Captured' : 'Not captured';
+    }
+    _refreshExpected(!!r.response_schema);
+
+    updBtn.onclick = async () => {
+      const schema = _lastResult && (_lastResult.inferred_schema
+        || (_lastResult.schema_drift && _lastResult.schema_drift.current));
+      const body = _lastResult && _lastResult.response_body;
+      if (!schema && !body) {
+        await window._alertDialog('Send the request first, then save its response as the response schema.');
+        return;
+      }
+      updBtn.disabled = true; updBtn.textContent = 'Saving…';
+      try {
+        const rid = await _save();
+        if (!rid) return;
+        const res = await window.api('POST', `/api-requests/${rid}/response-schema`,
+          schema ? { schema } : { response_body: body });
+        if (res.ok === false) { await window._alertDialog('Update failed: ' + res.error); return; }
+        r.response_schema = res.response_schema;
+        _refreshExpected(true);
+      } finally {
+        updBtn.disabled = false; updBtn.textContent = 'Update response schema';
+      }
+    };
+
+    // Lazily fetch the collection default for the effective-state line.
+    if (_effectiveCollectionId) {
+      window.api('GET', `/collections/${_effectiveCollectionId}`).then(res => {
+        if (res && res.ok !== false && res.collection) {
+          _collectionSchemaDefault = res.collection.schema_check_default || 'off';
+          _refreshEffective();
+        }
+      }).catch(() => {});
+    } else {
+      _collectionSchemaDefault = 'off';
+    }
+
+    paint();
+    div._refreshExpected = _refreshExpected;
+    return div;
+  }
+  const schemaCheckSection = makeSchemaCheckSection();
+
   const sectionMap = {
     'Params':      paramsWrapper,
     'Headers':     headersWrapper,
@@ -1679,6 +1790,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     'Pre-Script':  preScriptSection,
     'Post-Script': postScriptSection,
     'Assertions':  assertionBuilder.el,
+    'Schema Check': schemaCheckSection,
   };
 
   let activeSection = 'Params';
@@ -1701,9 +1813,32 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   sectionContent.appendChild(sectionMap[activeSection]);
 
   // ── Response panel ──
+  const driftBanner = document.createElement('div');
+  driftBanner.style.display = 'none';
+  driftBanner.style.cssText = 'display:none;margin:8px 0 0;padding:8px 12px;border-radius:4px;font-size:12px;line-height:1.4;';
   const responsePanel = createResponsePanel({ schema: r.response_schema || null });
+  editor.appendChild(driftBanner);
   editor.appendChild(responsePanel.el);
   container.appendChild(editor);
+
+  function _showDriftBanner(drift) {
+    if (!drift || !drift.checked || !drift.differences || !drift.differences.length) {
+      driftBanner.style.display = 'none';
+      return;
+    }
+    const brk = drift.breaking_count || 0, add = drift.additive_count || 0;
+    const breaking = brk > 0;
+    driftBanner.style.display = '';
+    driftBanner.style.background = breaking ? 'var(--danger-bg,rgba(239,68,68,.10))' : 'var(--warning-bg,rgba(245,158,11,.10))';
+    driftBanner.style.border = `1px solid ${breaking ? 'var(--danger-border,rgba(239,68,68,.20))' : 'rgba(245,158,11,.20)'}`;
+    driftBanner.style.color = breaking ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)';
+    const parts = [];
+    if (brk) parts.push(`${brk} breaking`);
+    if (add) parts.push(`${add} additive`);
+    const verb = breaking ? '⚠ Response schema drift — request failed' : '⚠ Response schema drift';
+    driftBanner.innerHTML = `<strong>${verb}.</strong> ${parts.join(', ')} change${drift.differences.length === 1 ? '' : 's'}. `
+      + `Open the <strong>Schema Diff</strong> tab to compare. If expected, click <strong>Update expected</strong> in the Schema Check tab.`;
+  }
 
   // ── Send ── (always saves first so extractor/scripts changes take effect)
   sendBtn.onclick = async () => {
@@ -1715,7 +1850,17 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       sendBtn.textContent = 'Sending…';
       const res = await window.api('POST', `/api-requests/${rid}/send`, {});
       if (res.ok === false) await window._alertDialog('Send error: ' + res.error);
-      else responsePanel.show(res.result);
+      else {
+        _lastResult = res.result;
+        responsePanel.show(res.result);
+        _showDriftBanner(res.result.schema_drift);
+        // First send captures the frozen response_schema baseline server-side
+        // when none existed yet; mirror that locally so the badge flips.
+        if (!r.response_schema && res.result.inferred_schema) {
+          r.response_schema = res.result.inferred_schema;
+          schemaCheckSection._refreshExpected?.(true);
+        }
+      }
     } finally {
       sendBtn.disabled = false;
       sendBtn.textContent = 'Send';
@@ -1750,6 +1895,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       post_script: postScriptSection._getCode() || null,
       post_extractor: postScriptSection._getExtractor(),
       assertions: assertionBuilder.getAssertions(),
+      schema_check: _schemaCheck,
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
     if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;

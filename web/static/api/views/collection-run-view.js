@@ -188,7 +188,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       const name   = result ? result.request_name : (spine.name   || `Request ${i + 1}`);
       const method = result ? result.method       : (spine.method || '');
 
-      let badge, codeHtml = '', durHtml = '', chevron = '';
+      let badge, codeHtml = '', durHtml = '', chevron = '', driftMark = '';
       if (result) {
         if      (result.status === 'PASSED') badge = '<span class="crv-pass">✓</span>';
         else if (result.status === 'FAILED') badge = '<span class="crv-fail">✗</span>';
@@ -196,6 +196,13 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         codeHtml = _codeHtml(result.status_code);
         durHtml  = _durHtml(result.duration_ms);
         chevron  = '<span class="crv-chevron">▼</span>';
+        const _d = result.schema_drift;
+        if (_d && Array.isArray(_d.differences) && _d.differences.length) {
+          const _brk = _d.breaking_count || 0;
+          const _c = _brk ? 'var(--danger,#ef4444)' : 'var(--warning,#d9822b)';
+          const _bg = _brk ? 'rgba(239,68,68,.12)' : 'rgba(217,130,43,.12)';
+          driftMark = `<span title="Response schema drift" style="font-size:10px;padding:1px 6px;border-radius:3px;margin-left:6px;background:${_bg};color:${_c}">schema ${_brk ? '⚠' : 'Δ'} ${_d.differences.length}</span>`;
+        }
       } else if (i === curIdx) {
         badge    = '<span class="crv-spin"></span>';
         codeHtml = _codeHtml(null);
@@ -209,7 +216,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       html += `<div class="crv-row" data-i="${i}">
         ${badge}
         <span class="crv-method">${_esc(method)}</span>
-        <span class="crv-name">${_esc(name)}</span>
+        <span class="crv-name">${_esc(name)}${driftMark}</span>
         ${codeHtml}
         ${durHtml}
         ${chevron}
@@ -279,10 +286,22 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
           : result.status !== 'PASSED'
             ? `<div style="color:var(--text-muted,#888);font-style:italic;margin-top:8px;font-size:11px">No response body received</div>`
             : '';
+        let driftHtml = '';
+        const _drift = result.schema_drift;
+        if (_drift && Array.isArray(_drift.differences) && _drift.differences.length) {
+          const items = _drift.differences.map(d => {
+            const c = d.severity === 'breaking' ? 'var(--danger,#ef4444)' : 'var(--warning,#d9822b)';
+            const from = d.expected_type == null ? '∅' : d.expected_type;
+            const to = d.actual_type == null ? '∅' : d.actual_type;
+            return `<div style="color:${c}">${_esc(d.kind)} ${_esc(d.path)} <span style="opacity:.7">${_esc(from)} → ${_esc(to)}</span></div>`;
+          }).join('');
+          driftHtml = `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Schema drift (${_drift.breaking_count || 0} breaking, ${_drift.additive_count || 0} additive)</div>${items}`;
+        }
         html += `<div class="crv-detail" id="crv-det-${i}">
           ${errHtml}${reasonHtml}
           <div style="font-weight:600;color:var(--text-secondary,#444);margin-bottom:4px">Assertions</div>
           ${assertHtml}
+          ${driftHtml}
           ${bodySection}
         </div>`;
       }

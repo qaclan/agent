@@ -112,6 +112,12 @@ def patch_collection(col_id):
             body.get("auth_type", col.get("auth_type", "none")),
             body.get("auth_config", col.get("auth_config", "{}")),
         )
+        if "schema_check_default" in body:
+            CollectionRepo().set_schema_check_default(col_id, body.get("schema_check_default"))
+            # Global toggle overwrites all per-request overrides: reset them to
+            # 'inherit' so every request follows the collection default.
+            for changed_req_id in CollectionRepo().reset_schema_check_overrides(col_id):
+                enqueue("api_request", changed_req_id, "upsert")
         enqueue("api_collection", col_id, "upsert")
         return jsonify({"ok": True, "collection": CollectionRepo().get(col_id, pid)})
     except ValueError as e:
