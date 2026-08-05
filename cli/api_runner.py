@@ -10,6 +10,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from cli.schema_infer import infer_schema
+from cli.schema_diff import evaluate_drift, skipped as _schema_skipped
+
 logger = logging.getLogger("qaclan.api_runner")
 
 _SENSITIVE_KEY_RE = re.compile(
@@ -464,7 +467,30 @@ def _evaluate_assertions(assertions: list, status_code: int, response_body: str,
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | None = None) -> dict:
+def _schema_from_response(response_headers: dict | None, response_body) -> object | None:
+    """Infer a type-tree schema from a response, or None if it isn't JSON.
+
+    Guards on the Content-Type header (must contain 'json') then parses the
+    body. Returns None (never a partial schema) on non-JSON or parse failure so
+    callers leave the stored expected schema untouched.
+    """
+    if not response_body:
+        return None
+    ctype = ""
+    for k, v in (response_headers or {}).items():
+        if str(k).lower() == "content-type":
+            ctype = str(v or "").lower()
+            break
+    if "json" not in ctype:
+        return None
+    try:
+        return infer_schema(json.loads(response_body))
+    except Exception:
+        return None
+
+
+def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | None = None,
+                    baseline_schema=None, schema_check_enabled: bool = False) -> dict:
     """
     Execute a single API request.
 
@@ -473,10 +499,17 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         env_vars: {key: value} from active environment
         state: parsed state.json dict (may contain qaclan_vars)
         state_path: path to state.json file (for sandbox scripts that write state)
+        baseline_schema: the frozen response_schema to compare against (None when
+            none captured yet). Only consulted when schema_check_enabled.
+        schema_check_enabled: effective enablement resolved by the caller
+            (request override, else collection default). See runner_service.
 
     Returns:
         dict with keys: status, status_code, url, response_body, response_headers,
-                        duration_ms, assertion_results, error_message, state_updates
+                        duration_ms, assertion_results, error_message, state_updates,
+                        schema_drift, inferred_schema. inferred_schema is the current
+                        response's type-tree (also echoed as response_schema for
+                        display); the caller decides whether to persist it.
     """
     import httpx
 
@@ -708,6 +741,28 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             all_passed = status_code is not None and status_code < 400
         status = "PASSED" if all_passed else "FAILED"
 
+        # 8. Response schema. Always infer the current shape from a JSON body so
+        # the Schema tab / extractor picker have this run's shape (display only —
+        # the caller persists response_schema on first capture and keeps it
+        # frozen thereafter). The drift check (opt-in) compares this shape to the
+        # frozen baseline; kept separate from assertions so a schema failure is
+        # distinguishable. A breaking difference fails the run; additive-only,
+        # first-capture, and non-JSON never change the verdict.
+        inferred_schema = _schema_from_response(response_headers, response_body)
+        schema_drift = None
+        if schema_check_enabled:
+            if inferred_schema is None:
+                schema_drift = _schema_skipped("non-json")
+            elif baseline_schema is None:
+                schema_drift = _schema_skipped("first-capture")
+            else:
+                schema_drift = evaluate_drift(baseline_schema, inferred_schema)
+                # Carry both shapes so the comparison view can render trees.
+                schema_drift["expected"] = baseline_schema
+                schema_drift["current"] = inferred_schema
+                if schema_drift["breaking_count"] > 0:
+                    status = "FAILED"
+
         logger.info("run_api_request: %s %s → %d (%dms) %s",
                     method, url, status_code, duration_ms, status)
 
@@ -723,6 +778,9 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "state_updates": state_updates,
             "started_at": started_at,
             "finished_at": finished_at,
+            "schema_drift": schema_drift,
+            "inferred_schema": inferred_schema,
+            "response_schema": inferred_schema,
         }
 
     except httpx.TimeoutException as e:
@@ -741,6 +799,9 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "state_updates": {},
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
+            "schema_drift": None,
+            "inferred_schema": None,
+            "response_schema": None,
         }
 
     except Exception as e:
@@ -759,4 +820,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "state_updates": {},
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
+            "schema_drift": None,
+            "inferred_schema": None,
+            "response_schema": None,
         }

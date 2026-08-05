@@ -9,7 +9,7 @@ logger = logging.getLogger("qaclan.collection_run_repo")
 
 def _deser_result(row: dict) -> dict:
     out = dict(row)
-    for key in ("response_headers", "assertion_results"):
+    for key in ("response_headers", "assertion_results", "schema_drift"):
         if isinstance(out.get(key), str):
             try:
                 out[key] = json.loads(out[key])
@@ -86,12 +86,13 @@ class CollectionRunRepo:
         rid = generate_id("arreq")
         resp_headers = result.get("response_headers")
         assert_results = result.get("assertion_results")
+        schema_drift = result.get("schema_drift")
         conn.execute(
             "INSERT INTO api_request_results "
             "(id, collection_run_id, api_request_id, request_name, method, url, order_index, "
             "status, status_code, response_body, response_headers, duration_ms, "
-            "assertion_results, error_message, started_at, finished_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "assertion_results, error_message, started_at, finished_at, schema_drift) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 rid, collection_run_id, req["id"], req.get("name", ""), req.get("method"),
                 result.get("url") or req.get("url", ""),
@@ -104,6 +105,7 @@ class CollectionRunRepo:
                 result.get("error_message"),
                 result.get("started_at"),
                 result.get("finished_at"),
+                json.dumps(schema_drift) if schema_drift is not None else None,
             ),
         )
         conn.commit()
@@ -143,7 +145,7 @@ class CollectionRunRepo:
         result_rows = conn.execute(
             "SELECT id, api_request_id, request_name, method, url, order_index, "
             "status, status_code, response_body, response_headers, duration_ms, "
-            "assertion_results, error_message, started_at, finished_at "
+            "assertion_results, error_message, started_at, finished_at, schema_drift "
             "FROM api_request_results WHERE collection_run_id = ? ORDER BY order_index",
             (run_id,),
         ).fetchall()

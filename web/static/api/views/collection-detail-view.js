@@ -429,6 +429,49 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
       _refreshKnownVarNames();
     });
 
+    // ── Schema Check tab ──
+    function _buildSchemaTab(wrap) {
+      wrap.className = 'sc-panel';
+      wrap.style.cssText = '';
+      wrap.innerHTML = `
+        <p class="sc-desc">Default for every request in this collection.
+          Changing it <strong>resets all per-request overrides</strong> so each request follows this setting —
+          you can override an individual request afterward.</p>
+        <div class="sc-row">
+          <div class="sc-row__label">Default for all requests</div>
+          <div class="sc-row__body">
+            <div class="sc-seg" role="group" aria-label="Collection schema-check default">
+              <button type="button" class="sc-seg__btn" data-val="on">On</button>
+              <button type="button" class="sc-seg__btn" data-val="off">Off</button>
+            </div>
+            <div class="sc-row__hint">On — every request is checked. Off — none are, unless a request is individually turned on.</div>
+          </div>
+        </div>`;
+
+      const seg = wrap.querySelector('.sc-seg');
+      function paint() {
+        const cur = col.schema_check_default || 'off';
+        seg.querySelectorAll('.sc-seg__btn').forEach(b =>
+          b.classList.toggle('is-active', b.dataset.val === cur));
+      }
+      seg.querySelectorAll('.sc-seg__btn').forEach(b => {
+        b.onclick = async () => {
+          const val = b.dataset.val;
+          if ((col.schema_check_default || 'off') === val) return;
+          const msg = `Turn schema check ${val === 'on' ? 'On' : 'Off'} for every request in “${col.name}”? `
+            + 'This resets all per-request overrides.';
+          const ok = await (window._confirmDialog
+            ? window._confirmDialog(msg)
+            : Promise.resolve(window.confirm(msg)));
+          if (!ok) return;
+          col.schema_check_default = val;
+          paint();
+          await window.api('PATCH', `/collections/${col.id}`, { schema_check_default: val });
+        };
+      });
+      paint();
+    }
+
     // Tabs
     const tabsEl = document.getElementById('cdv-tabs');
     const contentEl = document.getElementById('cdv-tab-content');
@@ -436,6 +479,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     const TABS = [
       { id: 'auth', label: 'Auth', build: _buildAuthTab },
       { id: 'vars', label: 'Variables', build: _buildVarsTab },
+      { id: 'schema', label: 'Schema Check', build: _buildSchemaTab },
     ];
 
     let _activeTab = null;

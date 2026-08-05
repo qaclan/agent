@@ -3,7 +3,7 @@ env/
 dist/
 __pycache__/
 .claude/
-openspec/
+# openspec/
 # Environment variables & secrets
 .env
 .env.*
@@ -46,14 +46,14 @@ docker-compose.override.yml
 
 # Claude Code
 .claude/
-openspec/
+#openspec/
 .venv/
 venv/l overrides)
 docker-compose.override.yml
 
 # Claude Code
 .claude/
-openspec/
+#openspec/
 .venv/
 venv/ 
 test-results/
