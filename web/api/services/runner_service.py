@@ -38,6 +38,37 @@ def _resolve_auth(req: dict, col: dict | None) -> dict:
     return resolved
 
 
+def _resolve_schema_check(req: dict, col: dict | None) -> bool:
+    """Effective schema-check enablement: request override wins, else collection default.
+
+    Override is 'inherit' | 'on' | 'off'; collection default is 'on' | 'off'.
+    Resolved per run — nothing is copied to request rows on a collection flip.
+    """
+    override = req.get("schema_check") or "inherit"
+    if override in ("on", "off"):
+        return override == "on"
+    return ((col or {}).get("schema_check_default") or "off") == "on"
+
+
+def _maybe_capture_baseline(request_id: str, baseline, result: dict):
+    """Capture the first successful JSON response as the frozen response_schema
+    baseline — only when nothing is stored yet (baseline is None) and the
+    response was JSON with status < 400. Never overwrites an existing baseline
+    (that is what the explicit "Update response schema" action is for). Runs
+    regardless of whether the schema check is enabled, so the extractor picker
+    and Schema tab get populated on first send. Returns the effective baseline.
+    """
+    if baseline is not None:
+        return baseline
+    inferred = result.get("inferred_schema")
+    status_code = result.get("status_code") or 0
+    if inferred is not None and status_code < 400:
+        from web.api.repositories.request_repo import RequestRepo
+        RequestRepo().update(request_id, {"response_schema": inferred})
+        return inferred
+    return baseline
+
+
 class RunnerService:
     def run_request(self, request_id: str, project_id: str, env_name: str | None = None) -> dict:
         """Run a single api_request ad-hoc. Result is NOT stored in api_runs."""
@@ -66,7 +97,17 @@ class RunnerService:
             seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"])
         state: dict = {"qaclan_vars": seed_vars} if seed_vars else {}
 
-        result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
+        schema_check_enabled = _resolve_schema_check(req, col)
+        baseline_schema = req.get("response_schema")
+        result = run_api_request(
+            _resolve_auth(req, col), env_vars, state, state_path=None,
+            baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+        )
+
+        # Capture the first successful JSON response as the frozen baseline.
+        # Never overwrites an existing response_schema — it stays frozen so the
+        # drift check has a stable reference (updated only via set_response_schema).
+        _maybe_capture_baseline(request_id, baseline_schema, result)
 
         # Persist extracted vars back to collection_vars so subsequent single sends see them
         if result.get("state_updates") and req.get("collection_id"):
@@ -75,15 +116,30 @@ class RunnerService:
             for key, value in result["state_updates"].items():
                 vars_repo.upsert(req["collection_id"], key, str(value))
 
-        # Refresh the stored response_schema from every successful run with a
-        # JSON body, so it self-corrects if the API shape changes. Leaves the
-        # existing stored schema alone when the response isn't JSON.
-        schema = _infer_response_schema(result.get("response_headers"), result.get("response_body"))
-        if schema is not None:
-            RequestRepo().update(request_id, {"response_schema": schema})
-            result["response_schema"] = schema
-
         return result
+
+    def set_response_schema(self, request_id: str, project_id: str,
+                            schema=None, response_body: str | None = None,
+                            response_headers: dict | None = None):
+        """Re-accept a response shape as the request's frozen response_schema
+        baseline — the "Update response schema" action.
+
+        Accepts an already-inferred `schema` (the UI passes the last send's
+        inferred shape) or falls back to inferring from a supplied response
+        body. Overwrites api_requests.response_schema. Returns the stored schema.
+        """
+        from web.api.repositories.request_repo import RequestRepo
+        repo = RequestRepo()
+        req = repo.get(request_id, project_id)
+        if req is None:
+            raise LookupError(f"Request {request_id} not found")
+        if schema is None and response_body is not None:
+            schema = _infer_response_schema(
+                response_headers or {"content-type": "application/json"}, response_body)
+        if schema is None:
+            raise ValueError("No JSON response available to save as the response schema")
+        repo.update(request_id, {"response_schema": schema})
+        return schema
 
     def start_collection_run(self, collection_id: str, project_id: str,
                               env_name: str | None = None,
@@ -166,7 +222,13 @@ class RunnerService:
                     final_status = "STOPPED"
                     break
                 run_repo.update_current_index(run_id, idx)
-                result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
+                schema_check_enabled = _resolve_schema_check(req, col)
+                baseline_schema = req.get("response_schema")
+                result = run_api_request(
+                    _resolve_auth(req, col), env_vars, state, state_path=None,
+                    baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+                )
+                _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append(result)
                 run_repo.create_request_result(run_id, req, result, idx)
                 # Persist extracted/script vars so subsequent requests and future runs see them
@@ -231,7 +293,13 @@ class RunnerService:
         results = []
         try:
             for idx, req in enumerate(requests):
-                result = run_api_request(_resolve_auth(req, col), env_vars, state, state_path=None)
+                schema_check_enabled = _resolve_schema_check(req, col)
+                baseline_schema = req.get("response_schema")
+                result = run_api_request(
+                    _resolve_auth(req, col), env_vars, state, state_path=None,
+                    baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+                )
+                _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append({
                     "request_id": req["id"],
                     "name": req["name"],

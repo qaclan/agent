@@ -28,6 +28,7 @@ _DEFAULTS = {
     "post_extractor": "[]",
     "request_schema": None,
     "response_schema": None,
+    "schema_check": "inherit",
     "assertions": "[]",
     "follow_redirects": 1,
     "timeout_ms": 30000,
@@ -112,9 +113,9 @@ class RequestRepo:
         conn.execute(
             "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, order_index, name, method, url, "
             "headers, params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
-            "post_script, post_lang, post_extractor, request_schema, response_schema, "
+            "post_script, post_lang, post_extractor, request_schema, response_schema, schema_check, "
             "assertions, follow_redirects, timeout_ms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, project_id,
              merged.get("feature_id"), collection_id, folder_id, order_index,
              merged.get("name", "Unnamed"), merged["method"], merged["url"],
@@ -124,6 +125,7 @@ class RequestRepo:
              merged["pre_script"], merged["pre_lang"], merged["pre_extractor"],
              merged["post_script"], merged["post_lang"], merged["post_extractor"],
              merged.get("request_schema"), merged.get("response_schema"),
+             merged.get("schema_check", "inherit"),
              merged["assertions"], merged["follow_redirects"], merged["timeout_ms"],
              now),
         )
@@ -138,6 +140,7 @@ class RequestRepo:
                   "body_form", "body_multipart", "body_graphql",
                   "auth_type", "auth_config", "pre_script", "pre_lang", "pre_extractor", "post_script",
                   "post_lang", "post_extractor", "request_schema", "response_schema",
+                  "schema_check",
                   "assertions", "follow_redirects", "timeout_ms",
                   "feature_id", "collection_id", "folder_id"]
         updates = {f: s[f] for f in fields if f in s}

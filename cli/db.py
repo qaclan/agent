@@ -155,6 +155,37 @@ def init_db():
     _migrate_api_cloud_id(conn)
     _migrate_collection_var_secret(conn)
     _migrate_request_body_columns(conn)
+    _migrate_api_schema_check(conn)
+
+
+def _migrate_api_schema_check(conn):
+    """Response-schema drift detection columns.
+
+    The drift baseline reuses the existing `response_schema` column: it is
+    captured on the first successful JSON response (or seeded by HAR/discovery
+    import) and then kept frozen — updated only via the "Update response schema"
+    action, never auto-overwritten on every send. See design.md / Decision 2 and
+    docs/api-schema-check-reference.md.
+
+    - api_requests.schema_check: tri-state override 'inherit' | 'on' | 'off'.
+    - api_collections.schema_check_default: 'on' | 'off' collection default.
+    - api_request_results.schema_drift / api_runs.schema_drift: persisted drift
+      verdict (JSON) per run.
+    """
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN schema_check TEXT DEFAULT 'inherit'")
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN schema_check_default TEXT DEFAULT 'off'")
+    except Exception:
+        pass
+    for table in ("api_request_results", "api_runs"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN schema_drift TEXT DEFAULT NULL")
+        except Exception:
+            pass
+    conn.commit()
 
 
 def _migrate_collection_run_progress(conn):

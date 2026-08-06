@@ -126,6 +126,79 @@ def _render_headers_table(headers) -> str:
     return f'<table style="width:100%;border-collapse:collapse"><tbody>{rows}</tbody></table>'
 
 
+def _drift_sign(kind: str) -> str:
+    if kind == "removed":
+        return "−"  # minus
+    if kind == "added":
+        return "+"
+    return "~"  # type-changed / became-nullable / element-type-changed
+
+
+def _drift_type_text(d: dict) -> str:
+    from_t = d.get("expected_type")
+    to_t = d.get("actual_type")
+    frm = "" if from_t is None else str(from_t)
+    to = "" if to_t is None else str(to_t)
+    kind = d.get("kind")
+    if kind == "removed":
+        return frm
+    if kind == "added":
+        return to
+    return f"{frm or '?'} → {to or 'null'}"
+
+
+def _render_schema_drift(drift) -> str:
+    """Render the schema-drift changes block — Option A (plain-words, grouped),
+    mirroring web/static/api/components/schema-diff-view.js. Returns '' when
+    there is nothing to show."""
+    if not isinstance(drift, dict):
+        return ""
+    diffs = drift.get("differences") or []
+    if not diffs:
+        return ""
+    brk = drift.get("breaking_count") or 0
+    add = drift.get("additive_count") or 0
+
+    def _row(d: dict, color: str) -> str:
+        return (
+            '<div style="display:flex;align-items:baseline;gap:8px;padding:1px 0;'
+            'font-family:monospace;font-size:12px">'
+            f'<span style="color:{color};flex:none;width:10px;text-align:center;'
+            f'font-weight:700">{_drift_sign(d.get("kind") or "")}</span>'
+            f'<span style="flex:1;min-width:0;word-break:break-all">{_esc(d.get("path") or "")}</span>'
+            f'<span style="color:#57606a;font-size:11px;flex:none;white-space:nowrap">'
+            f'{_esc(_drift_type_text(d))}</span>'
+            '</div>'
+        )
+
+    def _group(label: str, color: str, rows: list) -> str:
+        if not rows:
+            return ""
+        return (
+            f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.05em;color:{color};margin:8px 0 2px">{label}</div>'
+            + "".join(rows)
+        )
+
+    breaking_rows = [_row(d, "#cf222e") for d in diffs if d.get("severity") == "breaking"]
+    added_rows = [_row(d, "#9a6700") for d in diffs if d.get("severity") != "breaking"]
+    parts = []
+    if brk:
+        parts.append(f"{brk} breaking")
+    if add:
+        parts.append(f"{add} added")
+    return (
+        '<div style="margin-bottom:14px">'
+        '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Schema Drift</div>'
+        f'<div style="font-size:11px;color:#57606a;margin-bottom:2px">'
+        f'Schema changed — {", ".join(parts)}</div>'
+        + _group("Breaking", "#cf222e", breaking_rows)
+        + _group("Added", "#9a6700", added_rows)
+        + '</div>'
+    )
+
+
 def _render_request_rows(request_results: list) -> str:
     rows = []
     for i, rr in enumerate(request_results):
@@ -139,6 +212,18 @@ def _render_request_rows(request_results: list) -> str:
         duration_ms = rr.get("duration_ms")
         assertions = rr.get("assertion_results") or []
         error_msg = rr.get("error_message")
+        drift = rr.get("schema_drift")
+        drift_diffs = drift.get("differences") if isinstance(drift, dict) else None
+        drift_breaking = (drift.get("breaking_count") or 0) if isinstance(drift, dict) else 0
+        drift_pill = ""
+        if drift_diffs:
+            _dc = "#cf222e" if drift_breaking else "#9a6700"
+            _dbg = "rgba(207,34,46,.10)" if drift_breaking else "rgba(154,103,0,.10)"
+            drift_pill = (
+                f'<span style="margin-left:8px;background:{_dbg};color:{_dc};font-size:10px;'
+                f'font-weight:600;padding:1px 6px;border-radius:4px" title="Response schema drift">'
+                f'schema Δ {len(drift_diffs)}</span>'
+            )
 
         passed_count = sum(1 for a in assertions if a.get("passed"))
         total_count = len(assertions)
@@ -188,6 +273,7 @@ def _render_request_rows(request_results: list) -> str:
             f'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Assertions</div>'
             f'{_render_assertions(assertions)}'
             f'</div>'
+            f'{_render_schema_drift(drift)}'
             f'<div style="margin-bottom:14px">'
             f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Response Headers</div>'
@@ -210,7 +296,7 @@ def _render_request_rows(request_results: list) -> str:
             f'<span style="display:inline-block;background:{method_color};color:#fff;'
             f'font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;'
             f'min-width:50px;text-align:center">{_esc(method)}</span></td>'
-            f'<td style="padding:10px 12px;font-size:13px;font-weight:500">{name}</td>'
+            f'<td style="padding:10px 12px;font-size:13px;font-weight:500">{name}{drift_pill}</td>'
             f'<td style="padding:10px 12px;font-size:11px;font-family:monospace;'
             f'color:#57606a;max-width:260px;overflow:hidden;text-overflow:ellipsis;'
             f'white-space:nowrap" title="{url}">{url}</td>'
@@ -329,7 +415,7 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
     result_rows = conn.execute(
         "SELECT id, request_name, method, url, status, status_code, "
         "response_body, response_headers, duration_ms, assertion_results, "
-        "error_message, started_at, finished_at "
+        "error_message, started_at, finished_at, schema_drift "
         "FROM api_request_results WHERE collection_run_id = ? ORDER BY order_index",
         (run_id,),
     ).fetchall()
@@ -337,7 +423,7 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
     request_results = []
     for r in result_rows:
         rr = dict(r)
-        for key in ("response_headers", "assertion_results"):
+        for key in ("response_headers", "assertion_results", "schema_drift"):
             if isinstance(rr.get(key), str):
                 try:
                     rr[key] = json.loads(rr[key])
@@ -363,11 +449,18 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
         f"Duration: {duration}"
     )
 
+    drift_count = sum(
+        1 for rr in request_results
+        if isinstance(rr.get("schema_drift"), dict)
+        and (rr["schema_drift"].get("breaking_count") or 0) > 0
+    )
+
     stats = (
         _stat_card(total, "Total")
         + _stat_card(passed, "Passed", "#1a7f37")
         + _stat_card(failed, "Failed", "#cf222e")
         + (_stat_card(error_count, "Errors", "#9a6700") if error_count else "")
+        + (_stat_card(drift_count, "Schema Drift", "#cf222e") if drift_count else "")
         + _stat_card(f"{passrate}%", "Pass Rate")
         + _stat_card(duration, "Duration")
     )

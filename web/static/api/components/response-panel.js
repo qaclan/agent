@@ -141,6 +141,48 @@ export function createResponsePanel(opts = {}) {
     contentArea.appendChild(body);
   }
 
+  let _diffView = 'changes'; // 'changes' | 'expected' | 'current'
+
+  function _renderSchemaDiff(drift) {
+    contentArea.innerHTML = '';
+    const diffs = (drift && drift.differences) || [];
+
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border-subtle,var(--border));gap:8px;flex-wrap:wrap;';
+    const title = document.createElement('span');
+    title.style.cssText = 'font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;';
+    title.textContent = 'Schema Diff';
+    const toggle = _mkPillGroup(
+      [['Changes','changes'],['Expected','expected'],['Current','current']],
+      _diffView, v => { _diffView = v; _renderSchemaDiff(drift); });
+    header.appendChild(title);
+    header.appendChild(toggle);
+    contentArea.appendChild(header);
+
+    const body = document.createElement('div');
+    body.style.cssText = 'padding:8px 10px;font-size:12px;overflow:auto;';
+
+    if (_diffView === 'expected' || _diffView === 'current') {
+      const schema = _diffView === 'expected' ? drift.expected : drift.current;
+      if (schema && typeof schema === 'object') {
+        body.appendChild(_renderSchemaTree(schema, ''));
+      } else {
+        body.innerHTML = '<p class="text-muted text-sm" style="padding:6px 0">No schema available.</p>';
+      }
+      contentArea.appendChild(body);
+      return;
+    }
+
+    if (!diffs.length) {
+      body.innerHTML = '<p class="text-muted text-sm" style="padding:6px 0">No differences — response matches the expected shape.</p>';
+      contentArea.appendChild(body);
+      return;
+    }
+
+    body.innerHTML = window.qcSchemaDiffHtml ? window.qcSchemaDiffHtml(drift) : '';
+    contentArea.appendChild(body);
+  }
+
   function _renderBody() {
     if (!_currentResult) return;
     const r = _currentResult;
@@ -183,6 +225,10 @@ export function createResponsePanel(opts = {}) {
     } else if (tab === 'response-schema') {
       const schema = r.response_schema || _storedSchema;
       if (schema) _renderSchemaSection(schema);
+      return;
+
+    } else if (tab === 'schema-diff') {
+      _renderSchemaDiff(r.schema_drift || {});
       return;
 
     } else if (tab === 'headers') {
@@ -291,6 +337,14 @@ export function createResponsePanel(opts = {}) {
     tabBar.appendChild(_renderTab('Headers', 'headers', false));
     tabBar.appendChild(_renderTab(`Assertions (${assertPass}/${assertCount})`, 'assertions', false));
     if (hasSchema) tabBar.appendChild(_renderTab('Schema', 'response-schema', defaultTab === 'response-schema'));
+    const _drift = result.schema_drift;
+    const _driftCount = (_drift && _drift.differences || []).length;
+    if (_driftCount) {
+      const _brk = _drift.breaking_count || 0;
+      const diffTab = _renderTab(`Schema Diff (${_driftCount})`, 'schema-diff', false);
+      diffTab.style.color = _brk ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)';
+      tabBar.appendChild(diffTab);
+    }
     const _varCount = Object.keys(result.state_updates || {}).length;
     if (_varCount) tabBar.appendChild(_renderTab(`Variables (${_varCount})`, 'vars', false));
 
