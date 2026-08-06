@@ -12,10 +12,13 @@ the `schema_check` / `schema_check_default` / `schema_drift` columns and the
 baseline reuse of `response_schema` in [cli/db.py](../cli/db.py), their storage
 in the repositories (`request_repo.py`, `collection_repo.py`,
 `collection_run_repo.py`, `api_run_repo.py`), the sync mapping (`cli/sync.py`,
-`cli/commands/pull.py`), or the UI (`web/static/api/components/response-panel.js`,
+`cli/commands/pull.py`), or the UI (the shared renderer
+`web/static/api/components/schema-diff-view.js`,
+`web/static/api/components/response-panel.js`,
 `web/static/api/views/request-editor-view.js`, `collection-detail-view.js`,
-`collection-run-view.js`, `cli/api_report.py`) — must be reflected in this doc
-in the same change.
+`collection-run-view.js`, the Runs history modal in `web/static/app.js`, and the
+downloadable report in `cli/api_report.py`) — must be reflected in this doc in
+the same change.
 Grep for `schema_check\|response_schema\|schema_drift\|diff_schemas` if unsure
 whether a touched file is in scope.
 
@@ -94,10 +97,17 @@ Computed in `cli/schema_diff.py::diff_schemas`.
 | Field in current, absent in baseline | `added` | additive | notify only, run stays green |
 | Either side is `"?"`, `"..."`, or `["?"]` | — | none | wildcard — never reported |
 
-A run **fails** when `breaking_count > 0`. Additive-only, first-capture, and
-non-JSON never change the verdict. A schema-check failure is kept **separate**
-from `assertion_results` so it is distinguishable — the signal lives in
-`schema_drift`, and the run status flips to `FAILED`.
+A run **fails** when `breaking_count > 0`. Additive-only, first-capture,
+non-JSON, and error-status runs never change the verdict. A schema-check failure
+is kept **separate** from `assertion_results` so it is distinguishable — the
+signal lives in `schema_drift`, and the run status flips to `FAILED`.
+
+**Error responses are skipped.** The drift check only runs on a **successful**
+response (`status_code < 400`) — the same guard used for baseline capture. A
+non-2xx/3xx response carries a different shape (an error envelope, not the
+success payload), so diffing it against the success baseline would be pure noise;
+those runs report `skipped_reason: "error-status"` and show no drift. The request
+still fails on its own merits (HTTP status / assertions), just not for schema.
 
 ## `schema_drift` shape
 
@@ -108,7 +118,7 @@ Attached to the run result and persisted (JSON) on `api_request_results` and
 {
   "checked": true,
   "verdict": "pass | fail | skipped",
-  "skipped_reason": "disabled | non-json | first-capture | null",
+  "skipped_reason": "disabled | non-json | first-capture | error-status | null",
   "breaking_count": 2,
   "additive_count": 1,
   "worst_severity": "breaking | additive | none",
@@ -133,22 +143,43 @@ keys and `[]` for array elements (e.g. `data.items[].id`). `expected_type` /
 
 ## UI surfaces
 
+Every live surface shares **one renderer**,
+`web/static/api/components/schema-diff-view.js` (a classic script loaded in
+`index.html` before `app.js`), exposing `window.qcSchemaDiffHtml(drift)` (the
+grouped changes block) and `window.qcSchemaDriftPill(drift)` (the compact
+`schema Δ N` row pill). The downloadable report reproduces the identical layout
+in `cli/api_report.py::_render_schema_drift`.
+
+**Layout — plain-words, grouped, dense (one line per change):** a
+`Schema changed — N breaking, M added` summary line, then a **Breaking** group
+(red) and an **Added** group (amber). Each row is `sign  path  type` where the
+sign is `−` removed / `~` type-changed (covers type-changed, became-nullable,
+element-type-changed) / `+` added, and the type note is the lost type (removed),
+the new type (added), or `old → new` (a type change). No `∅` / arrow-to-nothing
+glyphs and no legend — the group headers and sign colors carry the severity.
+
 - **Schema Diff tab** (`response-panel.js`): shown when `differences` is
-  non-empty. Views: *Changes* (per-difference list, breaking red / additive
-  amber), *Expected* tree, *Current* tree.
-- **Drift banner** (`request-editor-view.js`): appears after a send that drifted
-  — count + worst severity, pointing to the Schema Diff and Schema Check tabs.
+  non-empty. Sub-views: *Changes* (the shared grouped block), *Expected* tree,
+  *Current* tree.
+- **Drift banner** (`request-editor-view.js`): one quiet line after a drifted
+  send — `Schema drift — run failed. N breaking, M added. See the Schema Diff
+  tab.` (breaking) or the run-still-passed variant (additive only). It does not
+  offer to change the baseline.
 - **Schema Check tab** (`request-editor-view.js`): the tri-state override (with
   the resolved effective state and its source) and the **Update response
-  schema** button + a Captured / Not captured badge.
+  schema** button + a Captured / Not captured badge. This tab is the only place
+  the baseline is changed.
 - **Collection detail → Schema Check tab** (`collection-detail-view.js`): the
   collection default toggle.
-- **Collection run rows** (`collection-run-view.js`): a `schema Δ/⚠ N` pill per
-  row and a "Schema drift" list in the expanded detail.
+- **Collection run rows** (`collection-run-view.js`): a `schema Δ N` pill per
+  row and the shared grouped block in the expanded detail.
+- **Runs history modal** (`web/static/app.js`): the same `schema Δ N` pill per
+  request row and the shared grouped block in the expanded detail.
 - **HTML report** (`cli/api_report.py`, `GET /api/api-collection-runs/<id>/report`):
-  a per-request `schema Δ/⚠ N` pill, a "Schema Drift" block (breaking/additive,
-  per-field changes) in the expanded detail, and a "Schema Drift" summary stat
-  card counting requests with breaking drift.
+  a per-request `schema Δ N` pill, the same grouped block in the expanded
+  detail, and a "Schema Drift" summary stat card counting requests with breaking
+  drift. Read-only — no "update response schema" affordance in any report or run
+  view.
 
 ## Cloud sync (agent → server)
 

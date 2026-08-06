@@ -1673,7 +1673,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Schema Check section (response-schema drift detection) ──
   let _schemaCheck = r.schema_check || 'inherit';   // 'inherit' | 'on' | 'off'
-  let _lastResult = null;                            // last send result (for Update expected)
+  let _lastResult = null;                            // last send result (for Update response schema)
   let _collectionSchemaDefault = null;               // fetched lazily for the effective label
 
   function makeSchemaCheckSection() {
@@ -1834,10 +1834,10 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     driftBanner.style.color = breaking ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)';
     const parts = [];
     if (brk) parts.push(`${brk} breaking`);
-    if (add) parts.push(`${add} additive`);
-    const verb = breaking ? '⚠ Response schema drift — request failed' : '⚠ Response schema drift';
-    driftBanner.innerHTML = `<strong>${verb}.</strong> ${parts.join(', ')} change${drift.differences.length === 1 ? '' : 's'}. `
-      + `Open the <strong>Schema Diff</strong> tab to compare. If expected, click <strong>Update expected</strong> in the Schema Check tab.`;
+    if (add) parts.push(`${add} added`);
+    driftBanner.innerHTML = breaking
+      ? `<strong>Schema drift — run failed.</strong> ${parts.join(', ')}. See the Schema Diff tab.`
+      : `<strong>Schema drift.</strong> ${parts.join(', ')}. Run still passed. See the Schema Diff tab.`;
   }
 
   // ── Send ── (always saves first so extractor/scripts changes take effect)

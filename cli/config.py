@@ -37,7 +37,7 @@ def set_active_project_id(project_id):
     _write_config(cfg)
 
 
-DEFAULT_SERVER_URL = os.environ.get("QACLAN_SERVER_URL", "https://qaclan.com")
+DEFAULT_SERVER_URL = "https://qaclan.com"
 
 def get_auth_key():
     cfg = _read_config()
@@ -68,6 +68,11 @@ def set_user_name(name):
 
 
 def get_server_url():
+    # QACLAN_SERVER_URL always wins — a dev override with no config edit and no
+    # persistence. Falls back to the login-written config, then the default.
+    env = os.environ.get("QACLAN_SERVER_URL")
+    if env:
+        return env
     cfg = _read_config()
     return cfg.get("server_url", DEFAULT_SERVER_URL)
 

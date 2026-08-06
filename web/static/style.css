@@ -2109,7 +2109,7 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .sc-state.is-on .sc-state__dot { background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
 .sc-state__src { color: var(--text-muted); }
 
-/* Ghost button (Update expected) */
+/* Ghost button (Update response schema) */
 .sc-btn-ghost {
   appearance: none; font: inherit; font-size: 12.5px; font-weight: 500;
   color: var(--text-secondary); background: transparent;

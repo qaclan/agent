@@ -143,12 +143,6 @@ export function createResponsePanel(opts = {}) {
 
   let _diffView = 'changes'; // 'changes' | 'expected' | 'current'
 
-  const _SEV_COLOR = { breaking: 'var(--danger,#ef4444)', additive: 'var(--warning,#f59e0b)' };
-  const _KIND_LABEL = {
-    removed: 'removed', added: 'added', 'type-changed': 'type changed',
-    'became-nullable': 'became nullable', 'element-type-changed': 'element type changed',
-  };
-
   function _renderSchemaDiff(drift) {
     contentArea.innerHTML = '';
     const diffs = (drift && drift.differences) || [];
@@ -157,8 +151,7 @@ export function createResponsePanel(opts = {}) {
     header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border-subtle,var(--border));gap:8px;flex-wrap:wrap;';
     const title = document.createElement('span');
     title.style.cssText = 'font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;';
-    const brk = drift.breaking_count || 0, add = drift.additive_count || 0;
-    title.textContent = brk ? `Schema Diff · ${brk} breaking` : add ? `Schema Diff · ${add} additive` : 'Schema Diff';
+    title.textContent = 'Schema Diff';
     const toggle = _mkPillGroup(
       [['Changes','changes'],['Expected','expected'],['Current','current']],
       _diffView, v => { _diffView = v; _renderSchemaDiff(drift); });
@@ -186,33 +179,7 @@ export function createResponsePanel(opts = {}) {
       return;
     }
 
-    // Legend
-    const legend = document.createElement('div');
-    legend.style.cssText = 'display:flex;gap:14px;margin-bottom:8px;font-size:10px;color:var(--text-muted);';
-    legend.innerHTML =
-      `<span><span style="color:${_SEV_COLOR.breaking}">●</span> breaking → fails run</span>` +
-      `<span><span style="color:${_SEV_COLOR.additive}">●</span> additive → notify only</span>`;
-    body.appendChild(legend);
-
-    diffs.forEach(d => {
-      const color = _SEV_COLOR[d.severity] || 'var(--text-muted)';
-      const row = document.createElement('div');
-      row.style.cssText = `display:flex;align-items:center;gap:8px;padding:4px 8px;margin:3px 0;`
-        + `border-left:3px solid ${color};background:var(--bg-elevated);border-radius:3px;`;
-      const badge = document.createElement('span');
-      badge.style.cssText = `font-size:10px;font-weight:600;color:${color};text-transform:uppercase;min-width:118px;`;
-      badge.textContent = _KIND_LABEL[d.kind] || d.kind;
-      const pathSpan = document.createElement('span');
-      pathSpan.style.cssText = 'font-family:var(--font-mono);font-size:12px;flex:1;';
-      pathSpan.textContent = d.path;
-      const types = document.createElement('span');
-      types.style.cssText = 'font-size:11px;color:var(--text-muted);font-family:var(--font-mono);';
-      const from = d.expected_type == null ? '∅' : d.expected_type;
-      const to = d.actual_type == null ? '∅' : d.actual_type;
-      types.textContent = `${from} → ${to}`;
-      row.appendChild(badge); row.appendChild(pathSpan); row.appendChild(types);
-      body.appendChild(row);
-    });
+    body.innerHTML = window.qcSchemaDiffHtml ? window.qcSchemaDiffHtml(drift) : '';
     contentArea.appendChild(body);
   }
 
@@ -374,9 +341,8 @@ export function createResponsePanel(opts = {}) {
     const _driftCount = (_drift && _drift.differences || []).length;
     if (_driftCount) {
       const _brk = _drift.breaking_count || 0;
-      const _dot = _brk ? ' ⚠' : '';
-      const diffTab = _renderTab(`Schema Diff (${_driftCount})${_dot}`, 'schema-diff', false);
-      if (_brk) diffTab.style.color = 'var(--danger,#ef4444)';
+      const diffTab = _renderTab(`Schema Diff (${_driftCount})`, 'schema-diff', false);
+      diffTab.style.color = _brk ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)';
       tabBar.appendChild(diffTab);
     }
     const _varCount = Object.keys(result.state_updates || {}).length;

@@ -4772,7 +4772,7 @@ async function viewApiRunModal(runId) {
       tr.innerHTML = `
         <td style="padding:9px 10px;font-size:12px;color:var(--text-muted,#888);">${rowIdx + 1}</td>
         <td style="padding:9px 10px;"><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
-        <td style="padding:9px 10px;font-size:13px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(rr.request_name || '')}</td>
+        <td style="padding:9px 10px;font-size:13px;max-width:300px;"><div style="display:flex;align-items:center;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(rr.request_name || '')}</span>${window.qcSchemaDriftPill ? window.qcSchemaDriftPill(rr.schema_drift) : ''}</div></td>
         <td style="padding:9px 10px;"><span style="font-size:11px;font-weight:700;color:${sc}">${rr.status || 'ERROR'}</span></td>
         <td style="padding:9px 10px;">${_codeSpan(rr.status_code)}</td>
         <td style="padding:9px 10px;">${_durSpan(rr.duration_ms)}</td>
@@ -4843,6 +4843,17 @@ async function viewApiRunModal(runId) {
           aDiv.textContent = text
           detDiv.appendChild(aDiv)
         })
+      }
+
+      // Schema drift
+      if (rr.schema_drift && Array.isArray(rr.schema_drift.differences) && rr.schema_drift.differences.length && window.qcSchemaDiffHtml) {
+        const dLbl = document.createElement('div')
+        dLbl.style.cssText = 'font-weight:600;color:var(--text-secondary,#444);margin-top:10px;margin-bottom:4px;'
+        dLbl.textContent = 'Schema drift'
+        detDiv.appendChild(dLbl)
+        const dWrap = document.createElement('div')
+        dWrap.innerHTML = window.qcSchemaDiffHtml(rr.schema_drift)
+        detDiv.appendChild(dWrap)
       }
 
       // Response body

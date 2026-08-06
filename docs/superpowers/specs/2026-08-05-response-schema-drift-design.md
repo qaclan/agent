@@ -35,7 +35,7 @@ model while staying local-first and non-disruptive by default.
 | Capture? | Import-as-baseline, or capture first successful JSON response; frozen after; manual "Update response schema" to re-accept. |
 | Enablement? | Tri-state request override + collection default, resolved at run time. The collection default is a master switch — changing it resets all request overrides to `inherit` (global overwrites all). |
 | Where computed? | Inside `run_api_request` (shared by single/collection/suite runs); orchestration + capture in `runner_service`. |
-| Comparison UI? | Inline "Schema Diff" tab in the response panel (Changes / Expected / Current). |
+| Comparison UI? | Inline "Schema Diff" tab in the response panel (Changes / Expected / Current). One shared renderer (`web/static/api/components/schema-diff-view.js`) drives every surface — editor tab, collection run, Runs modal, and the download report — in a plain-words grouped layout (Breaking/Added, one line per change, no `∅`/legend). |
 
 ## Data Model
 
