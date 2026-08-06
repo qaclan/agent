@@ -80,3 +80,13 @@
 - [x] 11.6 UI: "Update expected" → "Update response schema"; badge reads `response_schema`; first-send capture mirrors locally.
 - [x] 11.7 Update all artifacts + docs (proposal/spec/design/tasks, superpowers, reference doc, CLAUDE.md) to the frozen-`response_schema` model.
 - [x] 11.8 Sync `schema_drift` on run results agent→server: add it to `sync_api_collection_run_to_cloud` (collection-run request_results) and `_gather_api_run_results` (suite api_results) payloads in `cli/sync.py`.
+
+## 12. Diff UI redesign (Option A — plain-words, grouped, dense; one shared renderer)
+
+- [x] 12.1 Add shared renderer `web/static/api/components/schema-diff-view.js` (classic script, `window.qcSchemaDiffHtml` + `window.qcSchemaDriftPill`); include it in `index.html` before `app.js`. Layout: `Schema changed — N breaking, M added` summary, **Breaking**(red)/**Added**(amber) groups, one-line rows `sign path type` (`−`/`~`/`+`), no `∅`/legend.
+- [x] 12.2 `response-panel.js`: Changes sub-view uses the shared renderer; drop the old legend + per-row list + dead `_SEV_COLOR`/`_KIND_LABEL`; de-shout the tab label (no `⚠`).
+- [x] 12.3 `collection-run-view.js`: row pill + detail block via the shared renderer.
+- [x] 12.4 `app.js` Runs history modal: add the pill per request row and the shared diff block in the expanded detail (previously absent).
+- [x] 12.5 `cli/api_report.py`: rewrite `_render_schema_drift` to the same grouped layout; drop dead `_KIND_LABELS`; de-triangle the row pill. No update-schema affordance (report is read-only).
+- [x] 12.6 `request-editor-view.js`: shrink the drift banner to one quiet line; drop the `⚠` and the stale "Update expected" call-to-action.
+- [x] 12.7 Reflect in `docs/api-schema-check-reference.md` (UI surfaces + file list), CLAUDE.md maintenance rule, design.md Decision 7, and the superpowers spec.

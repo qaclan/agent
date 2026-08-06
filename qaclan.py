@@ -262,6 +262,12 @@ def serve(port, host, no_browser):
 
     console = Console()
 
+    # Dev override guardrail: env-set server URL always wins (see config.get_server_url).
+    import os as _os
+    _srv_override = _os.environ.get("QACLAN_SERVER_URL")
+    if _srv_override:
+        console.print(f'[dim]using QACLAN_SERVER_URL override → {_srv_override}[/dim]')
+
     # Start the background sync-queue drainer (best-effort)
     from cli.config import get_auth_key
     if get_auth_key():

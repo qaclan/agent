@@ -78,7 +78,7 @@ Why here: `run_api_request` is the single path all run types share, so the pure 
 {
   "checked": true,
   "verdict": "pass | fail | skipped",
-  "skipped_reason": "disabled | non-json | first-capture | null",
+  "skipped_reason": "disabled | non-json | first-capture | error-status | null",
   "breaking_count": 2,
   "additive_count": 1,
   "worst_severity": "breaking | additive | none",
@@ -102,6 +102,8 @@ Persisted JSON-encoded in new `schema_drift` TEXT columns on `api_request_result
 - Collection detail (`web/static/api/views/collection-detail-view.js`): one "Schema check default" toggle writing `schema_check_default`.
 - Collection run (`web/static/api/views/collection-run-view.js:191-207`, `:282-287`): a per-row drift marker driven by the persisted `schema_drift.worst_severity`.
 - HTML report (`cli/api_report.py`): the report reads `api_request_results`, so it must select and deserialize the new `schema_drift` column and render a per-request drift pill, a "Schema Drift" detail block, and a summary stat card counting requests with breaking drift.
+
+**Rendering (Option A — plain-words, grouped, dense).** All live surfaces share one renderer, `web/static/api/components/schema-diff-view.js` (a classic script loaded before `app.js`, exposing `window.qcSchemaDiffHtml(drift)` and `window.qcSchemaDriftPill(drift)`); the download report mirrors the identical layout in `cli/api_report.py`. Each change is one line: a `Schema changed — N breaking, M added` summary, then a **Breaking** group (red) and an **Added** group (amber), rows `sign path type` where sign is `−` removed / `~` type-changed / `+` added and the type note is the lost type, the new type, or `old → new`. No `∅`/arrow-to-nothing glyphs and no legend — group headers + sign color carry severity. The Runs history modal (`web/static/app.js`) renders the same pill + block (previously it showed no drift at all). Reports and run views are read-only — the baseline is changed only from the editor's Schema Check tab. The send-handler drift banner is a single quiet line.
 
 ### 8. Sync
 

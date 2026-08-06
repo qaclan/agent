@@ -126,15 +126,31 @@ def _render_headers_table(headers) -> str:
     return f'<table style="width:100%;border-collapse:collapse"><tbody>{rows}</tbody></table>'
 
 
-_KIND_LABELS = {
-    "removed": "removed", "added": "added", "type-changed": "type changed",
-    "became-nullable": "became nullable", "element-type-changed": "element type changed",
-}
+def _drift_sign(kind: str) -> str:
+    if kind == "removed":
+        return "−"  # minus
+    if kind == "added":
+        return "+"
+    return "~"  # type-changed / became-nullable / element-type-changed
+
+
+def _drift_type_text(d: dict) -> str:
+    from_t = d.get("expected_type")
+    to_t = d.get("actual_type")
+    frm = "" if from_t is None else str(from_t)
+    to = "" if to_t is None else str(to_t)
+    kind = d.get("kind")
+    if kind == "removed":
+        return frm
+    if kind == "added":
+        return to
+    return f"{frm or '?'} → {to or 'null'}"
 
 
 def _render_schema_drift(drift) -> str:
-    """Render the schema-drift differences block for a request's detail row.
-    Returns '' when there is nothing to show."""
+    """Render the schema-drift changes block — Option A (plain-words, grouped),
+    mirroring web/static/api/components/schema-diff-view.js. Returns '' when
+    there is nothing to show."""
     if not isinstance(drift, dict):
         return ""
     diffs = drift.get("differences") or []
@@ -142,34 +158,44 @@ def _render_schema_drift(drift) -> str:
         return ""
     brk = drift.get("breaking_count") or 0
     add = drift.get("additive_count") or 0
-    items = []
-    for d in diffs:
-        breaking = d.get("severity") == "breaking"
-        color = "#cf222e" if breaking else "#9a6700"
-        from_t = d.get("expected_type")
-        to_t = d.get("actual_type")
-        from_s = "∅" if from_t is None else _esc(str(from_t))
-        to_s = "∅" if to_t is None else _esc(str(to_t))
-        items.append(
-            f'<div style="display:flex;gap:8px;align-items:center;padding:3px 0;font-size:12px">'
-            f'<span style="color:{color};font-weight:600;text-transform:uppercase;font-size:10px;'
-            f'min-width:118px">{_esc(_KIND_LABELS.get(d.get("kind"), d.get("kind") or ""))}</span>'
-            f'<span style="font-family:monospace;flex:1">{_esc(d.get("path") or "")}</span>'
-            f'<span style="color:#57606a;font-family:monospace;font-size:11px">{from_s} → {to_s}</span>'
-            f'</div>'
+
+    def _row(d: dict, color: str) -> str:
+        return (
+            '<div style="display:flex;align-items:baseline;gap:8px;padding:1px 0;'
+            'font-family:monospace;font-size:12px">'
+            f'<span style="color:{color};flex:none;width:10px;text-align:center;'
+            f'font-weight:700">{_drift_sign(d.get("kind") or "")}</span>'
+            f'<span style="flex:1;min-width:0;word-break:break-all">{_esc(d.get("path") or "")}</span>'
+            f'<span style="color:#57606a;font-size:11px;flex:none;white-space:nowrap">'
+            f'{_esc(_drift_type_text(d))}</span>'
+            '</div>'
         )
-    summary = []
+
+    def _group(label: str, color: str, rows: list) -> str:
+        if not rows:
+            return ""
+        return (
+            f'<div style="font-size:10px;font-weight:700;text-transform:uppercase;'
+            f'letter-spacing:.05em;color:{color};margin:8px 0 2px">{label}</div>'
+            + "".join(rows)
+        )
+
+    breaking_rows = [_row(d, "#cf222e") for d in diffs if d.get("severity") == "breaking"]
+    added_rows = [_row(d, "#9a6700") for d in diffs if d.get("severity") != "breaking"]
+    parts = []
     if brk:
-        summary.append(f'<span style="color:#cf222e;font-weight:700">{brk} breaking</span>')
+        parts.append(f"{brk} breaking")
     if add:
-        summary.append(f'<span style="color:#9a6700;font-weight:700">{add} additive</span>')
+        parts.append(f"{add} added")
     return (
-        f'<div style="margin-bottom:14px">'
-        f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
-        f'letter-spacing:.05em;color:#57606a;margin-bottom:6px">'
-        f'Schema Drift &nbsp; {" · ".join(summary)}</div>'
-        f'{"".join(items)}'
-        f'</div>'
+        '<div style="margin-bottom:14px">'
+        '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Schema Drift</div>'
+        f'<div style="font-size:11px;color:#57606a;margin-bottom:2px">'
+        f'Schema changed — {", ".join(parts)}</div>'
+        + _group("Breaking", "#cf222e", breaking_rows)
+        + _group("Added", "#9a6700", added_rows)
+        + '</div>'
     )
 
 
@@ -196,7 +222,7 @@ def _render_request_rows(request_results: list) -> str:
             drift_pill = (
                 f'<span style="margin-left:8px;background:{_dbg};color:{_dc};font-size:10px;'
                 f'font-weight:600;padding:1px 6px;border-radius:4px" title="Response schema drift">'
-                f'schema {"⚠" if drift_breaking else "Δ"} {len(drift_diffs)}</span>'
+                f'schema Δ {len(drift_diffs)}</span>'
             )
 
         passed_count = sum(1 for a in assertions if a.get("passed"))

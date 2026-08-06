@@ -751,7 +751,13 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         inferred_schema = _schema_from_response(response_headers, response_body)
         schema_drift = None
         if schema_check_enabled:
-            if inferred_schema is None:
+            success = status_code is not None and status_code < 400
+            if not success:
+                # Error responses carry a different shape (error envelope, not the
+                # success payload). Diffing that against the success baseline is
+                # pure noise, so skip — matches the <400 guard on baseline capture.
+                schema_drift = _schema_skipped("error-status")
+            elif inferred_schema is None:
                 schema_drift = _schema_skipped("non-json")
             elif baseline_schema is None:
                 schema_drift = _schema_skipped("first-capture")
