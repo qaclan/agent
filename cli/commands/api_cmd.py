@@ -135,6 +135,93 @@ def api_run(name_or_id, collection, env):
                 console.print(result["response_body"][:1000])
 
 
+_SEV_COLOR = {"critical": "red", "major": "yellow", "minor": "cyan", "none": "green"}
+
+
+def _print_negative_summary(name: str, nr: dict) -> str:
+    """Print a category/severity summary for one request's negatives. Returns
+    the worst severity so the caller can gate the exit code."""
+    if not nr or nr.get("verdict") == "skipped":
+        console.print(f"[dim]{name}: negatives skipped ({(nr or {}).get('skipped_reason','disabled')})[/dim]")
+        return "none"
+    counts = nr.get("counts", {})
+    worst = nr.get("worst_severity", "none")
+    color = _SEV_COLOR.get(worst, "white")
+    fp = counts.get("false_pass", 0)
+    fp_txt = f" [red]· {fp} FALSE-PASS[/red]" if fp else ""
+    console.print(f"[{color}]{name}[/{color}]: {counts.get('passed',0)}/{counts.get('total',0)} passed"
+                  f" · worst {worst}{fp_txt}")
+    for cat, b in (nr.get("by_category") or {}).items():
+        console.print(f"    {cat}: {b.get('passed',0)}/{b.get('total',0)}")
+    for c in nr.get("cases", []):
+        if c.get("passed"):
+            continue
+        cc = _SEV_COLOR.get(c.get("severity"), "white")
+        console.print(f"    [{cc}]✗ {c.get('label','')}[/{cc}] — expected {c.get('expected_status')},"
+                      f" got {c.get('actual_status')} ({c.get('note','')})")
+    return worst
+
+
+@api_group.command("negatives")
+@click.argument("name_or_id")
+@click.option("--collection", "-c", help="Collection name (run negatives for every request in it)")
+@click.option("--env", "-e", help="Environment name")
+@click.option("--yes", "confirm", is_flag=True, help="Confirm running destructive (mutating-verb) negative cases")
+def api_negatives(name_or_id, collection, env, confirm):
+    """Run negative API tests. Exits non-zero on any Critical/Major finding (CI gate)."""
+    pid = _require_project()
+    from web.api.services.runner_service import RunnerService
+    from web.api.services.collection_service import CollectionService
+    from web.api.services.request_service import RequestService
+    svc = RunnerService()
+    worst_rank = {"none": 0, "minor": 1, "major": 2, "critical": 3}
+    overall = "none"
+
+    if collection:
+        cols = CollectionService().list(pid)
+        col = next((c for c in cols if c["name"] == collection or c["id"] == collection), None)
+        if col is None:
+            console.print(f"[red]Collection '{collection}' not found[/red]")
+            sys.exit(2)
+        plan = svc.plan_collection_negatives(col["id"], pid)
+        if plan.get("needs_confirm") and not confirm:
+            console.print(f"[yellow]This run fires mutating negative cases against "
+                          f"environment '{plan.get('environment') or '(none)'}':[/yellow]")
+            for mr in plan.get("mutating_requests", []):
+                console.print(f"    {mr['name']}: {', '.join(mr['methods'])}")
+            console.print("[yellow]Re-run with --yes to confirm.[/yellow]")
+            sys.exit(2)
+        console.print(f"[cyan]Running negatives for collection '{collection}'...[/cyan]\n")
+        result = svc.run_collection(col["id"], pid, env_name=env, confirm_destructive=confirm)
+        for item in result.get("results", []):
+            w = _print_negative_summary(item.get("name", ""), item.get("negative_result"))
+            if worst_rank[w] > worst_rank[overall]:
+                overall = w
+    else:
+        reqs = RequestService().list(pid)
+        req = next((r for r in reqs if r["id"] == name_or_id or r["name"] == name_or_id), None)
+        if req is None:
+            console.print(f"[red]Request '{name_or_id}' not found[/red]")
+            sys.exit(2)
+        out = svc.run_negatives(req["id"], pid, env_name=env, confirm_destructive=confirm)
+        if out.get("needs_confirm"):
+            console.print(f"[yellow]This request has {out.get('case_count')} negative cases using mutating verbs "
+                          f"({', '.join(out.get('mutating_methods', []))}) against "
+                          f"environment '{out.get('environment') or '(none)'}'.[/yellow]")
+            console.print("[yellow]Re-run with --yes to confirm.[/yellow]")
+            sys.exit(2)
+        if not out.get("ok"):
+            console.print(f"[dim]No negative cases for '{req['name']}'. Generate them in the UI first.[/dim]")
+            sys.exit(0)
+        overall = _print_negative_summary(req["name"], out["result"].get("negative_result"))
+
+    if worst_rank[overall] >= worst_rank["major"]:
+        console.print(f"\n[red]Negative testing failed (worst: {overall}).[/red]")
+        sys.exit(1)
+    console.print(f"\n[green]Negative testing passed (worst: {overall}).[/green]")
+    sys.exit(0)
+
+
 @api_group.command("export")
 @click.argument("collection")
 @click.option("--output", "-o", default=".", help="Output directory")

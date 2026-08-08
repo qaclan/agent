@@ -4772,7 +4772,7 @@ async function viewApiRunModal(runId) {
       tr.innerHTML = `
         <td style="padding:9px 10px;font-size:12px;color:var(--text-muted,#888);">${rowIdx + 1}</td>
         <td style="padding:9px 10px;"><span style="display:inline-block;background:${mc};color:#fff;font-size:10px;font-weight:700;padding:2px 6px;border-radius:4px;min-width:46px;text-align:center">${escHtml(rr.method || '')}</span></td>
-        <td style="padding:9px 10px;font-size:13px;max-width:300px;"><div style="display:flex;align-items:center;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(rr.request_name || '')}</span>${window.qcSchemaDriftPill ? window.qcSchemaDriftPill(rr.schema_drift) : ''}</div></td>
+        <td style="padding:9px 10px;font-size:13px;max-width:300px;"><div style="display:flex;align-items:center;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">${escHtml(rr.request_name || '')}</span>${window.qcSchemaDriftPill ? window.qcSchemaDriftPill(rr.schema_drift) : ''}${window.qcNegativePill ? window.qcNegativePill(rr.negative_result) : ''}</div></td>
         <td style="padding:9px 10px;"><span style="font-size:11px;font-weight:700;color:${sc}">${rr.status || 'ERROR'}</span></td>
         <td style="padding:9px 10px;">${_codeSpan(rr.status_code)}</td>
         <td style="padding:9px 10px;">${_durSpan(rr.duration_ms)}</td>
@@ -4854,6 +4854,17 @@ async function viewApiRunModal(runId) {
         const dWrap = document.createElement('div')
         dWrap.innerHTML = window.qcSchemaDiffHtml(rr.schema_drift)
         detDiv.appendChild(dWrap)
+      }
+
+      // Negative testing
+      if (rr.negative_result && rr.negative_result.counts && rr.negative_result.counts.total && window.qcNegativeCasesHtml) {
+        const nLbl = document.createElement('div')
+        nLbl.style.cssText = 'font-weight:600;color:var(--text-secondary,#444);margin-top:10px;margin-bottom:4px;'
+        nLbl.textContent = 'Negative Testing'
+        detDiv.appendChild(nLbl)
+        const nWrap = document.createElement('div')
+        nWrap.innerHTML = window.qcNegativeCasesHtml(rr.negative_result)
+        detDiv.appendChild(nWrap)
       }
 
       // Response body

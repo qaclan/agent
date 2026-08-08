@@ -50,6 +50,105 @@ def _resolve_schema_check(req: dict, col: dict | None) -> bool:
     return ((col or {}).get("schema_check_default") or "off") == "on"
 
 
+def _resolve_negative_check(req: dict, col: dict | None) -> bool:
+    """Effective negative-testing enablement: request override wins, else
+    collection default. Mirrors _resolve_schema_check."""
+    override = req.get("negative_check") or "inherit"
+    if override in ("on", "off"):
+        return override == "on"
+    return ((col or {}).get("negative_check_default") or "off") == "on"
+
+
+def _enabled_negative_cases(req: dict) -> list:
+    """The request's enabled negative cases (deserialized list)."""
+    cases = req.get("negative_cases") or []
+    if isinstance(cases, str):
+        try:
+            cases = json.loads(cases)
+        except (ValueError, TypeError):
+            cases = []
+    return [c for c in cases if isinstance(c, dict) and c.get("enabled", True)]
+
+
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _mutating_negative_methods(req: dict) -> list:
+    """Distinct mutating HTTP methods among the request's enabled negative cases
+    — the input to the destructive-run safety gate."""
+    from cli.negative_gen import case_method
+    method = (req.get("method") or "GET").upper()
+    found = set()
+    for c in _enabled_negative_cases(req):
+        m = case_method(method, c)
+        if m in _MUTATING_METHODS:
+            found.add(m)
+    return sorted(found)
+
+
+def _negatives_for_run(req: dict, col: dict | None, confirm_destructive: bool,
+                       mode: str = "default"):
+    """Resolve what negatives to actually run for one request in a collection run.
+
+    `mode` is the run-level negatives mode:
+      - "default": negatives run only when resolved on (inheritance).
+      - "off": negatives never run this run (happy-path only).
+      - "only": negatives run only for requests resolved on AND with cases (the
+        happy-path assertions are suppressed by the caller). A request that is
+        resolved off, or has no enabled cases, runs no negatives — same as
+        "default" for enablement; it just drops the happy path.
+
+    Enablement is checked the same way in "default" and "only": a resolved-off
+    request returns (False, []) in both. Requests with negatives off do not run
+    negatives even in only-mode.
+
+    Returns (enabled, cases). The safety gate is applied **per case**: an
+    unconfirmed run keeps the read-only cases and drops only the state-changing
+    (mutating-verb) ones — so a request with a mix still exercises its safe
+    negatives, and a wholly-mutating request (e.g. a POST) runs none until
+    `confirm_destructive`. This is what the reference doc means by "safe
+    negatives still run".
+    """
+    if mode == "off":
+        return False, []
+    if not _resolve_negative_check(req, col):
+        return False, []
+    cases = req.get("negative_cases") or []
+    if isinstance(cases, str):
+        try:
+            cases = json.loads(cases)
+        except (ValueError, TypeError):
+            cases = []
+    if confirm_destructive:
+        run_cases = list(cases)
+    else:
+        from cli.negative_gen import case_method
+        method = (req.get("method") or "GET").upper()
+        run_cases = []
+        for c in cases:
+            if isinstance(c, dict) and c.get("enabled", True) \
+                    and (case_method(method, c) or method).upper() in _MUTATING_METHODS:
+                continue  # skip the mutating case in an unconfirmed run
+            run_cases.append(c)
+    enabled = any(isinstance(c, dict) and c.get("enabled", True) for c in run_cases)
+    return enabled, run_cases
+
+
+def _requests_for_run(requests: list, col: dict | None, confirm_destructive: bool,
+                      mode: str) -> list:
+    """The ordered requests that will actually execute this collection run.
+
+    In only-mode this drops requests that would run no negatives (resolved off,
+    or no enabled cases) so the run's request set — its total, its per-request
+    indices, and the live view — contains exactly the qualifying requests, with
+    contiguous order indices. Other modes run every request unchanged.
+    """
+    if mode != "only":
+        return list(requests)
+    return [r for r in requests
+            if _negatives_for_run(r, col, confirm_destructive, "only")[0]]
+
+
 def _maybe_capture_baseline(request_id: str, baseline, result: dict):
     """Capture the first successful JSON response as the frozen response_schema
     baseline — only when nothing is stored yet (baseline is None) and the
@@ -141,12 +240,134 @@ class RunnerService:
         repo.update(request_id, {"response_schema": schema})
         return schema
 
+    def plan_request_negatives(self, request_id: str, project_id: str,
+                               env_name: str | None = None) -> dict:
+        """Preview a request's negative run for the safety gate: how many cases,
+        which mutating methods, and the active environment. No requests sent."""
+        from web.api.repositories.request_repo import RequestRepo
+        from web.api.repositories.collection_repo import CollectionRepo
+        req = RequestRepo().get(request_id, project_id)
+        if req is None:
+            raise LookupError(f"Request {request_id} not found")
+        col = None
+        if req.get("collection_id"):
+            col = CollectionRepo().get(req["collection_id"], project_id)
+        if not env_name and col:
+            env_name = col.get("env_name")
+        cases = _enabled_negative_cases(req)
+        mutating = _mutating_negative_methods(req)
+        return {
+            "enabled": _resolve_negative_check(req, col),
+            "case_count": len(cases),
+            "mutating_methods": mutating,
+            "needs_confirm": bool(mutating),
+            "environment": env_name,
+        }
+
+    def run_negatives(self, request_id: str, project_id: str,
+                      env_name: str | None = None,
+                      confirm_destructive: bool = False) -> dict:
+        """Run a single request's negative cases (a dedicated action, distinct
+        from an ordinary send). Enforces the destructive-run safety gate: if any
+        enabled case uses a mutating verb and the caller has not confirmed,
+        nothing is sent and a needs_confirm plan is returned instead."""
+        from web.api.repositories.request_repo import RequestRepo
+        from web.api.repositories.collection_repo import CollectionRepo
+        from web.api.repositories.collection_vars_repo import CollectionVarsRepo
+        from cli.api_runner import run_api_request
+
+        req = RequestRepo().get(request_id, project_id)
+        if req is None:
+            raise LookupError(f"Request {request_id} not found")
+        col = None
+        if req.get("collection_id"):
+            col = CollectionRepo().get(req["collection_id"], project_id)
+        if not env_name and col:
+            env_name = col.get("env_name")
+
+        cases = _enabled_negative_cases(req)
+        if not cases:
+            return {"ok": False, "reason": "no-cases"}
+
+        mutating = _mutating_negative_methods(req)
+        if mutating and not confirm_destructive:
+            return {
+                "ok": False,
+                "needs_confirm": True,
+                "mutating_methods": mutating,
+                "case_count": len(cases),
+                "environment": env_name,
+            }
+
+        env_vars = load_env_vars(project_id, env_name)
+        seed_vars: dict = {}
+        if req.get("collection_id"):
+            seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"])
+        state: dict = {"qaclan_vars": seed_vars} if seed_vars else {}
+
+        result = run_api_request(
+            _resolve_auth(req, col), env_vars, state, state_path=None,
+            negative_enabled=True, negative_cases=req.get("negative_cases") or [],
+        )
+        return {"ok": True, "result": result, "environment": env_name}
+
+    def generate_negatives(self, request_id: str, project_id: str,
+                           regenerate: bool = False) -> dict:
+        """Generate (or regenerate) a request's negative cases from its shape and
+        any stored field_constraints. On regenerate, returns the case diff so the
+        UI can merge without discarding edits; does not itself persist."""
+        from web.api.repositories.request_repo import RequestRepo
+        from cli.negative_gen import generate_cases, diff_cases
+        req = RequestRepo().get(request_id, project_id)
+        if req is None:
+            raise LookupError(f"Request {request_id} not found")
+        new_cases = generate_cases(req, req.get("field_constraints"))
+        if regenerate:
+            old = req.get("negative_cases") or []
+            return {"cases": new_cases, "diff": diff_cases(old, new_cases)}
+        return {"cases": new_cases, "diff": None}
+
+    def plan_collection_negatives(self, collection_id: str, project_id: str) -> dict:
+        """Preview a collection run's negatives for the safety gate: which
+        requests contribute mutating negative cases. No requests sent."""
+        from web.api.repositories.collection_repo import CollectionRepo
+        from web.api.repositories.request_repo import RequestRepo
+        col = CollectionRepo().get(collection_id, project_id)
+        if col is None:
+            raise LookupError(f"Collection {collection_id} not found")
+        mutating_requests = []
+        has_negatives = False      # any request resolved on AND with cases (what actually runs)
+        resolved_on = 0            # requests whose negatives are on by inheritance
+        for req in RequestRepo().list(project_id, collection_id=collection_id):
+            if not _resolve_negative_check(req, col):
+                continue
+            resolved_on += 1
+            if _enabled_negative_cases(req):
+                # A request only runs negatives when resolved on AND it has cases.
+                has_negatives = True
+            methods = _mutating_negative_methods(req)
+            if methods:
+                mutating_requests.append({"name": req.get("name", ""), "methods": methods})
+        return {
+            "needs_confirm": bool(mutating_requests),
+            "mutating_requests": mutating_requests,
+            "has_negatives": has_negatives,
+            "resolved_on": resolved_on,
+            "environment": col.get("env_name"),
+        }
+
     def start_collection_run(self, collection_id: str, project_id: str,
                               env_name: str | None = None,
-                              seed_vars: dict | None = None) -> tuple[str, bool]:
+                              seed_vars: dict | None = None,
+                              confirm_destructive: bool = False,
+                              negatives_mode: str = "default") -> tuple[str, bool]:
         """
         Returns (run_id, already_running).
         If a RUNNING run exists for this collection, returns it without spawning a new thread.
+        confirm_destructive gates mutating-verb negative cases (see the safety gate).
+        negatives_mode ∈ {"default","off","only"} — run happy-path + negatives as
+        configured, happy-path only, or negatives only (happy-path assertions
+        suppressed).
         """
         import threading
         from web.api.repositories.collection_repo import CollectionRepo
@@ -166,6 +387,9 @@ class RunnerService:
             raise LookupError(f"Collection {collection_id} not found")
 
         requests = RequestRepo().list(project_id, collection_id=collection_id)
+        # In only-mode the run executes just the qualifying requests, so the run's
+        # total must reflect that set (not the whole collection).
+        run_requests = _requests_for_run(requests, col, confirm_destructive, negatives_mode)
         started_at = datetime.now(timezone.utc).isoformat()
         run_id = run_repo.create_run(
             collection_id=collection_id,
@@ -173,12 +397,12 @@ class RunnerService:
             collection_name=col["name"],
             env_name=env_name,
             started_at=started_at,
-            total=len(requests),
+            total=len(run_requests),
         )
 
         thread = threading.Thread(
             target=self._execute_collection,
-            args=(run_id, collection_id, project_id, env_name, seed_vars),
+            args=(run_id, collection_id, project_id, env_name, seed_vars, confirm_destructive, negatives_mode),
             daemon=True,
         )
         thread.start()
@@ -186,7 +410,9 @@ class RunnerService:
         return run_id, False
 
     def _execute_collection(self, run_id: str, collection_id: str, project_id: str,
-                             env_name: str | None, seed_vars: dict | None) -> None:
+                             env_name: str | None, seed_vars: dict | None,
+                             confirm_destructive: bool = False,
+                             negatives_mode: str = "default") -> None:
         """Thread target. Checks stop_requested before each request."""
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
@@ -207,6 +433,9 @@ class RunnerService:
                 return
 
             requests = RequestRepo().list(project_id, collection_id=collection_id)
+            # Only-mode runs just the qualifying requests, with contiguous indices —
+            # so the live view and results show exactly those requests.
+            requests = _requests_for_run(requests, col, confirm_destructive, negatives_mode)
             env_vars = load_env_vars(project_id, env_name)
 
             # Seed state from persisted collection vars (same as single-request run)
@@ -224,9 +453,19 @@ class RunnerService:
                 run_repo.update_current_index(run_id, idx)
                 schema_check_enabled = _resolve_schema_check(req, col)
                 baseline_schema = req.get("response_schema")
+                neg_enabled, neg_cases = _negatives_for_run(req, col, confirm_destructive, negatives_mode)
+                call_req = _resolve_auth(req, col)
+                if negatives_mode == "only":
+                    # Negatives-only run: suppress the happy-path checks; the base
+                    # send still happens (it's the mutation source) but its status
+                    # is judged by negatives alone. (Non-qualifying requests were
+                    # already filtered out of `requests`.)
+                    call_req = {**call_req, "assertions": []}
+                    schema_check_enabled = False
                 result = run_api_request(
-                    _resolve_auth(req, col), env_vars, state, state_path=None,
+                    call_req, env_vars, state, state_path=None,
                     baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+                    negative_enabled=neg_enabled, negative_cases=neg_cases,
                 )
                 _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append(result)
@@ -263,7 +502,9 @@ class RunnerService:
 
     def run_collection(self, collection_id: str, project_id: str,
                        env_name: str | None = None,
-                       seed_vars: dict | None = None) -> dict:
+                       seed_vars: dict | None = None,
+                       confirm_destructive: bool = False,
+                       negatives_mode: str = "default") -> dict:
         """Run all requests in a collection sequentially. Results persisted to api_collection_runs."""
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
@@ -276,6 +517,8 @@ class RunnerService:
             raise LookupError(f"Collection {collection_id} not found")
 
         requests = RequestRepo().list(project_id, collection_id=collection_id)
+        # Only-mode runs just the qualifying requests (contiguous indices).
+        requests = _requests_for_run(requests, col, confirm_destructive, negatives_mode)
         env_vars = load_env_vars(project_id, env_name)
 
         state: dict = {"qaclan_vars": dict(seed_vars)} if seed_vars else {}
@@ -295,9 +538,16 @@ class RunnerService:
             for idx, req in enumerate(requests):
                 schema_check_enabled = _resolve_schema_check(req, col)
                 baseline_schema = req.get("response_schema")
+                neg_enabled, neg_cases = _negatives_for_run(req, col, confirm_destructive, negatives_mode)
+                call_req = _resolve_auth(req, col)
+                if negatives_mode == "only":
+                    # Non-qualifying requests already filtered out of `requests`.
+                    call_req = {**call_req, "assertions": []}
+                    schema_check_enabled = False
                 result = run_api_request(
-                    _resolve_auth(req, col), env_vars, state, state_path=None,
+                    call_req, env_vars, state, state_path=None,
                     baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+                    negative_enabled=neg_enabled, negative_cases=neg_cases,
                 )
                 _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append({

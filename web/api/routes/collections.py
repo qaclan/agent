@@ -118,6 +118,12 @@ def patch_collection(col_id):
             # 'inherit' so every request follows the collection default.
             for changed_req_id in CollectionRepo().reset_schema_check_overrides(col_id):
                 enqueue("api_request", changed_req_id, "upsert")
+        if "negative_check_default" in body:
+            CollectionRepo().set_negative_check_default(col_id, body.get("negative_check_default"))
+            # Master switch: reset every request's negative-testing override to
+            # 'inherit' so they all follow the new collection default.
+            for changed_req_id in CollectionRepo().reset_negative_check_overrides(col_id):
+                enqueue("api_request", changed_req_id, "upsert")
         enqueue("api_collection", col_id, "upsert")
         return jsonify({"ok": True, "collection": CollectionRepo().get(col_id, pid)})
     except ValueError as e:
@@ -133,9 +139,14 @@ def run_collection(col_id):
         data = request.get_json(force=True) or {}
         env_name = data.get("env_name") or None
         seed_vars = data.get("seed_vars") or None
+        negatives_mode = data.get("negatives_mode") or "default"
+        if negatives_mode not in ("default", "off", "only"):
+            negatives_mode = "default"
         pid = _project_id()
         run_id, already_running = _runner_svc.start_collection_run(
-            col_id, pid, env_name=env_name, seed_vars=seed_vars
+            col_id, pid, env_name=env_name, seed_vars=seed_vars,
+            confirm_destructive=bool(data.get("confirm_destructive")),
+            negatives_mode=negatives_mode,
         )
         return jsonify({"ok": True, "run_id": run_id, "status": "RUNNING",
                         "already_running": already_running})
@@ -145,6 +156,19 @@ def run_collection(col_id):
         return jsonify({"ok": False, "error": str(e)}), 400
     except Exception as e:
         logger.exception("run_collection")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/collections/<col_id>/negatives/plan", methods=["GET"])
+def plan_collection_negatives(col_id):
+    """Preview which requests contribute mutating negative cases, for the
+    destructive-run confirm before a collection run. No requests sent."""
+    try:
+        return jsonify({"ok": True, "plan": _runner_svc.plan_collection_negatives(col_id, _project_id())})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.exception("plan_collection_negatives")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
