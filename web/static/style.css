@@ -3,6 +3,8 @@
   --bg-surface:      #0d1220;
   --bg-elevated:     #131926;
   --bg-panel:        #192030;
+  --bg-code:         rgba(0,0,0,0.25);
+  --bg-inset:        rgba(0,0,0,0.2);
 
   --border-subtle:   rgba(255,255,255,0.05);
   --border-default:  rgba(255,255,255,0.09);
@@ -48,6 +50,8 @@ html[data-theme="light"] {
   --bg-surface:      #ffffff;
   --bg-elevated:     #f9fafb;
   --bg-panel:        #f1f3f7;
+  --bg-code:         #eef1f6;
+  --bg-inset:        #f1f3f7;
 
   --border-subtle:   rgba(15,23,42,0.06);
   --border-default:  rgba(15,23,42,0.10);
@@ -1478,8 +1482,8 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
 /* Layout */
 .api-layout { display: flex; height: 100%; overflow: hidden; }
 .api-sidebar {
-  width: 280px;
-  min-width: 200px;
+  width: 320px;
+  min-width: 240px;
   border-right: 1px solid var(--border-default);
   overflow-y: auto;
   padding: 12px 0;
@@ -1512,27 +1516,43 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
   cursor: pointer;
   font-size: 12px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   border-left: 2px solid transparent;
   transition: background .1s, border-color .1s;
 }
+/* Request name takes the remaining width and wraps when it overflows (no ellipsis),
+   so the feature markers stay in a stable right-aligned column and are never
+   pushed out of the panel — including on the selected/hovered row. */
+.api-req-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.35;
+}
 .api-request-item:hover { background: var(--bg-panel); }
+/* Reserve the remove-button slot always (visibility, not display) so revealing it
+   on hover does not shift the marker column. */
 .api-request-item .remove-from-col-btn {
-  display: none;
-  margin-left: auto;
-  flex-shrink: 0;
+  visibility: hidden;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  margin-left: 4px;
   background: none;
   border: none;
   cursor: pointer;
   color: var(--text-muted);
-  padding: 0 2px;
+  padding: 0;
   line-height: 1;
   font-size: 14px;
   border-radius: 3px;
 }
 .api-request-item .remove-from-col-btn:hover { color: var(--error, #e05555); background: var(--bg-hover, rgba(255,255,255,.06)); }
-.api-request-item:hover .remove-from-col-btn { display: flex; align-items: center; }
+.api-request-item:hover .remove-from-col-btn { visibility: visible; }
 .api-request-item.active {
   background: var(--accent-subtle);
   border-left-color: var(--accent);

@@ -396,7 +396,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   editor.appendChild(urlBar);
 
   // ── Tab bar ──
-  const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions', 'Schema Check'];
+  const SECTIONS = ['Params', 'Auth', 'Headers', 'Body', 'Pre-Script', 'Post-Script', 'Assertions', 'Schema Check', 'Negative Testing'];
   const tabBar = document.createElement('div');
   tabBar.className = 'req-tab-bar';
   const sectionContent = document.createElement('div');
@@ -1671,6 +1671,11 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     r.post_lang, r.post_script, r.post_extractor || [], r.response_schema || null
   );
 
+  // Tab active-feature markers (assigned once the tabs exist; a noop until then
+  // so the section paint()s can call it safely during construction).
+  let _tabBadgeRefresh = () => {};
+  const _effOn = (o, d) => { o = o || 'inherit'; return o === 'on' ? true : o === 'off' ? false : (d || 'off') === 'on'; };
+
   // ── Schema Check section (response-schema drift detection) ──
   let _schemaCheck = r.schema_check || 'inherit';   // 'inherit' | 'on' | 'off'
   let _lastResult = null;                            // last send result (for Update response schema)
@@ -1733,6 +1738,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       }
       effText.textContent = text;
       effEl.classList.toggle('is-on', on);
+      _tabBadgeRefresh();
     }
 
     function _refreshExpected(captured) {
@@ -1782,6 +1788,405 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
   const schemaCheckSection = makeSchemaCheckSection();
 
+  // ── Negative testing section (auto-generated negative cases + matrix) ──
+  let _negativeCheck = r.negative_check || 'inherit';    // 'inherit' | 'on' | 'off'
+  let _negativeCases = Array.isArray(r.negative_cases) ? r.negative_cases.map(c => ({ ...c })) : [];
+  let _collectionNegDefault = null;
+  let _lastNegResult = null;                             // last negative run verdict
+  let _negRunning = false;
+
+  const CAT_LABEL = { 'input-validation': 'Input', 'request-level': 'Request', 'injection': 'Injection' };
+  const CAT_ORDER = ['input-validation', 'request-level', 'injection'];
+  let _negFilter = 'all';
+
+  function _negEsc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function _negOutcomeById() {
+    const m = {};
+    if (_lastNegResult && Array.isArray(_lastNegResult.cases)) {
+      _lastNegResult.cases.forEach(c => { m[c.id] = c; });
+    }
+    return m;
+  }
+
+  // Destructive-run confirm modal: names the environment, lists mutating verbs,
+  // focus defaults to Cancel, Esc/backdrop dismiss. Resolves true on confirm.
+  function _negConfirm(plan) {
+    return new Promise(resolve => {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;'
+        + 'align-items:center;justify-content:center;z-index:9999';
+      const methods = (plan.mutating_methods || []).join(', ');
+      const env = plan.environment || '(no environment)';
+      overlay.innerHTML = `<div role="dialog" aria-modal="true" style="background:var(--bg-elevated);color:var(--text-primary);
+        border:1px solid var(--border-default);border-radius:8px;max-width:460px;width:90%;padding:20px;box-shadow:0 16px 48px rgba(0,0,0,.4)">
+        <div style="font-weight:700;font-size:15px;margin-bottom:8px">Run destructive negative tests?</div>
+        <div style="font-size:13px;line-height:1.55;color:var(--text-secondary)">
+          This fires <strong style="color:var(--text-primary)">${plan.case_count || ''} negative cases</strong> using state-changing
+          methods (<strong style="color:var(--text-primary)">${_negEsc(methods)}</strong>) against environment
+          <strong style="color:var(--danger)">${_negEsc(env)}</strong>.
+          Invalid and injection payloads may be written to that target.</div>
+        <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+          <button type="button" class="btn btn-sm" data-role="neg-cancel">Cancel</button>
+          <button type="button" class="btn btn-sm" data-role="neg-go"
+            style="background:var(--danger);color:#fff;border-color:var(--danger)">Run anyway</button>
+        </div></div>`;
+      document.body.appendChild(overlay);
+      const cancel = overlay.querySelector('[data-role="neg-cancel"]');
+      const go = overlay.querySelector('[data-role="neg-go"]');
+      const close = (val) => { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(val); };
+      const onKey = e => { if (e.key === 'Escape') close(false); };
+      cancel.onclick = () => close(false);
+      go.onclick = () => close(true);
+      overlay.onclick = e => { if (e.target === overlay) close(false); };
+      document.addEventListener('keydown', onKey);
+      cancel.focus();  // focus the safe action, not the destructive one
+    });
+  }
+
+  function makeNegativeSection() {
+    const div = document.createElement('div');
+    div.className = 'neg-panel';   // NOT sc-panel — the matrix wants full width (sc-panel caps at 680px)
+    div.style.cssText = 'padding:4px 2px;max-width:none';
+    div.innerHTML = `
+      <p class="sc-desc" style="max-width:820px">Auto-generate <strong>Negative Testing</strong> from this request — invalid,
+        malformed, and injection inputs the API should <strong>reject</strong>. Pick which run below,
+        then <strong>Run Negative Testing</strong> to see results in the response panel.</p>
+      <div class="sc-row">
+        <div class="sc-row__label">Negative Testing</div>
+        <div class="sc-row__body">
+          <div class="sc-seg" role="group" aria-label="Negative testing for this request">
+            <button type="button" class="sc-seg__btn" data-val="inherit">Inherit</button>
+            <button type="button" class="sc-seg__btn" data-val="on">On</button>
+            <button type="button" class="sc-seg__btn" data-val="off">Off</button>
+          </div>
+          <div class="sc-state" data-role="neg-eff"><span class="sc-state__dot"></span><span data-role="neg-eff-text"></span></div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 6px">
+        <button type="button" class="btn btn-sm" data-role="neg-gen">Generate tests</button>
+        <button type="button" class="btn btn-sm btn-primary" data-role="neg-run">Run Negative Testing</button>
+        <span data-role="neg-filter" class="sc-seg" role="group" aria-label="Filter by category" style="margin-left:auto"></span>
+      </div>
+      <div data-role="neg-note" style="font-size:11px;color:var(--text-secondary);min-height:14px;margin-bottom:4px"></div>
+      <div data-role="neg-grid" style="overflow-x:auto"></div>`;
+
+    const seg = div.querySelector('.sc-seg');
+    const effEl = div.querySelector('[data-role="neg-eff"]');
+    const effText = div.querySelector('[data-role="neg-eff-text"]');
+    const genBtn = div.querySelector('[data-role="neg-gen"]');
+    const runBtn = div.querySelector('[data-role="neg-run"]');
+    const filterEl = div.querySelector('[data-role="neg-filter"]');
+    const noteEl = div.querySelector('[data-role="neg-note"]');
+    const gridEl = div.querySelector('[data-role="neg-grid"]');
+
+    seg.querySelectorAll('.sc-seg__btn').forEach(b => {
+      b.onclick = () => { if (_negativeCheck !== b.dataset.val) { _negativeCheck = b.dataset.val; _markDirty?.(); paintSeg(); } };
+    });
+    function paintSeg() {
+      seg.querySelectorAll('.sc-seg__btn').forEach(b => b.classList.toggle('is-active', b.dataset.val === _negativeCheck));
+      let on, text;
+      if (_negativeCheck === 'on') { on = true; text = 'On · overriding collection'; }
+      else if (_negativeCheck === 'off') { on = false; text = 'Off · overriding collection'; }
+      else {
+        const def = _collectionNegDefault;
+        if (def == null) { effText.textContent = 'Following collection default…'; effEl.classList.remove('is-on'); return; }
+        on = def === 'on'; text = on ? 'On · from collection default' : 'Off · from collection default';
+      }
+      effText.textContent = text; effEl.classList.toggle('is-on', on);
+      _tabBadgeRefresh();
+    }
+
+    // Category filter buttons
+    ['all', ...CAT_ORDER].forEach(cat => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'sc-seg__btn'; b.dataset.val = cat;
+      b.textContent = cat === 'all' ? 'All' : CAT_LABEL[cat];
+      b.onclick = () => { _negFilter = cat; paintFilter(); renderGrid(); };
+      filterEl.appendChild(b);
+    });
+    function paintFilter() {
+      filterEl.querySelectorAll('.sc-seg__btn').forEach(b => b.classList.toggle('is-active', b.dataset.val === _negFilter));
+    }
+
+    function _envBadge() {
+      const env = (_lastNegResult && _lastNegResult._env) || '';
+      runBtn.textContent = _negRunning ? 'Running…' : (env ? `Run Negative Testing · ${env}` : 'Run Negative Testing');
+    }
+
+    // Settings surface is config-only — it decides WHICH tests run. Run outcomes
+    // (pass / false-pass / severity) live in the response panel, never here.
+    const CAT_COLOR = { 'input-validation': 'var(--accent)', 'request-level': 'var(--warning)', 'injection': 'var(--danger)' };
+    const CAT_CAPTION = {
+      'input-validation': 'expects <b>4xx</b>',
+      'request-level': 'each row sets its own code',
+      'injection': 'checks <b>no&nbsp;500&nbsp;·&nbsp;not&nbsp;reflected</b>',
+    };
+    // Short one-liner shown next to a request-level case in the list view.
+    const REQ_HINT = {
+      'no-auth': 'sends no token', 'garbage-token': 'invalid token',
+      'wrong-method': 'disallowed verb', 'wrong-content-type': 'wrong media type',
+      'unknown-route': 'path not found', 'malformed-json': 'broken JSON body',
+    };
+
+    // Human-friendly names + hints so the grid reads at a glance.
+    const CAT_FULL = { 'input-validation': 'Input validation', 'request-level': 'Request-level', 'injection': 'Injection / fuzz' };
+    const SUB_META = {
+      'missing-required': ['Missing', 'Field removed from the body — expects a 4xx rejection'],
+      'wrong-type': ['Wrong type', 'Field sent as the wrong JSON type — expects 4xx'],
+      'null': ['Null', 'Field set to null — expects 4xx'],
+      'empty': ['Empty', 'Field set to an empty value — expects 4xx'],
+      'boundary-min': ['Below min', 'Value just below the allowed minimum — expects 4xx'],
+      'boundary-max': ['Above max', 'Value just above the allowed maximum — expects 4xx'],
+      'boundary-minlength': ['Too short', 'Shorter than the minimum length — expects 4xx'],
+      'boundary-maxlength': ['Too long', 'Longer than the maximum length — expects 4xx'],
+      'enum': ['Bad enum', 'Value outside the allowed set — expects 4xx'],
+      'format': ['Bad format', 'Value breaks the declared format (email, uuid…) — expects 4xx'],
+      'extra-field': ['Extra field', 'An unexpected extra field is added — off by default'],
+      'oversized': ['Oversized', 'A very large payload — off by default (can stress a real backend)'],
+      'no-auth': ['No auth', 'Sent with no auth token — expects 401'],
+      'garbage-token': ['Bad token', 'Sent with an invalid token — expects 401'],
+      'wrong-method': ['Wrong method', 'Uses a disallowed HTTP method — expects 405'],
+      'wrong-content-type': ['Bad type', 'Wrong Content-Type header — expects 415'],
+      'unknown-route': ['Unknown route', 'Hits a path that does not exist — expects 404'],
+      'malformed-json': ['Bad JSON', 'Sends a broken JSON body — expects 400'],
+      'sqli': ['SQLi', "SQL Injection — sends ' OR '1'='1 into this field. Fails on 5xx or if reflected verbatim. Pass = rejected / sanitized."],
+      'xss': ['XSS', 'Cross-Site Scripting — sends <script>alert(1)</script>. Fails if echoed back unescaped. Pass = escaped or rejected.'],
+      'path-traversal': ['Traversal', 'Path Traversal — sends ../../../../etc/passwd. Fails on 5xx or path reflected. Pass = rejected.'],
+      'null-byte': ['Null byte', 'Null Byte — sends abc\\x00def (embedded NUL). Fails on 5xx or verbatim echo. Pass = stripped / rejected.'],
+    };
+    const _subLabel = st => (SUB_META[st] || [st, ''])[0];
+    const _subDesc = st => (SUB_META[st] || ['', ''])[1] || st;
+    function _targetLabel(t) {
+      if (t.startsWith('body.')) return { name: t.slice(5), tag: 'Body field' };
+      if (t.startsWith('param.')) return { name: t.slice(6), tag: 'Query param' };
+      const m = {
+        '@auth': ['Authentication', 'Request'], '@method': ['HTTP method', 'Request'],
+        '@route': ['Route / path', 'Request'], '@content-type': ['Content-Type', 'Request'],
+        '@body': ['Request body', 'Request'],
+      };
+      const e = m[t];
+      return e ? { name: e[0], tag: e[1] } : { name: t, tag: '' };
+    }
+
+    const _NEG_STYLE = `<style>
+      .neg-cat{margin-top:20px}
+      .neg-cat:first-child{margin-top:6px}
+      .neg-cat__head{display:flex;align-items:center;gap:10px;margin:0 0 6px;padding-bottom:5px;border-bottom:1px solid var(--border-default)}
+      .neg-cat__dot{width:8px;height:8px;border-radius:2px;flex:none}
+      .neg-cat__name{font-size:12px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:var(--text-primary)}
+      .neg-cat__count{font-size:11px;color:var(--text-secondary)}
+      .neg-cat__expect{margin-left:auto;font-size:11px;color:var(--text-primary);background:var(--accent-subtle);border:1px solid var(--border-default);border-radius:999px;padding:3px 11px;white-space:nowrap}
+      .neg-cat__expect b{color:var(--accent);font-weight:700;font-family:var(--font-mono)}
+      .neg-grid{border-collapse:collapse;width:100%;font-size:12px;table-layout:fixed}
+      .neg-grid th,.neg-grid td{border-bottom:1px solid var(--border-subtle)}
+      .neg-grid thead th{padding:6px 6px 8px;text-align:center;color:var(--text-secondary);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.03em;cursor:pointer;user-select:none}
+      .neg-grid thead th:hover{color:var(--text-primary)}
+      .neg-grid thead th.tcol{text-align:left;width:170px;cursor:default}
+      .neg-grid thead th.tcol:hover{color:var(--text-secondary)}
+      .neg-colh{display:inline-flex;align-items:center;justify-content:center;gap:6px}
+      .neg-colcb{width:14px;height:14px;accent-color:var(--accent);cursor:pointer;margin:0;flex:none;vertical-align:middle}
+      .neg-tgt{padding:8px 10px 8px 2px;white-space:nowrap}
+      .neg-tgt__n{font-family:var(--font-mono);color:var(--text-primary);font-weight:600;font-size:12px}
+      .neg-tgt__k{display:block;font-size:9px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-muted);margin-top:1px}
+      .neg-cellc{text-align:center;padding:6px}
+      .neg-na{color:var(--text-muted);opacity:.4}
+      .neg-cellc input[type=checkbox],.neg-item input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;margin:0;vertical-align:middle;flex:none}
+      .neg-list{display:flex;flex-direction:column}
+      .neg-item{display:flex;align-items:center;gap:12px;padding:8px 2px;border-bottom:1px solid var(--border-subtle);cursor:pointer}
+      .neg-item.off{opacity:.55}
+      .neg-item__n{font-weight:600;font-size:12px;color:var(--text-primary);min-width:150px}
+      .neg-item__k{font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
+      .neg-item__exp{margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-secondary)}
+      .neg-code{width:54px;background:var(--bg-elevated);border:1px solid var(--border-default);border-radius:5px;color:var(--text-primary);font-family:var(--font-mono);font-size:12px;text-align:center;padding:3px 4px;font-variant-numeric:tabular-nums;-moz-appearance:textfield}
+      .neg-code::-webkit-outer-spin-button,.neg-code::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+      .neg-code:focus{outline:none;border-color:var(--accent)}
+    </style>`;
+
+    function renderGrid() {
+      if (!_negativeCases.length) {
+        gridEl.innerHTML = `<div style="padding:22px;text-align:center;color:var(--text-secondary,#9aa4b2);font-size:12px">
+          No tests yet. Click <strong>Generate tests</strong> to build a set from this request —
+          inferred from the request body${r.field_constraints ? ' and enriched by the imported spec' : ''}.</div>`;
+        return;
+      }
+      const cats = CAT_ORDER.filter(cat =>
+        _negativeCases.some(c => c.category === cat) && (_negFilter === 'all' || _negFilter === cat));
+
+      let html = _NEG_STYLE;
+
+      cats.forEach(cat => {
+        const cCases = _negativeCases.filter(c => c.category === cat);
+        const enabledN = cCases.filter(c => c.enabled).length;
+        html += `<div class="neg-cat"><div class="neg-cat__head">`
+          + `<span class="neg-cat__dot" style="background:${CAT_COLOR[cat]}"></span>`
+          + `<span class="neg-cat__name">${_negEsc(CAT_FULL[cat] || cat)}</span>`
+          + `<span class="neg-cat__count">${enabledN} / ${cCases.length} on</span>`
+          + `<span class="neg-cat__expect">${CAT_CAPTION[cat] || ''}</span></div>`;
+
+        if (cat === 'request-level') {
+          // Independent cases, each with its own expected status → a list, not a grid.
+          html += '<div class="neg-list">';
+          cCases.forEach(c => {
+            const exp = c.expect && c.expect.status_value != null ? c.expect.status_value : '';
+            html += `<label class="neg-item${c.enabled ? '' : ' off'}">`
+              + `<input type="checkbox" data-cid="${_negEsc(c.id)}"${c.enabled ? ' checked' : ''}>`
+              + `<span class="neg-item__n">${_negEsc(_subLabel(c.subtype))}</span>`
+              + `<span class="neg-item__k">${_negEsc(REQ_HINT[c.subtype] || '')}</span>`
+              + `<span class="neg-item__exp">expects <input type="number" class="neg-code" data-cid="${_negEsc(c.id)}" value="${exp}" title="Expected status code"></span>`
+              + `</label>`;
+          });
+          html += '</div>';
+        } else {
+          // Field × mutation matrix — cells are pure on/off checkboxes.
+          const targets = [], subs = [], grid = {};
+          cCases.forEach(c => {
+            if (!grid[c.target]) { grid[c.target] = {}; targets.push(c.target); }
+            grid[c.target][c.subtype] = c;
+            if (!subs.includes(c.subtype)) subs.push(c.subtype);
+          });
+          html += '<table class="neg-grid"><thead><tr><th class="tcol">Field</th>';
+          subs.forEach(st => {
+            const colCases = targets.map(t => grid[t][st]).filter(Boolean);
+            const onN = colCases.filter(c => c.enabled).length;
+            const state = onN === 0 ? 'off' : (onN === colCases.length ? 'on' : 'mixed');
+            const cbTitle = `Toggle all ${_subLabel(st)} tests across every field`;
+            html += `<th data-col="${_negEsc(st)}" data-cat="${cat}" title="${_negEsc(_subDesc(st))}">`
+              + `<span class="neg-colh">`
+              + `<input type="checkbox" class="neg-colcb" data-state="${state}"${state === 'on' ? ' checked' : ''} title="${_negEsc(cbTitle)}">`
+              + `<span class="neg-colh__l">${_negEsc(_subLabel(st))}</span>`
+              + `</span></th>`;
+          });
+          html += '</tr></thead><tbody>';
+          targets.forEach(t => {
+            const tl = _targetLabel(t);
+            html += `<tr><td class="neg-tgt"><span class="neg-tgt__n">${_negEsc(tl.name)}</span>`
+              + (tl.tag ? `<span class="neg-tgt__k">${_negEsc(tl.tag)}</span>` : '') + '</td>';
+            subs.forEach(st => {
+              const c = grid[t][st];
+              if (!c) { html += '<td class="neg-cellc neg-na" title="Not applicable">·</td>'; return; }
+              html += `<td class="neg-cellc"><input type="checkbox" data-cid="${_negEsc(c.id)}"${c.enabled ? ' checked' : ''} title="${_negEsc(_subDesc(st))}"></td>`;
+            });
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+      });
+      gridEl.innerHTML = html;
+      // Case count affects the tab's active-marker (on-but-no-cases = inactive).
+      _tabBadgeRefresh();
+
+      // Toggle a single case; re-render so counts + dimming stay in sync.
+      gridEl.querySelectorAll('input[type=checkbox][data-cid]').forEach(cb => {
+        cb.onchange = () => {
+          const c = _negativeCases.find(x => x.id === cb.dataset.cid);
+          if (c) { c.enabled = cb.checked; _markDirty?.(); renderGrid(); }
+        };
+      });
+      // Per-row expected status (request-level only).
+      gridEl.querySelectorAll('input.neg-code[data-cid]').forEach(inp => {
+        inp.onchange = () => {
+          const c = _negativeCases.find(x => x.id === inp.dataset.cid);
+          const v = parseInt(inp.value, 10);
+          if (c && !isNaN(v)) { c.expect = c.expect || {}; c.expect.status_value = v; c.expect.status_min = v; c.expect.status_max = v; _markDirty?.(); }
+        };
+        inp.onclick = e => e.stopPropagation();
+      });
+      // Header checkbox bulk-toggles its whole mutation column and reflects the
+      // column's tri-state status. `indeterminate` (mixed) can't be expressed in
+      // HTML, so it is set as a DOM property here, reapplied on every render.
+      const _bulkToggleColumn = (col, cat) => {
+        const colCases = _negativeCases.filter(c => c.subtype === col && c.category === cat);
+        const anyOn = colCases.some(c => c.enabled);
+        colCases.forEach(c => { c.enabled = !anyOn; });
+        _markDirty?.(); renderGrid();
+      };
+      gridEl.querySelectorAll('input.neg-colcb[data-state="mixed"]').forEach(cb => { cb.indeterminate = true; });
+      gridEl.querySelectorAll('input.neg-colcb').forEach(cb => {
+        cb.onchange = () => {
+          const th = cb.closest('th[data-col]');
+          if (th) _bulkToggleColumn(th.dataset.col, th.dataset.cat);
+        };
+      });
+      // Clicking the header label (not the checkbox) also toggles, for discoverability.
+      gridEl.querySelectorAll('th[data-col]').forEach(th => {
+        th.onclick = e => {
+          if (e.target.classList.contains('neg-colcb')) return; // checkbox owns its own toggle
+          _bulkToggleColumn(th.dataset.col, th.dataset.cat);
+        };
+      });
+    }
+
+    genBtn.onclick = async () => {
+      genBtn.disabled = true; genBtn.textContent = 'Generating…';
+      try {
+        const rid = await _save();
+        if (!rid) return;
+        const regenerate = _negativeCases.length > 0;
+        const res = await window.api('POST', `/api-requests/${rid}/negatives/generate`, { regenerate });
+        if (res.ok === false) { await window._alertDialog('Generate failed: ' + res.error); return; }
+        const incoming = res.cases || [];
+        if (regenerate) {
+          // Preserve user edits (enabled + expected) for cases that still exist.
+          const oldById = {}; _negativeCases.forEach(c => { oldById[c.id] = c; });
+          _negativeCases = incoming.map(c => {
+            const o = oldById[c.id];
+            return o ? { ...c, enabled: o.enabled, expect: { ...c.expect, ...(o.expect || {}) } } : c;
+          });
+          const d = res.diff || { added: [], removed: [] };
+          noteEl.textContent = `${d.added.length} new, ${d.removed.length} no longer apply.`;
+        } else {
+          _negativeCases = incoming;
+          noteEl.textContent = `Generated ${incoming.length} cases.`;
+        }
+        _markDirty?.(); renderGrid();
+      } finally {
+        genBtn.disabled = false; genBtn.textContent = 'Generate tests';
+      }
+    };
+
+    runBtn.onclick = async () => {
+      if (!_negativeCases.some(c => c.enabled)) { await window._alertDialog('No enabled negative cases. Generate some first.'); return; }
+      _negRunning = true; runBtn.disabled = true; _envBadge();
+      try {
+        const rid = await _save();
+        if (!rid) return;
+        let res = await window.api('POST', `/api-requests/${rid}/negatives/run`, { confirm_destructive: false });
+        if (res.needs_confirm) {
+          const ok = await _negConfirm(res);
+          if (!ok) return;
+          res = await window.api('POST', `/api-requests/${rid}/negatives/run`, { confirm_destructive: true });
+        }
+        if (res.ok === false) { await window._alertDialog('Run failed: ' + (res.error || res.reason || 'unknown')); return; }
+        if (res.result) {
+          _lastNegResult = res.result.negative_result;
+          if (_lastNegResult) _lastNegResult._env = res.environment;
+          responsePanel.show(res.result);
+          renderGrid();
+        }
+      } finally {
+        _negRunning = false; runBtn.disabled = false; _envBadge();
+      }
+    };
+
+    if (_effectiveCollectionId) {
+      window.api('GET', `/collections/${_effectiveCollectionId}`).then(res => {
+        if (res && res.ok !== false && res.collection) {
+          _collectionNegDefault = res.collection.negative_check_default || 'off';
+          paintSeg();
+        }
+      }).catch(() => {});
+    } else { _collectionNegDefault = 'off'; }
+
+    paintSeg(); paintFilter(); _envBadge(); renderGrid();
+    return div;
+  }
+  const negativeSection = makeNegativeSection();
+
   const sectionMap = {
     'Params':      paramsWrapper,
     'Headers':     headersWrapper,
@@ -1791,15 +2196,29 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     'Post-Script': postScriptSection,
     'Assertions':  assertionBuilder.el,
     'Schema Check': schemaCheckSection,
+    'Negative Testing': negativeSection,
   };
 
   let activeSection = 'Params';
 
+  // Per-tab active-feature markers: Δ = response schema check, ⊘ = negative
+  // testing. Shown when the feature is effectively on (override or inheritance).
+  const _tabBadgeGlyph = { 'Schema Check': ['Δ', 'var(--accent)'], 'Negative Testing': ['⊘', 'var(--warning)'] };
+  const _tabBadges = {};
   SECTIONS.forEach(name => {
     const tab = document.createElement('button');
     tab.type = 'button';
     tab.className = 'req-tab' + (name === activeSection ? ' active' : '');
-    tab.textContent = name;
+    tab.appendChild(document.createTextNode(name));
+    if (_tabBadgeGlyph[name]) {
+      const [glyph, color] = _tabBadgeGlyph[name];
+      const badge = document.createElement('span');
+      badge.textContent = glyph;
+      badge.style.cssText = `display:none;margin-left:5px;font-family:var(--font-mono);font-weight:700;color:${color}`;
+      badge.title = name === 'Schema Check' ? 'Response schema check on' : 'Negative Testing on';
+      tab.appendChild(badge);
+      _tabBadges[name] = badge;
+    }
     tab.onclick = () => {
       tabBar.querySelectorAll('.req-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
@@ -1811,6 +2230,18 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     tabBar.appendChild(tab);
   });
   sectionContent.appendChild(sectionMap[activeSection]);
+
+  function _refreshTabBadges() {
+    if (_tabBadges['Schema Check'])
+      _tabBadges['Schema Check'].style.display = _effOn(_schemaCheck, _collectionSchemaDefault) ? '' : 'none';
+    if (_tabBadges['Negative Testing'])
+      // "Active" = effectively on AND has at least one enabled case. On-but-no-cases
+      // runs nothing, so it must not show the marker (mirrors the run behavior).
+      _tabBadges['Negative Testing'].style.display =
+        (_effOn(_negativeCheck, _collectionNegDefault) && _negativeCases.some(c => c && c.enabled)) ? '' : 'none';
+  }
+  _tabBadgeRefresh = _refreshTabBadges;
+  _refreshTabBadges();
 
   // ── Response panel ──
   const driftBanner = document.createElement('div');
@@ -1896,6 +2327,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       post_extractor: postScriptSection._getExtractor(),
       assertions: assertionBuilder.getAssertions(),
       schema_check: _schemaCheck,
+      negative_check: _negativeCheck,
+      negative_cases: _negativeCases,
     };
     if (defaultCollectionId) payload.collection_id = defaultCollectionId;
     if (!requestId && defaultFolderId) payload.folder_id = defaultFolderId;

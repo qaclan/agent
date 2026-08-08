@@ -43,6 +43,40 @@ def _schema_to_example(schema: dict, spec: dict, depth: int = 0) -> object:
     return None
 
 
+_CONSTRAINT_KEYS = ("enum", "minimum", "maximum", "minLength", "maxLength", "format", "pattern")
+
+
+def _extract_constraints(schema: dict, spec: dict, prefix: str = "", depth: int = 0, out: dict | None = None) -> dict:
+    """Walk a JSON Schema and collect per-field constraints for negative-test
+    generation (see cli/negative_gen.py). Keys are dotted field paths matching
+    negative_gen's body walk (e.g. "age", "user.email"). Each value carries any
+    of enum/minimum/maximum/minLength/maxLength/format/pattern plus a `required`
+    flag and the declared `type`. Arrays are treated as leaves. Depth-capped."""
+    if out is None:
+        out = {}
+    if depth > 5 or not isinstance(schema, dict):
+        return out
+    if "$ref" in schema:
+        schema = _resolve_ref(spec, schema["$ref"])
+    if schema.get("type") != "object" and "properties" not in schema:
+        return out
+    required = set(schema.get("required", []) or [])
+    for key, prop in (schema.get("properties", {}) or {}).items():
+        if "$ref" in prop:
+            prop = _resolve_ref(spec, prop["$ref"])
+        path = f"{prefix}.{key}" if prefix else key
+        ptype = prop.get("type")
+        if ptype == "object" or "properties" in prop:
+            _extract_constraints(prop, spec, path, depth + 1, out)
+            continue
+        cons = {"type": ptype, "required": key in required}
+        for ck in _CONSTRAINT_KEYS:
+            if ck in prop:
+                cons[ck] = prop[ck]
+        out[path] = cons
+    return out
+
+
 def _parse_openapi3(spec: dict) -> list[dict]:
     results = []
     servers = spec.get("servers", [{}])
@@ -82,6 +116,7 @@ def _parse_openapi3(spec: dict) -> list[dict]:
             body_type = None
             body = None
             body_form = None
+            field_constraints = None
             req_body = op.get("requestBody", {})
             if "$ref" in req_body:
                 req_body = _resolve_ref(spec, req_body["$ref"])
@@ -91,6 +126,11 @@ def _parse_openapi3(spec: dict) -> list[dict]:
                 example = _schema_to_example(schema, spec)
                 body_type = "raw"
                 body = json.dumps(example, indent=2)
+                # Keep the raw constraints (discarded by _schema_to_example) so
+                # negative generation can produce exact boundary/enum/format cases.
+                constraints = _extract_constraints(schema, spec)
+                if constraints:
+                    field_constraints = constraints
             elif "application/x-www-form-urlencoded" in content:
                 body_type = "form"
                 schema = content["application/x-www-form-urlencoded"].get("schema", {})
@@ -122,6 +162,7 @@ def _parse_openapi3(spec: dict) -> list[dict]:
                 "body_type": body_type,
                 "body": body,
                 "body_form": body_form,
+                "field_constraints": field_constraints,
                 "auth_type": "none",
                 "auth_config": "{}",
                 "assertions": json.dumps(assertions),

@@ -8,9 +8,18 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
   let _elapsedTimer = null;
   let _startedAt = null;
   let _allRequests = [];
+  let _negDefault = 'off';   // collection negative_check_default, for the subset spine
   let _destroyed = false;
   let _activeFilter = null; // 'PASSED' | 'FAILED' | null
   let _lastRun = null;
+
+  // Reproduce the backend's only-mode qualifying set (resolved-on AND enabled
+  // cases) so a subset run's not-yet-run rows can still show the real request.
+  function _crvEffOn(o, d) { o = o || 'inherit'; return o === 'on' ? true : o === 'off' ? false : ((d || 'off') === 'on'); }
+  function _crvNegActive(r) {
+    return _crvEffOn(r.negative_check, _negDefault)
+      && Array.isArray(r.negative_cases) && r.negative_cases.some(c => c && c.enabled !== false);
+  }
 
   function _destroy() {
     _destroyed = true;
@@ -174,10 +183,19 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     (run.request_results || []).forEach(r => { byIdx[r.order_index] = r; });
     const curIdx = run.current_request_index ?? -1;
     const total  = run.total || _allRequests.length;
+    // A subset run (e.g. negatives-only) executes fewer requests than the
+    // collection holds, so positional `_allRequests[i]` no longer maps to the
+    // request at result index i. Rebuild the spine from the qualifying set (same
+    // predicate + order as the backend) so not-yet-run rows still show the real
+    // request. Completed rows always carry their own `request_name`.
+    const isSubset = total < _allRequests.length;
+    const spineList = isSubset
+      ? _allRequests.filter(_crvNegActive)
+      : _allRequests;
 
     let html = '';
     for (let i = 0; i < total; i++) {
-      const spine  = _allRequests[i] || {};
+      const spine  = spineList[i] || {};
       const result = byIdx[i];
 
       // Apply filter: skip rows that don't match active filter
@@ -185,10 +203,10 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         if (!result || result.status !== _activeFilter) continue;
       }
 
-      const name   = result ? result.request_name : (spine.name   || `Request ${i + 1}`);
+      const name   = result ? result.request_name : (spine.name   || 'Pending…');
       const method = result ? result.method       : (spine.method || '');
 
-      let badge, codeHtml = '', durHtml = '', chevron = '', driftMark = '';
+      let badge, codeHtml = '', durHtml = '', chevron = '', driftMark = '', negMark = '';
       if (result) {
         if      (result.status === 'PASSED') badge = '<span class="crv-pass">✓</span>';
         else if (result.status === 'FAILED') badge = '<span class="crv-fail">✗</span>';
@@ -197,6 +215,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         durHtml  = _durHtml(result.duration_ms);
         chevron  = '<span class="crv-chevron">▼</span>';
         driftMark = window.qcSchemaDriftPill ? window.qcSchemaDriftPill(result.schema_drift) : '';
+        negMark  = window.qcNegativePill ? window.qcNegativePill(result.negative_result) : '';
       } else if (i === curIdx) {
         badge    = '<span class="crv-spin"></span>';
         codeHtml = _codeHtml(null);
@@ -210,7 +229,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
       html += `<div class="crv-row" data-i="${i}">
         ${badge}
         <span class="crv-method">${_esc(method)}</span>
-        <span class="crv-name">${_esc(name)}${driftMark}</span>
+        <span class="crv-name">${_esc(name)}${driftMark}${negMark}</span>
         ${codeHtml}
         ${durHtml}
         ${chevron}
@@ -285,11 +304,17 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
         if (_drift && Array.isArray(_drift.differences) && _drift.differences.length && window.qcSchemaDiffHtml) {
           driftHtml = `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Schema drift</div>${window.qcSchemaDiffHtml(_drift)}`;
         }
+        let negHtml = '';
+        const _neg = result.negative_result;
+        if (_neg && _neg.counts && _neg.counts.total && window.qcNegativeCasesHtml) {
+          negHtml = `<div style="font-weight:600;color:var(--text-secondary,#444);margin-top:8px;margin-bottom:4px">Negative testing</div>${window.qcNegativeCasesHtml(_neg)}`;
+        }
         html += `<div class="crv-detail" id="crv-det-${i}">
           ${errHtml}${reasonHtml}
           <div style="font-weight:600;color:var(--text-secondary,#444);margin-bottom:4px">Assertions</div>
           ${assertHtml}
           ${driftHtml}
+          ${negHtml}
           ${bodySection}
         </div>`;
       }
@@ -332,6 +357,7 @@ export function renderCollectionRunView(container, runId, collectionId, collecti
     try {
       const colRes = await window.api('GET', `/collections/${collectionId}`);
       if (colRes.ok && colRes.collection?.requests) {
+        _negDefault = colRes.collection.negative_check_default || 'off';
         _allRequests = colRes.collection.requests.slice()
           .sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''));
       }

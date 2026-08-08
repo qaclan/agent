@@ -308,6 +308,37 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     return name.toUpperCase().startsWith(prefix.toUpperCase()) ? name.slice(prefix.length) : name;
   }
 
+  // Effective on/off for a tri-state override under a collection default.
+  function _effectiveOn(override, colDefault) {
+    const o = override || 'inherit';
+    if (o === 'on') return true;
+    if (o === 'off') return false;
+    return (colDefault || 'off') === 'on';
+  }
+  // Small markers on a request row for the features it has active: Δ = response
+  // schema check, ⊘ = negative testing. "Active" respects inheritance. The group
+  // is pushed to the right (margin-left:auto) so markers line up in one column
+  // across rows regardless of request-name length.
+  // A request has active negatives only when effectively on AND it has at least
+  // one enabled generated case — on-but-no-cases runs nothing, so it shows no ⊘.
+  function _hasEnabledNegatives(req) {
+    return Array.isArray(req.negative_cases) && req.negative_cases.some(c => c && c.enabled !== false);
+  }
+  function _featureBadges(col, req) {
+    const schemaOn = _effectiveOn(req.schema_check, col.schema_check_default);
+    const negOn = _effectiveOn(req.negative_check, col.negative_check_default) && _hasEnabledNegatives(req);
+    if (!schemaOn && !negOn) return '';
+    // Each feature keeps a fixed-width slot so Δ lines up under Δ and ⊘ under ⊘
+    // across rows even when the other marker is absent.
+    const slot = (on, glyph, color, title) =>
+      `<span class="api-feat-badge" style="width:12px;flex:none;text-align:center;font-family:var(--font-mono);`
+      + `font-size:11px;font-weight:700;color:${color}"${on ? ` title="${title}"` : ''}>${on ? glyph : ''}</span>`;
+    return '<span class="api-feat-badges" style="margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex:none">'
+      + slot(schemaOn, 'Δ', 'var(--accent)', 'Response schema check on')
+      + slot(negOn, '⊘', 'var(--warning)', 'Negative Testing on')
+      + '</span>';
+  }
+
   function _renderRequestNode(col, req, parentFolderId) {
     const item = document.createElement('div');
     item.className = 'api-request-item';
@@ -317,7 +348,8 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     item.innerHTML = `
       <span class="api-drag-handle">⠿</span>
       <span class="method-badge method-${req.method}">${req.method}</span>
-      <span>${_esc(_displayReqName(req))}</span>
+      <span class="api-req-name">${_esc(_displayReqName(req))}</span>
+      ${_featureBadges(col, req)}
       <span data-req-dot="${_esc(req.id)}" class="req-unsaved-dot" style="display:none" title="Unsaved changes"></span>`;
 
     const removeBtn = document.createElement('button');
@@ -576,13 +608,9 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   // ---- Collection-level actions (unchanged from before this rewrite) ----
 
   async function _runCollection(colId, colName, envName) {
-    const confirmed = await window._confirmDialog(
-      `Run '${colName}'?`,
-      'All requests in this collection will be executed in order.',
-      'Run'
-    );
-    if (!confirmed) return;
-    const res = await window.api('POST', `/collections/${colId}/run`, { env_name: envName || null });
+    const { run, mode, confirm_destructive } = await window.qcCollectionRunConfirm(colId, colName, envName);
+    if (!run) return;
+    const res = await window.api('POST', `/collections/${colId}/run`, { env_name: envName || null, confirm_destructive, negatives_mode: mode });
     if (res.ok === false) {
       await window._alertDialog('Run failed: ' + res.error);
       return;
