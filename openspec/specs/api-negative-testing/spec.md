@@ -124,7 +124,7 @@ The system SHALL fail a request run when its negative testing reports at least o
 
 ### Requirement: Negative-case authoring surface
 
-The system SHALL provide an authoring surface for negative cases on a request, presenting targets (fields and request-level mutations) against mutation types. From this surface a user SHALL be able to generate cases, enable or disable an individual case, bulk-enable or bulk-disable a whole mutation type, and edit a case's expected status, then run the negative cases. The authoring surface SHALL be configuration-only: it decides which cases run and their contract, and running presents per-case outcomes in the result surface rather than inline in the authoring grid.
+The system SHALL provide an authoring surface for negative cases on a request, presenting targets (fields and request-level mutations) against mutation types. From this surface a user SHALL be able to generate cases, enable or disable an individual case, bulk-enable or bulk-disable a whole mutation type, and edit a case's expected status, then run the negative cases. In the field-by-mutation matrix, each mutation-type column header SHALL present a checkbox control that bulk-toggles that whole column and reflects the column's aggregate state: selected when every case in the column is enabled, cleared when every case is disabled, and indeterminate when the column is mixed. The target (field) column SHALL NOT present such a control. Each mutation-type column header SHALL carry a descriptive tooltip stating what that mutation sends and how its outcome is judged. The authoring surface SHALL be configuration-only: it decides which cases run and their contract, and running presents per-case outcomes in the result surface rather than inline in the authoring grid.
 
 #### Scenario: Generate populates the authoring surface
 
@@ -133,8 +133,23 @@ The system SHALL provide an authoring surface for negative cases on a request, p
 
 #### Scenario: Bulk-toggle a mutation type
 
-- **WHEN** a user disables a whole mutation-type column
-- **THEN** every case in that column SHALL be disabled
+- **WHEN** a user activates a mutation-type column's header checkbox
+- **THEN** every case in that column SHALL flip to the same enabled state in a single action
+
+#### Scenario: Column header reflects the column's aggregate state
+
+- **WHEN** the cases in a mutation-type column are all enabled, all disabled, or a mix of both
+- **THEN** that column's header checkbox SHALL be shown selected, cleared, or indeterminate respectively
+
+#### Scenario: The target column carries no bulk control
+
+- **WHEN** the field-by-mutation authoring matrix is shown
+- **THEN** only mutation-type column headers SHALL present a bulk-toggle checkbox, and the field (target) column header SHALL NOT
+
+#### Scenario: Column header describes its mutation
+
+- **WHEN** a user hovers a mutation-type column header
+- **THEN** a tooltip SHALL describe what that mutation sends and how a pass is judged
 
 #### Scenario: Outcomes appear in the result surface after a run
 
@@ -191,7 +206,7 @@ The system SHALL provide a headless (command-line) way to run negative testing a
 
 ### Requirement: Safety gate for destructive negative runs
 
-Because negative cases can fire state-changing HTTP methods (POST, PUT, PATCH, DELETE) carrying invalid or injection payloads, the system SHALL require an explicit confirmation before running negative cases that use such methods, and SHALL surface the target environment so a user does not unintentionally run destructive cases against a production environment. Read-only (safe-method) negative runs SHALL NOT require this confirmation.
+Because negative cases can fire state-changing HTTP methods (POST, PUT, PATCH, DELETE) carrying invalid or injection payloads, the system SHALL require an explicit confirmation before running negative cases that use such methods, and SHALL surface the target environment so a user does not unintentionally run destructive cases against a production environment. Read-only (safe-method) negative runs SHALL NOT require this confirmation. When the confirmation is for a collection run, the system SHALL present it as a **warning** rather than an error, SHALL explain that state-changing negative payloads will be sent against the target environment, and SHALL make the list of affected requests available **on demand** — collapsed by default and expandable — rather than as an always-expanded block that grows with request count. The affected list SHALL include only requests whose negatives will actually run under the chosen mode: effective negative-testing state on, has cases, and a state-changing method.
 
 #### Scenario: Mutating negative run requires confirmation
 
@@ -218,6 +233,16 @@ Because negative cases can fire state-changing HTTP methods (POST, PUT, PATCH, D
 - **WHEN** a user starts a collection run and any request in it would fire state-changing negative cases
 - **THEN** the system SHALL present the affected requests and the target environment for confirmation, and run the state-changing cases only once confirmed
 
+#### Scenario: Collection confirmation is a warning with the affected APIs shown on demand
+
+- **WHEN** a collection run would fire state-changing negative cases across one or more requests
+- **THEN** the confirmation SHALL be presented as a warning (not a red error) with a message that state-changing payloads will affect the target environment, and the list of affected requests SHALL be collapsed by default and expandable on demand
+
+#### Scenario: Affected list matches what will actually run
+
+- **WHEN** the collection default is off and only some requests have effective-on negatives that use a state-changing method
+- **THEN** the confirmation's affected-requests list SHALL contain only those requests and SHALL NOT list requests whose negatives are off or that have no cases
+
 ### Requirement: Regeneration diff when the request changes
 
 When a user regenerates negative cases after the underlying request has changed, the system SHALL present the difference between the existing cases and the newly generated set — which cases are newly suggested and which no longer apply — rather than silently discarding a user's edits.
@@ -234,17 +259,27 @@ When a user regenerates negative cases after the underlying request has changed,
 
 ### Requirement: Collection-run negatives mode selection
 
-When a user starts a collection run and the collection has negative cases, the system SHALL let the user choose how negatives participate in that run: run everything (happy-path plus negatives as configured), run without negatives (happy-path only), or run only negatives. In the only-negatives mode the system SHALL run negative cases for every request that has cases regardless of its per-request or collection enablement, and SHALL suppress the happy-path assertion and schema evaluation so a request's result reflects its negatives alone. When no request in the collection has negative cases, the system SHALL run without presenting the choice.
+When a user starts a collection run and the collection has negative cases, the system SHALL let the user choose how negatives participate in that run: run everything (happy-path plus negatives as configured), run without negatives (happy-path only), or run only negatives. In the only-negatives mode the system SHALL run negative cases only for requests whose **effective negative-testing state is on** (by request override or inherited collection default) **and** that have generated cases; it SHALL skip any request whose effective state is off, even if that request has cases. In the only-negatives mode the system SHALL suppress the happy-path assertion and schema evaluation so a request's result reflects its negatives alone. When no request in the collection has negative cases, the system SHALL run without presenting the choice.
 
 #### Scenario: Run without negatives skips all negative cases
 
 - **WHEN** a user starts a collection run and chooses to run without negatives
 - **THEN** the run SHALL execute each request's happy path and SHALL NOT run any negative cases
 
+#### Scenario: Run only negatives runs solely the effective-on requests with cases
+
+- **WHEN** a user starts a collection run and chooses to run only negatives, and the collection default is off while three requests have an `on` override with generated cases
+- **THEN** the run SHALL execute negative cases for exactly those three requests and SHALL NOT run negatives for any request whose effective state is off
+
 #### Scenario: Run only negatives suppresses the happy path
 
 - **WHEN** a user starts a collection run and chooses to run only negatives
-- **THEN** the run SHALL execute each request's negative cases (for every request that has cases) and SHALL NOT let happy-path assertion or schema results affect the request verdict
+- **THEN** for each request whose effective negative-testing state is on and that has cases, the run SHALL execute its negative cases and SHALL NOT let happy-path assertion or schema results affect that request's verdict
+
+#### Scenario: Only-negatives run reports exactly the qualifying requests
+
+- **WHEN** a collection of many requests runs in only-negatives mode and only some requests qualify (effective on with cases)
+- **THEN** the run's progress total, its recorded per-request results, the live run view, and the downloadable report SHALL each contain exactly the qualifying requests and no others
 
 #### Scenario: No negatives means no mode choice
 
@@ -253,20 +288,60 @@ When a user starts a collection run and the collection has negative cases, the s
 
 ### Requirement: Active negative-testing indicators
 
-The system SHALL indicate at a glance which requests have negative testing active, respecting inheritance. A request whose effective negative-testing state is on SHALL carry a marker in the collection's request list and on the request editor's negative-testing tab, so a user can see which requests run negative testing without opening each one.
+The system SHALL indicate at a glance which requests have negative testing active, respecting inheritance. Negative testing is "active" for a request only when its effective negative-testing state is on **and** it has at least one enabled generated case — a request that is on but has no enabled cases behaves as if negative testing were off (nothing runs) and SHALL NOT be marked active. A request that is active SHALL carry a marker in the collection's request list and on the request editor's negative-testing tab, so a user can see which requests run negative testing without opening each one. The marker's visibility SHALL NOT depend on whether the row is selected, hovered, or focused.
 
 #### Scenario: Request list marks a request with negatives active
 
-- **WHEN** a request's effective negative-testing state is on (by its own override or by inheriting an on collection default)
+- **WHEN** a request's effective negative-testing state is on (by its own override or by inheriting an on collection default) and it has at least one enabled case
 - **THEN** that request's row in the collection list SHALL show a negative-testing marker
+
+#### Scenario: On without cases is not marked and runs nothing
+
+- **WHEN** a request's effective negative-testing state is on but it has no enabled generated cases
+- **THEN** neither the request list row nor the negative-testing tab SHALL show the marker, and no negatives SHALL run for it — it behaves as if negative testing were off
 
 #### Scenario: Editor tab marks the active feature
 
-- **WHEN** a request's effective negative-testing state is on
+- **WHEN** a request's effective negative-testing state is on and it has at least one enabled case
 - **THEN** the request editor's negative-testing tab SHALL show a marker indicating it is active
 
 #### Scenario: Inactive request shows no marker
 
 - **WHEN** a request's effective negative-testing state is off
 - **THEN** neither the request list row nor the negative-testing tab SHALL show the negative-testing marker
+
+#### Scenario: Selected row keeps its negative-testing marker
+
+- **WHEN** an active (on with cases) request is the selected row in the collection list
+- **THEN** its negative-testing marker SHALL remain visible and SHALL NOT be hidden or overridden by the selected-row styling
+
+### Requirement: Negative-testing data survives a full cloud-sync round-trip
+
+The system SHALL round-trip negative-testing configuration and verdicts through cloud sync so that a member who pulls another member's data sees the same negative-testing state and results the originator had. This SHALL hold across every sync path, not only the workspace path:
+
+- Push SHALL carry the collection default (`negative_check_default`), each request's negative config (`negative_cases`, `negative_check` override, `field_constraints`), and each executed result's negative verdict (`negative_result`).
+- The workspace pull SHALL restore collection defaults and per-request negative config.
+- The collection-run-history pull SHALL restore the per-result negative verdict for every request result it merges.
+
+No sync path SHALL silently discard a negative-testing field that was present in the pushed payload. When a pulled result carries no negative verdict (negatives were not run, or an older payload predates the field), the merged result SHALL store an empty verdict rather than fail the pull.
+
+#### Scenario: Per-request negative config survives the workspace round-trip
+
+- **WHEN** a request with a saved collection default, a `negative_check` override, generated `negative_cases`, and `field_constraints` is pushed and then pulled on another machine via the workspace path
+- **THEN** the pulled request SHALL carry the same collection default, override, cases, and constraints
+
+#### Scenario: Negative verdict survives the collection-run-history pull
+
+- **WHEN** a collection run whose request results carry `negative_result` verdicts is pushed, and another machine later pulls that run through the collection-run-history path
+- **THEN** each merged request result SHALL carry the same `negative_result` verdict the originator recorded
+
+#### Scenario: No path drops a verdict that was pushed
+
+- **WHEN** any pull path merges a request result whose pulled payload includes a `negative_result` verdict
+- **THEN** the stored result SHALL retain that verdict, never a null in place of a verdict that was present
+
+#### Scenario: Result without a negative verdict pulls cleanly
+
+- **WHEN** a pulled request result has no `negative_result` (negatives were not run for it, or the payload predates the field)
+- **THEN** the merge SHALL succeed and store an empty verdict for that result without error
 
