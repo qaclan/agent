@@ -100,6 +100,101 @@ if (!window._qcDialog) {
   window._promptDialog = (msg, defaultValue) =>
     window._qcDialog({ type: 'prompt', message: msg, defaultValue });
 
+  // Pre-run chooser for a collection. Reads the negative-testing plan and, when
+  // the collection has negatives, offers three run modes: everything, without
+  // negatives, or only negatives. Mutating-verb negative cases carry a
+  // destructive warning + confirmation. Returns
+  // { run, mode: 'default'|'off'|'only', confirm_destructive }.
+  window.qcCollectionRunConfirm = async function (colId, colName, envName) {
+    let plan = null;
+    try {
+      const r = await window.api('GET', `/collections/${colId}/negatives/plan`);
+      if (r && r.ok !== false) plan = r.plan;
+    } catch (_) { /* best-effort — fall through to the plain confirm */ }
+
+    // No negatives anywhere → a plain run confirm, no mode choice.
+    if (!plan || !plan.has_negatives) {
+      const ok = await window._confirmDialog(
+        `Run '${colName}'?`,
+        'All requests in this collection will be executed in order.',
+        'Run'
+      );
+      return { run: !!ok, mode: 'default', confirm_destructive: false };
+    }
+
+    const env = plan.environment || envName || '(no environment)';
+    const mutating = plan.needs_confirm;
+    const affected = plan.mutating_requests || [];
+    const affectedCount = affected.length;
+    const affectedLabel = n => `${n === 0 ? 'Show ' : 'Hide '}${affectedCount} affected request${affectedCount === 1 ? '' : 's'}`;
+    const listItems = affected.map(m =>
+      `<li style="margin:2px 0"><span style="font-family:var(--font-mono);font-weight:600">`
+      + `${_escHtml((m.methods || []).join('/'))}</span> ${_escHtml(m.name || '(unnamed)')}</li>`).join('');
+
+    return new Promise(resolve => {
+      const done = (val) => { document.removeEventListener('keydown', onKey); overlay.remove(); resolve(val); };
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;'
+        + 'align-items:center;justify-content:center;z-index:9999';
+      // Warning (not error): state-changing negatives can alter data. The affected
+      // list is collapsed by default and expandable, so it stays compact no matter
+      // how many requests have negatives on.
+      const warn = mutating
+        ? `<div style="margin-top:10px;padding:9px 11px;border-radius:6px;background:var(--warning-bg,rgba(245,158,11,.10));`
+          + `border:1px solid var(--warning,#f59e0b);color:var(--text-primary,#eee);font-size:12px;line-height:1.5">`
+          + `<div><strong style="color:var(--warning,#f59e0b)">Heads up —</strong> negative tests will send `
+          + `POST/PUT/PATCH/DELETE payloads to <strong>${_escHtml(env)}</strong> and may create, change, or delete data.</div>`
+          + `<button type="button" data-neg-toggle style="margin-top:6px;background:none;border:none;padding:0;`
+          + `color:var(--warning,#f59e0b);font-size:12px;cursor:pointer;text-decoration:underline;font-weight:600">`
+          + `${affectedLabel(0)}</button>`
+          + `<ul data-neg-list style="display:none;margin:6px 0 0;padding-left:18px;color:var(--text-secondary,#aaa)">${listItems}</ul>`
+          + `</div>`
+        : '';
+      overlay.innerHTML = `<div role="dialog" aria-modal="true" style="background:var(--bg-elevated,#131926);
+        color:var(--text-primary,#eee);border:1px solid var(--border-default,rgba(128,128,128,.3));border-radius:8px;
+        max-width:440px;width:90%;padding:20px;box-shadow:0 16px 48px rgba(0,0,0,.4)">
+        <div style="font-weight:700;font-size:15px;margin-bottom:4px">Run '${_escHtml(colName)}'</div>
+        <div style="font-size:12px;color:var(--text-secondary,#888);line-height:1.5">Choose what to run against ${_escHtml(env)}.</div>
+        ${warn}
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:16px">
+          <button type="button" class="btn" data-mode="default" style="justify-content:flex-start;text-align:left;padding:9px 12px">
+            <strong>Run all</strong><span style="color:var(--text-secondary,#888);font-weight:400"> — happy-path + negative tests${mutating ? ' ⚠' : ''}</span></button>
+          <button type="button" class="btn" data-mode="off" style="justify-content:flex-start;text-align:left;padding:9px 12px">
+            <strong>Without negative tests</strong><span style="color:var(--text-secondary,#888);font-weight:400"> — happy-path only</span></button>
+          <button type="button" class="btn" data-mode="only" style="justify-content:flex-start;text-align:left;padding:9px 12px">
+            <strong>Only negative tests</strong><span style="color:var(--text-secondary,#888);font-weight:400"> — skip happy-path checks${mutating ? ' ⚠' : ''}</span></button>
+        </div>
+        <div style="display:flex;justify-content:flex-end;margin-top:14px">
+          <button type="button" class="btn btn-ghost btn-sm" data-mode="cancel">Cancel</button>
+        </div></div>`;
+      document.body.appendChild(overlay);
+      const negToggle = overlay.querySelector('[data-neg-toggle]');
+      if (negToggle) {
+        negToggle.onclick = () => {
+          const list = overlay.querySelector('[data-neg-list]');
+          const shown = list.style.display !== 'none';
+          list.style.display = shown ? 'none' : '';
+          negToggle.textContent = affectedLabel(shown ? 0 : 1);
+        };
+      }
+      overlay.querySelectorAll('button[data-mode]').forEach(b => {
+        b.onclick = () => {
+          const mode = b.dataset.mode;
+          if (mode === 'cancel') return done({ run: false, mode: 'default', confirm_destructive: false });
+          done({ run: true, mode, confirm_destructive: mode !== 'off' });
+        };
+      });
+      overlay.onclick = e => { if (e.target === overlay) done({ run: false, mode: 'default', confirm_destructive: false }); };
+      const onKey = e => { if (e.key === 'Escape') done({ run: false, mode: 'default', confirm_destructive: false }); };
+      document.addEventListener('keydown', onKey);
+    });
+  };
+
+  function _escHtml(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   window._toast = function(msg, duration = 2000) {
     const t = document.createElement('div');
     t.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:10000;background:var(--success-bg);border:1px solid var(--success-border);color:var(--success);border-radius:6px;padding:8px 14px;font-size:12px;font-weight:500;box-shadow:var(--shadow-md);pointer-events:none;transition:opacity .3s;';

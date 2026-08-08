@@ -158,9 +158,10 @@ def pull_workspace():
         if existing:
             conn.execute(
                 "UPDATE api_collections SET name = ?, description = ?, env_name = ?, auth_type = ?, "
-                "auth_config = ?, schema_check_default = ?, order_index = ? WHERE id = ?",
+                "auth_config = ?, schema_check_default = ?, negative_check_default = ?, order_index = ? WHERE id = ?",
                 (c["name"], c.get("description"), c.get("env_name"), c.get("auth_type", "none"),
                  json.dumps(c.get("auth_config", {})), c.get("schema_check_default", "off"),
+                 c.get("negative_check_default", "off"),
                  c.get("order_index", 0), existing["id"]),
             )
             collection_map[cloud_id] = existing["id"]
@@ -171,10 +172,11 @@ def pull_workspace():
             local_id = generate_id("apicol")
             conn.execute(
                 "INSERT INTO api_collections (id, project_id, name, description, env_name, auth_type, "
-                "auth_config, schema_check_default, order_index, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "auth_config, schema_check_default, negative_check_default, order_index, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (local_id, local_project_id, c["name"], c.get("description"), c.get("env_name"),
                  c.get("auth_type", "none"), json.dumps(c.get("auth_config", {})),
-                 c.get("schema_check_default", "off"), c.get("order_index", 0), now, cloud_id),
+                 c.get("schema_check_default", "off"), c.get("negative_check_default", "off"),
+                 c.get("order_index", 0), now, cloud_id),
             )
             collection_map[cloud_id] = local_id
             counts["api_collections"] += 1
@@ -249,6 +251,9 @@ def pull_workspace():
             json.dumps(r["request_schema"]) if r.get("request_schema") else None,
             json.dumps(r["response_schema"]) if r.get("response_schema") else None,
             r.get("schema_check", "inherit"),
+            json.dumps(r.get("negative_cases", [])),
+            r.get("negative_check", "inherit"),
+            json.dumps(r["field_constraints"]) if r.get("field_constraints") else None,
             json.dumps(r.get("assertions", [])),
             1 if r.get("follow_redirects", True) else 0, r.get("timeout_ms", 30000),
             1 if r.get("include_in_docs", True) else 0, r.get("order_index", 0),
@@ -259,7 +264,7 @@ def pull_workspace():
                 "UPDATE api_requests SET name=?, method=?, url=?, headers=?, params=?, path_params=?, "
                 "body_type=?, body=?, body_form=?, body_multipart=?, body_graphql=?, auth_type=?, auth_config=?, pre_script=?, pre_lang=?, pre_extractor=?, "
                 "post_script=?, post_lang=?, post_extractor=?, request_schema=?, response_schema=?, "
-                "schema_check=?, "
+                "schema_check=?, negative_cases=?, negative_check=?, field_constraints=?, "
                 "assertions=?, follow_redirects=?, timeout_ms=?, include_in_docs=?, order_index=?, "
                 "feature_id=?, collection_id=?, folder_id=? WHERE id=?",
                 row_values + (local_feature_id, local_collection_id, local_folder_id, existing["id"]),
@@ -273,9 +278,10 @@ def pull_workspace():
                 "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, name, "
                 "method, url, headers, params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, "
                 "pre_script, pre_lang, pre_extractor, post_script, post_lang, post_extractor, "
-                "request_schema, response_schema, schema_check, assertions, follow_redirects, timeout_ms, "
+                "request_schema, response_schema, schema_check, negative_cases, negative_check, field_constraints, "
+                "assertions, follow_redirects, timeout_ms, "
                 "include_in_docs, order_index, created_at, cloud_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (local_id, local_project_id, local_feature_id, local_collection_id, local_folder_id)
                 + row_values + (now, cloud_id),
             )
@@ -469,15 +475,18 @@ def pull_api_run_history(project_id):
                 conn.execute(
                     "INSERT INTO api_request_results (id, collection_run_id, api_request_id, "
                     "request_name, method, url, order_index, status, status_code, response_body, "
-                    "response_headers, duration_ms, assertion_results, error_message, started_at, finished_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "response_headers, duration_ms, assertion_results, error_message, started_at, finished_at, "
+                    "schema_drift, negative_result) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (generate_id("arreq"), local_run_id, local_request_row["id"],
                      r["request_name"], r.get("method"), r.get("url"), r["order_index"],
                      r["status"].upper(), r.get("status_code"), r.get("response_body"),
                      json.dumps(r["response_headers"]) if r.get("response_headers") else None,
                      r.get("duration_ms"),
                      json.dumps(r["assertion_results"]) if r.get("assertion_results") else None,
-                     r.get("error_message"), r.get("started_at"), r.get("finished_at")),
+                     r.get("error_message"), r.get("started_at"), r.get("finished_at"),
+                     json.dumps(r["schema_drift"]) if r.get("schema_drift") else None,
+                     json.dumps(r["negative_result"]) if r.get("negative_result") else None),
                 )
             inserted += 1
         if len(runs) < 50:

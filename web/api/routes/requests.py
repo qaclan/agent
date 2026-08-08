@@ -151,6 +151,59 @@ def set_response_schema(req_id):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@bp.route("/api/api-requests/<req_id>/negatives/generate", methods=["POST"])
+def generate_negatives(req_id):
+    """Generate (or regenerate) negative cases from the request's shape +
+    stored field_constraints. Returns the cases (and a diff on regenerate); the
+    UI merges and saves via the normal request update."""
+    try:
+        data = request.get_json(force=True) or {}
+        out = _runner_svc.generate_negatives(req_id, _project_id(), regenerate=bool(data.get("regenerate")))
+        return jsonify({"ok": True, **out})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.exception("generate_negatives")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/api-requests/<req_id>/negatives/plan", methods=["GET", "POST"])
+def plan_negatives(req_id):
+    """Preview a negative run for the safety gate (case count, mutating methods,
+    active environment). No requests are sent."""
+    try:
+        data = request.get_json(silent=True) or {}
+        env_name = data.get("env_name") or request.args.get("env_name")
+        return jsonify({"ok": True, "plan": _runner_svc.plan_request_negatives(req_id, _project_id(), env_name=env_name)})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except Exception as e:
+        logger.exception("plan_negatives")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route("/api/api-requests/<req_id>/negatives/run", methods=["POST"])
+def run_negatives(req_id):
+    """Run the request's negative cases (a dedicated action). Requires
+    confirm_destructive when any enabled case uses a mutating verb; otherwise
+    responds with needs_confirm and sends nothing."""
+    try:
+        data = request.get_json(force=True) or {}
+        out = _runner_svc.run_negatives(
+            req_id, _project_id(),
+            env_name=data.get("env_name"),
+            confirm_destructive=bool(data.get("confirm_destructive")),
+        )
+        return jsonify({"ok": out.get("ok", True), **out})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        logger.exception("run_negatives")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route("/api/api-requests/<req_id>/examples", methods=["GET"])
 def list_request_examples(req_id):
     try:

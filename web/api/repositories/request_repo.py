@@ -29,6 +29,9 @@ _DEFAULTS = {
     "request_schema": None,
     "response_schema": None,
     "schema_check": "inherit",
+    "negative_cases": "[]",
+    "negative_check": "inherit",
+    "field_constraints": None,
     "assertions": "[]",
     "follow_redirects": 1,
     "timeout_ms": 30000,
@@ -38,10 +41,10 @@ _DEFAULTS = {
 def _serialize(data: dict) -> dict:
     """Ensure JSON list/dict fields are stored as TEXT."""
     out = dict(data)
-    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor"):
+    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor", "negative_cases"):
         if key in out and not isinstance(out[key], str):
             out[key] = json.dumps(out[key])
-    for key in ("auth_config", "request_schema", "response_schema"):
+    for key in ("auth_config", "request_schema", "response_schema", "field_constraints"):
         if key in out and out[key] is not None and not isinstance(out[key], str):
             out[key] = json.dumps(out[key])
     return out
@@ -49,13 +52,13 @@ def _serialize(data: dict) -> dict:
 
 def _deserialize(row: dict) -> dict:
     out = dict(row)
-    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor"):
+    for key in ("headers", "params", "path_params", "assertions", "pre_extractor", "post_extractor", "negative_cases"):
         if isinstance(out.get(key), str):
             try:
                 out[key] = json.loads(out[key])
             except (ValueError, TypeError):
                 out[key] = []
-    for key in ("auth_config", "request_schema", "response_schema"):
+    for key in ("auth_config", "request_schema", "response_schema", "field_constraints"):
         if isinstance(out.get(key), str):
             try:
                 out[key] = json.loads(out[key])
@@ -114,8 +117,9 @@ class RequestRepo:
             "INSERT INTO api_requests (id, project_id, feature_id, collection_id, folder_id, order_index, name, method, url, "
             "headers, params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, pre_extractor, "
             "post_script, post_lang, post_extractor, request_schema, response_schema, schema_check, "
+            "negative_cases, negative_check, field_constraints, "
             "assertions, follow_redirects, timeout_ms, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, project_id,
              merged.get("feature_id"), collection_id, folder_id, order_index,
              merged.get("name", "Unnamed"), merged["method"], merged["url"],
@@ -126,6 +130,8 @@ class RequestRepo:
              merged["post_script"], merged["post_lang"], merged["post_extractor"],
              merged.get("request_schema"), merged.get("response_schema"),
              merged.get("schema_check", "inherit"),
+             merged.get("negative_cases", "[]"), merged.get("negative_check", "inherit"),
+             merged.get("field_constraints"),
              merged["assertions"], merged["follow_redirects"], merged["timeout_ms"],
              now),
         )
@@ -140,7 +146,7 @@ class RequestRepo:
                   "body_form", "body_multipart", "body_graphql",
                   "auth_type", "auth_config", "pre_script", "pre_lang", "pre_extractor", "post_script",
                   "post_lang", "post_extractor", "request_schema", "response_schema",
-                  "schema_check",
+                  "schema_check", "negative_cases", "negative_check", "field_constraints",
                   "assertions", "follow_redirects", "timeout_ms",
                   "feature_id", "collection_id", "folder_id"]
         updates = {f: s[f] for f in fields if f in s}

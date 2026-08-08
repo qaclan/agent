@@ -1,4 +1,5 @@
 from __future__ import annotations
+import copy
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from cli.schema_infer import infer_schema
 from cli.schema_diff import evaluate_drift, skipped as _schema_skipped
+from cli import negative_check
 
 logger = logging.getLogger("qaclan.api_runner")
 
@@ -489,8 +491,180 @@ def _schema_from_response(response_headers: dict | None, response_body) -> objec
         return None
 
 
+# ---------------------------------------------------------------------------
+# HTTP send primitive (shared by the happy path and negative-case re-sends)
+# ---------------------------------------------------------------------------
+
+def _execute_http(method, url, headers, params, content, data, files,
+                  timeout_ms, follow_redirects):
+    """Send one request and return (status_code, response_headers, body, body_err).
+
+    Raises the same httpx exceptions the caller must handle (timeout, connect).
+    Factored out so a negative case can re-send a mutated request through the
+    identical path without duplicating the streaming/decoding logic.
+    """
+    import httpx
+    status_code = None
+    response_headers = {}
+    response_body = ''
+    body_err = None
+    with httpx.Client(follow_redirects=follow_redirects, timeout=timeout_ms / 1000.0) as client:
+        with client.stream(method, url, headers=headers, params=params or None,
+                           content=content, data=data, files=files) as response:
+            status_code = response.status_code
+            response_headers = dict(response.headers)
+            chunks = []
+            try:
+                for chunk in response.iter_bytes():
+                    chunks.append(chunk)
+            except Exception as be:
+                body_err = str(be)
+            raw = b"".join(chunks)
+            if raw:
+                try:
+                    response_body = raw.decode(_detect_charset(response_headers), errors="replace")
+                except LookupError:
+                    response_body = raw.decode("utf-8", errors="replace")
+    return status_code, response_headers, response_body, body_err
+
+
+# ---------------------------------------------------------------------------
+# Negative-case mutation + execution
+# ---------------------------------------------------------------------------
+
+def _try_json_obj(content):
+    """Parse request body bytes as JSON, or None if not JSON."""
+    if not content:
+        return None
+    try:
+        return json.loads(content)
+    except Exception:
+        return None
+
+
+def _append_path(url, suffix):
+    """Insert `suffix` into the URL path, before any query string."""
+    from urllib.parse import urlsplit, urlunsplit
+    parts = urlsplit(url)
+    new_path = parts.path.rstrip("/") + suffix
+    return urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
+
+
+def _apply_body_path(obj, dotpath, op, value):
+    """Apply a set/remove to a dotted path within a decoded JSON body object."""
+    parts = dotpath.split(".")
+    cur = obj
+    for p in parts[:-1]:
+        if isinstance(cur, dict) and isinstance(cur.get(p), dict):
+            cur = cur[p]
+        else:
+            return  # path not navigable — leave the body unchanged
+    last = parts[-1]
+    if isinstance(cur, dict):
+        if op == "set":
+            cur[last] = value
+        elif op == "remove":
+            cur.pop(last, None)
+
+
+def _apply_mutation(base, mutation):
+    """Return a mutated (method, url, headers, params, content, data, files)
+    tuple derived from the resolved base send. Pure — never touches `base`."""
+    method = base["method"]
+    url = base["url"]
+    headers = dict(base["headers"])
+    params = dict(base["params"])
+    content = base["content"]
+    data = base["data"]
+    files = base["files"]
+    body_obj = copy.deepcopy(base.get("body_obj"))
+
+    op = mutation.get("op")
+    path = mutation.get("path", "")
+    body_changed = False
+
+    def _hdr_del(name):
+        for k in list(headers.keys()):
+            if k.lower() == str(name).lower():
+                del headers[k]
+
+    if op in ("set", "remove"):
+        if path.startswith("body."):
+            if body_obj is not None:
+                _apply_body_path(body_obj, path[len("body."):], op, mutation.get("value"))
+                body_changed = True
+        elif path.startswith("param."):
+            key = path[len("param."):]
+            if op == "set":
+                params[key] = mutation.get("value")
+            else:
+                params.pop(key, None)
+    elif op == "set_raw_body":
+        content = str(mutation.get("value", "")).encode()
+        body_obj = None
+    elif op == "drop_auth":
+        _hdr_del("authorization")
+    elif op == "set_auth":
+        _hdr_del("authorization")
+        headers["Authorization"] = str(mutation.get("value", ""))
+    elif op == "set_method":
+        method = str(mutation.get("value") or method).upper()
+    elif op == "set_header":
+        _hdr_del(mutation.get("key", ""))
+        headers[mutation.get("key", "")] = str(mutation.get("value", ""))
+    elif op == "remove_header":
+        _hdr_del(mutation.get("key", ""))
+    elif op == "append_path":
+        url = _append_path(url, str(mutation.get("value", "")))
+
+    if body_changed and body_obj is not None:
+        content = json.dumps(body_obj).encode()
+
+    return method, url, headers, params, content, data, files
+
+
+def _run_negative_case(case, base):
+    """Send one mutated negative case and return its raw outcome dict for
+    negative_check.classify (see that module for the expected shape)."""
+    method, url, headers, params, content, data, files = _apply_mutation(base, case.get("mutation") or {})
+    expect = case.get("expect") or {}
+    result = {
+        "id": case.get("id"),
+        "category": case.get("category"),
+        "subtype": case.get("subtype"),
+        "target": case.get("target"),
+        "label": case.get("label"),
+        "method": method,
+        "expected_status": expect.get("status_value"),
+        "no_500": bool(expect.get("no_500")),
+        "no_reflect": bool(expect.get("no_reflect")),
+        "reflected": False,
+        "actual_status": None,
+        "status_ok": False,
+        "error": None,
+    }
+    try:
+        status_code, _resp_headers, resp_body, _body_err = _execute_http(
+            method, url, headers, params, content, data, files,
+            base["timeout_ms"], base["follow_redirects"])
+    except Exception as e:
+        result["error"] = str(e)
+        return result
+
+    result["actual_status"] = status_code
+    if case.get("category") != "injection":
+        lo = expect.get("status_min", 400)
+        hi = expect.get("status_max", 499)
+        result["status_ok"] = isinstance(status_code, int) and lo <= status_code <= hi
+    if expect.get("no_reflect") and expect.get("reflect_value"):
+        rv = str(expect.get("reflect_value"))
+        result["reflected"] = bool(resp_body) and rv in resp_body
+    return result
+
+
 def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | None = None,
-                    baseline_schema=None, schema_check_enabled: bool = False) -> dict:
+                    baseline_schema=None, schema_check_enabled: bool = False,
+                    negative_enabled: bool = False, negative_cases=None) -> dict:
     """
     Execute a single API request.
 
@@ -503,13 +677,20 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             none captured yet). Only consulted when schema_check_enabled.
         schema_check_enabled: effective enablement resolved by the caller
             (request override, else collection default). See runner_service.
+        negative_enabled: effective negative-testing enablement resolved by the
+            caller (request override, else collection default).
+        negative_cases: the request's stored negative case list; enabled cases
+            are re-sent as mutations of this request and evaluated against their
+            expected-rejection contract. The caller enforces the destructive-run
+            safety gate before enabling.
 
     Returns:
         dict with keys: status, status_code, url, response_body, response_headers,
                         duration_ms, assertion_results, error_message, state_updates,
-                        schema_drift, inferred_schema. inferred_schema is the current
-                        response's type-tree (also echoed as response_schema for
-                        display); the caller decides whether to persist it.
+                        schema_drift, negative_result, inferred_schema.
+                        inferred_schema is the current response's type-tree (also
+                        echoed as response_schema for display); the caller decides
+                        whether to persist it.
     """
     import httpx
 
@@ -660,37 +841,22 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
         timeout_ms = int(req.get("timeout_ms") or 30000)
         follow_redirects = bool(req.get("follow_redirects", 1))
 
-        status_code = None
-        response_headers = {}
-        response_body = ''
-        _body_err = None
+        # Snapshot the fully-resolved send so negative cases can re-issue a
+        # mutated copy through the identical path (post-vars, post-auth,
+        # post-body-hygiene). Pre/post scripts and extractors are deliberately
+        # NOT replayed per case — a negative case mutates the request, not the
+        # happy-path scripting.
+        _neg_sent = {
+            "method": method, "url": url,
+            "headers": dict(headers), "params": dict(params),
+            "content": content, "data": data, "files": files,
+            "body_type": body_type,
+            "body_obj": _try_json_obj(content) if body_type == "raw" else None,
+            "timeout_ms": timeout_ms, "follow_redirects": follow_redirects,
+        }
 
-        with httpx.Client(
-            follow_redirects=follow_redirects,
-            timeout=timeout_ms / 1000.0,
-        ) as http_client:
-            with http_client.stream(
-                method, url,
-                headers=headers,
-                params=params or None,
-                content=content,
-                data=data,
-                files=files,
-            ) as response:
-                status_code = response.status_code
-                response_headers = dict(response.headers)
-                body_chunks = []
-                try:
-                    for chunk in response.iter_bytes():
-                        body_chunks.append(chunk)
-                except Exception as _be:
-                    _body_err = str(_be)
-                raw_body = b"".join(body_chunks)
-                if raw_body:
-                    try:
-                        response_body = raw_body.decode(_detect_charset(response_headers), errors="replace")
-                    except LookupError:
-                        response_body = raw_body.decode("utf-8", errors="replace")
+        status_code, response_headers, response_body, _body_err = _execute_http(
+            method, url, headers, params, content, data, files, timeout_ms, follow_redirects)
 
         duration_ms = int((time.time() - start_time) * 1000)
         finished_at = datetime.now(timezone.utc).isoformat()
@@ -769,6 +935,22 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
                 if schema_drift["breaking_count"] > 0:
                     status = "FAILED"
 
+        # 9. Negative testing (opt-in). Each enabled case is a mutated re-send of
+        # this request evaluated against its expected-rejection contract. A
+        # Critical/Major outcome fails the run, kept separate from assertions so
+        # a negative failure is distinguishable. The safety gate (mutating-verb
+        # confirmation) is enforced by the caller before we get here.
+        negative_result = None
+        if negative_enabled and negative_cases:
+            enabled_cases = [c for c in negative_cases if c.get("enabled", True)]
+            if enabled_cases:
+                case_results = [_run_negative_case(c, _neg_sent) for c in enabled_cases]
+                negative_result = negative_check.classify(case_results)
+                if negative_result.get("worst_severity") in ("critical", "major"):
+                    status = "FAILED"
+            else:
+                negative_result = negative_check.skipped("no-cases")
+
         logger.info("run_api_request: %s %s → %d (%dms) %s",
                     method, url, status_code, duration_ms, status)
 
@@ -787,6 +969,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "schema_drift": schema_drift,
             "inferred_schema": inferred_schema,
             "response_schema": inferred_schema,
+            "negative_result": negative_result,
         }
 
     except httpx.TimeoutException as e:
@@ -808,6 +991,7 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "schema_drift": None,
             "inferred_schema": None,
             "response_schema": None,
+            "negative_result": None,
         }
 
     except Exception as e:
@@ -829,4 +1013,5 @@ def run_api_request(req: dict, env_vars: dict, state: dict, state_path: str | No
             "schema_drift": None,
             "inferred_schema": None,
             "response_schema": None,
+            "negative_result": None,
         }

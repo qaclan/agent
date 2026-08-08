@@ -231,6 +231,13 @@ export function createResponsePanel(opts = {}) {
       _renderSchemaDiff(r.schema_drift || {});
       return;
 
+    } else if (tab === 'negative') {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'padding:10px';
+      wrap.innerHTML = window.qcNegativeCasesHtml ? window.qcNegativeCasesHtml(r.negative_result || {}) : '';
+      contentArea.appendChild(wrap);
+      return;
+
     } else if (tab === 'headers') {
       const headers = r.response_headers || {};
       const table = document.createElement('table');
@@ -344,6 +351,16 @@ export function createResponsePanel(opts = {}) {
       const diffTab = _renderTab(`Schema Diff (${_driftCount})`, 'schema-diff', false);
       diffTab.style.color = _brk ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)';
       tabBar.appendChild(diffTab);
+    }
+    const _neg = result.negative_result;
+    const _negCounts = (_neg && _neg.counts) || null;
+    if (_negCounts && _negCounts.total) {
+      const negTab = _renderTab(`Negative Testing (${_negCounts.passed}/${_negCounts.total})`, 'negative', false);
+      const _w = _neg.worst_severity;
+      negTab.style.color = _w === 'critical' ? 'var(--danger,#ef4444)'
+        : _w === 'major' ? 'var(--warning,#f59e0b)'
+        : _w === 'minor' ? 'var(--text-muted,#888)' : 'var(--success,#22c55e)';
+      tabBar.appendChild(negTab);
     }
     const _varCount = Object.keys(result.state_updates || {}).length;
     if (_varCount) tabBar.appendChild(_renderTab(`Variables (${_varCount})`, 'vars', false));

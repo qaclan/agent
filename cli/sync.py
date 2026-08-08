@@ -228,7 +228,7 @@ def sync_api_collection_to_cloud(collection_id):
         return None
     from cli.db import get_conn
     row = get_conn().execute(
-        "SELECT project_id, name, description, env_name, auth_type, auth_config, schema_check_default, order_index "
+        "SELECT project_id, name, description, env_name, auth_type, auth_config, schema_check_default, negative_check_default, order_index "
         "FROM api_collections WHERE id = ?", (collection_id,)
     ).fetchone()
     if not row:
@@ -246,6 +246,7 @@ def sync_api_collection_to_cloud(collection_id):
         "auth_type": row["auth_type"],
         "auth_config": json.loads(row["auth_config"] or "{}"),
         "schema_check_default": row["schema_check_default"] or "off",
+        "negative_check_default": row["negative_check_default"] or "off",
         "order_index": row["order_index"],
         "project_id": cloud_project_id,
     }))
@@ -324,7 +325,7 @@ def sync_api_request_to_cloud(request_id):
         "SELECT project_id, feature_id, collection_id, folder_id, name, method, url, headers, "
         "params, path_params, body_type, body, body_form, body_multipart, body_graphql, auth_type, auth_config, pre_script, pre_lang, "
         "pre_extractor, post_script, post_lang, post_extractor, request_schema, response_schema, "
-        "schema_check, "
+        "schema_check, negative_cases, negative_check, field_constraints, "
         "assertions, follow_redirects, timeout_ms, include_in_docs, order_index "
         "FROM api_requests WHERE id = ?", (request_id,)
     ).fetchone()
@@ -359,6 +360,9 @@ def sync_api_request_to_cloud(request_id):
         "request_schema": json.loads(row["request_schema"]) if row["request_schema"] else None,
         "response_schema": json.loads(row["response_schema"]) if row["response_schema"] else None,
         "schema_check": row["schema_check"] or "inherit",
+        "negative_cases": json.loads(row["negative_cases"] or "[]"),
+        "negative_check": row["negative_check"] or "inherit",
+        "field_constraints": json.loads(row["field_constraints"]) if row["field_constraints"] else None,
         "assertions": json.loads(row["assertions"] or "[]"),
         "follow_redirects": bool(row["follow_redirects"]),
         "timeout_ms": row["timeout_ms"],
@@ -441,7 +445,7 @@ def sync_api_collection_run_to_cloud(run_id):
     results = conn.execute(
         "SELECT api_request_id, request_name, method, url, order_index, status, status_code, "
         "response_body, response_headers, duration_ms, assertion_results, error_message, "
-        "started_at, finished_at, schema_drift FROM api_request_results "
+        "started_at, finished_at, schema_drift, negative_result FROM api_request_results "
         "WHERE collection_run_id = ? ORDER BY order_index", (run_id,)
     ).fetchall()
     payload = {
@@ -471,6 +475,7 @@ def sync_api_collection_run_to_cloud(run_id):
                 "response_headers": json.loads(r["response_headers"]) if r["response_headers"] else None,
                 "assertion_results": json.loads(r["assertion_results"]) if r["assertion_results"] else None,
                 "schema_drift": json.loads(r["schema_drift"]) if r["schema_drift"] else None,
+                "negative_result": json.loads(r["negative_result"]) if r["negative_result"] else None,
                 "error_message": r["error_message"],
                 "started_at": r["started_at"],
                 "finished_at": r["finished_at"],
@@ -488,7 +493,7 @@ def _gather_api_run_results(suite_run_id):
     rows = get_conn().execute(
         "SELECT ar.api_request_id, req.name AS request_name, ar.order_index, ar.status, "
         "ar.status_code, ar.duration_ms, ar.response_body, ar.response_headers, "
-        "ar.assertion_results, ar.error_message, ar.started_at, ar.finished_at, ar.schema_drift "
+        "ar.assertion_results, ar.error_message, ar.started_at, ar.finished_at, ar.schema_drift, ar.negative_result "
         "FROM api_runs ar JOIN api_requests req ON ar.api_request_id = req.id "
         "WHERE ar.suite_run_id = ? ORDER BY ar.order_index", (suite_run_id,)
     ).fetchall()
@@ -504,6 +509,7 @@ def _gather_api_run_results(suite_run_id):
             "response_headers": json.loads(r["response_headers"]) if r["response_headers"] else None,
             "assertion_results": json.loads(r["assertion_results"]) if r["assertion_results"] else None,
             "schema_drift": json.loads(r["schema_drift"]) if r["schema_drift"] else None,
+            "negative_result": json.loads(r["negative_result"]) if r["negative_result"] else None,
             "error_message": r["error_message"],
             "started_at": r["started_at"],
             "finished_at": r["finished_at"],

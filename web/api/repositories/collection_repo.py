@@ -11,7 +11,7 @@ class CollectionRepo:
         conn = get_conn()
         rows = conn.execute(
             "SELECT ac.id, ac.name, ac.description, ac.env_name, ac.auth_type, ac.auth_config, "
-            "ac.schema_check_default, ac.order_index, ac.created_at, "
+            "ac.schema_check_default, ac.negative_check_default, ac.order_index, ac.created_at, "
             "COUNT(ar.id) AS request_count "
             "FROM api_collections ac "
             "LEFT JOIN api_requests ar ON ar.collection_id = ac.id "
@@ -24,7 +24,7 @@ class CollectionRepo:
     def get(self, id: str, project_id: str) -> dict | None:
         conn = get_conn()
         row = conn.execute(
-            "SELECT id, name, description, env_name, auth_type, auth_config, schema_check_default, created_at FROM api_collections "
+            "SELECT id, name, description, env_name, auth_type, auth_config, schema_check_default, negative_check_default, created_at FROM api_collections "
             "WHERE id = ? AND project_id = ?",
             (id, project_id),
         ).fetchone()
@@ -44,6 +44,7 @@ class CollectionRepo:
         logger.info("CollectionRepo.create: %s (%s)", name, cid)
         return {"id": cid, "name": name, "description": description, "env_name": env_name,
                 "auth_type": auth_type, "auth_config": auth_config, "schema_check_default": "off",
+                "negative_check_default": "off",
                 "created_at": now, "request_count": 0}
 
     def set_schema_check_default(self, id: str, value: str) -> bool:
@@ -75,6 +76,37 @@ class CollectionRepo:
         if changed:
             conn.execute(
                 "UPDATE api_requests SET schema_check = 'inherit' WHERE collection_id = ?",
+                (id,),
+            )
+            conn.commit()
+        return changed
+
+    def set_negative_check_default(self, id: str, value: str) -> bool:
+        """Set the collection-wide negative-testing default ('on' | 'off').
+
+        Requests with an 'inherit' override follow this value at run time."""
+        value = "on" if value == "on" else "off"
+        conn = get_conn()
+        cur = conn.execute(
+            "UPDATE api_collections SET negative_check_default = ? WHERE id = ?",
+            (value, id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+    def reset_negative_check_overrides(self, id: str) -> list[str]:
+        """Reset every request's negative-testing override in this collection to
+        'inherit' so they all follow the collection default — the master-switch
+        behavior. Returns the ids of requests actually changed (for sync re-push)."""
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT id FROM api_requests WHERE collection_id = ? AND negative_check IS NOT NULL AND negative_check != 'inherit'",
+            (id,),
+        ).fetchall()
+        changed = [r["id"] for r in rows]
+        if changed:
+            conn.execute(
+                "UPDATE api_requests SET negative_check = 'inherit' WHERE collection_id = ?",
                 (id,),
             )
             conn.commit()

@@ -156,6 +156,43 @@ def init_db():
     _migrate_collection_var_secret(conn)
     _migrate_request_body_columns(conn)
     _migrate_api_schema_check(conn)
+    _migrate_api_negative_testing(conn)
+
+
+def _migrate_api_negative_testing(conn):
+    """Negative API testing columns (see docs/api-negative-testing-reference.md).
+
+    - api_requests.negative_cases: generated + edited case list (JSON array).
+    - api_requests.negative_check: tri-state override 'inherit' | 'on' | 'off'.
+    - api_requests.field_constraints: per-field OpenAPI constraints (JSON),
+      captured at spec import to sharpen generation; NULL for non-spec requests.
+    - api_collections.negative_check_default: 'on' | 'off' collection default.
+    - api_request_results.negative_result / api_runs.negative_result: persisted
+      per-run negative-testing verdict (JSON). All defaults leave the feature
+      dormant until a user opts in.
+    """
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN negative_cases TEXT DEFAULT '[]'")
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN negative_check TEXT DEFAULT 'inherit'")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_requests ADD COLUMN field_constraints TEXT DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE api_collections ADD COLUMN negative_check_default TEXT DEFAULT 'off'")
+    except Exception:
+        pass
+    for table in ("api_request_results", "api_runs"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN negative_result TEXT DEFAULT NULL")
+        except Exception:
+            pass
+    conn.commit()
 
 
 def _migrate_api_schema_check(conn):

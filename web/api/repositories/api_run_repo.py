@@ -9,7 +9,7 @@ logger = logging.getLogger("qaclan.api_run_repo")
 
 def _deser(row: dict) -> dict:
     out = dict(row)
-    for key in ("response_headers", "assertion_results", "schema_drift"):
+    for key in ("response_headers", "assertion_results", "schema_drift", "negative_result"):
         if isinstance(out.get(key), str):
             try:
                 out[key] = json.loads(out[key])
@@ -26,8 +26,8 @@ class ApiRunRepo:
         conn.execute(
             "INSERT INTO api_runs (id, suite_run_id, api_request_id, order_index, status, "
             "status_code, response_body, response_headers, duration_ms, assertion_results, "
-            "error_message, started_at, finished_at, schema_drift) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "error_message, started_at, finished_at, schema_drift, negative_result) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (rid, suite_run_id, api_request_id, order_index,
              result.get("status"), result.get("status_code"),
              result.get("response_body"),
@@ -37,7 +37,8 @@ class ApiRunRepo:
              result.get("error_message"),
              result.get("started_at", now),
              result.get("finished_at", now),
-             json.dumps(result.get("schema_drift")) if result.get("schema_drift") is not None else None),
+             json.dumps(result.get("schema_drift")) if result.get("schema_drift") is not None else None,
+             json.dumps(result.get("negative_result")) if result.get("negative_result") is not None else None),
         )
         conn.commit()
         logger.info("ApiRunRepo.create: %s for suite_run %s", rid, suite_run_id)

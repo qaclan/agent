@@ -199,6 +199,284 @@ def _render_schema_drift(drift) -> str:
     )
 
 
+_NEG_SEV = {
+    "critical": ("#cf222e", "‼"),
+    "major": ("#9a6700", "✗"),
+    "minor": ("#57606a", "!"),
+    "none": ("#1a7f37", "✓"),
+}
+_NEG_CAT_LABEL = {
+    "input-validation": "Input validation",
+    "request-level": "Request-level",
+    "injection": "Injection / fuzz",
+}
+_NEG_CAT_ORDER = ["input-validation", "request-level", "injection"]
+_NEG_CAT_COLOR = {"input-validation": "#0969da", "request-level": "#9a6700", "injection": "#cf222e"}
+_NEG_CAT_CAPTION = {
+    "input-validation": 'expects <b style="color:#0969da;font-family:monospace">4xx</b>',
+    "request-level": "each row own code",
+    "injection": 'checks <b style="color:#0969da;font-family:monospace">no 500 · not reflected</b>',
+}
+# kind → (text color, cell/tag background). Mirrors the JS qcn-c-* / qcn-*tag.* rules.
+_NEG_KIND = {
+    "g": ("#1a7f37", "rgba(26,127,55,.10)"),
+    "r": ("#cf222e", "rgba(207,34,46,.12)"),
+    "a": ("#9a6700", "rgba(154,103,0,.14)"),
+    "m": ("#57606a", "rgba(87,96,106,.10)"),
+}
+_NEG_SUB = {
+    "missing-required": "Missing", "wrong-type": "Wrong type", "null": "Null",
+    "empty": "Empty", "boundary-min": "Below min", "boundary-max": "Above max",
+    "boundary-minlength": "Too short", "boundary-maxlength": "Too long",
+    "enum": "Bad enum", "format": "Bad format", "extra-field": "Extra field",
+    "oversized": "Oversized", "no-auth": "No auth", "garbage-token": "Bad token",
+    "wrong-method": "Wrong method", "wrong-content-type": "Bad Content-Type",
+    "unknown-route": "Unknown route", "malformed-json": "Malformed JSON",
+    "sqli": "SQLi", "xss": "XSS", "path-traversal": "Traversal", "null-byte": "Null byte",
+}
+
+
+def _neg_sub(s):
+    return _NEG_SUB.get(s, s or "")
+
+
+def _neg_field(t):
+    t = t or ""
+    if t.startswith("body."):
+        return t[5:], "Body field"
+    if t.startswith("param."):
+        return t[6:], "Query param"
+    return t, ""
+
+
+def _neg_5xx(a):
+    return isinstance(a, int) and a >= 500
+
+
+def _neg_kind(c) -> str:
+    if c.get("passed"):
+        return "g"
+    if c.get("false_pass"):
+        return "r"
+    if c.get("category") == "injection":
+        return "r"
+    if c.get("severity") == "major":
+        return "a"
+    if c.get("severity") == "minor":
+        return "m"
+    return "r"
+
+
+def _neg_tag(c) -> str:
+    if c.get("passed"):
+        return "SAFE" if c.get("category") == "injection" else "REJECTED"
+    if c.get("false_pass"):
+        return "FALSE PASS"
+    if c.get("category") == "injection":
+        return "REFLECTED" if c.get("reflected") else ("SERVER ERROR" if _neg_5xx(c.get("actual_status")) else "FAILED")
+    if c.get("severity") == "major":
+        return "SERVER ERROR" if _neg_5xx(c.get("actual_status")) else "WRONG STATUS"
+    if c.get("severity") == "minor":
+        return "ERRORED" if c.get("actual_status") is None else "WRONG CODE"
+    return "CRITICAL"
+
+
+def _neg_rank(c) -> int:
+    if c.get("false_pass"):
+        return 0
+    if not c.get("passed") and c.get("severity") == "critical":
+        return 1
+    if not c.get("passed") and c.get("severity") == "major":
+        return 2
+    if not c.get("passed") and c.get("severity") == "minor":
+        return 3
+    if not c.get("passed"):
+        return 4
+    return 5
+
+
+def _neg_tag_html(c, width="104px") -> str:
+    k = _neg_kind(c)
+    color, bg = _NEG_KIND[k]
+    return (
+        f'<span style="flex:none;width:{width};text-align:center;font-size:9.5px;font-weight:700;'
+        f'text-transform:uppercase;letter-spacing:.03em;padding:2px 0;border-radius:4px;'
+        f'color:{color};background:{bg}">{_neg_tag(c)}</span>'
+    )
+
+
+def _neg_cat_head(cat, cl) -> str:
+    rej = sum(1 for c in cl if c.get("passed"))
+    return (
+        '<div style="display:flex;align-items:center;gap:10px;margin:0 0 6px;padding-bottom:5px;'
+        'border-bottom:1px solid #d0d7de">'
+        f'<span style="width:8px;height:8px;border-radius:2px;flex:none;background:{_NEG_CAT_COLOR.get(cat, "#57606a")}"></span>'
+        f'<span style="font-size:11.5px;font-weight:700;letter-spacing:.03em;text-transform:uppercase;color:#24292f">'
+        f'{_esc(_NEG_CAT_LABEL.get(cat, cat))}</span>'
+        f'<span style="font-size:11px;color:#57606a">{rej} of {len(cl)} rejected</span>'
+        f'<span style="margin-left:auto;font-size:10.5px;color:#24292f;background:rgba(9,105,218,.08);'
+        f'border:1px solid #d0d7de;border-radius:999px;padding:2px 10px;white-space:nowrap">'
+        f'{_NEG_CAT_CAPTION.get(cat, "")}</span></div>'
+    )
+
+
+def _neg_cell(c) -> str:
+    if not c:
+        return ('<td style="text-align:center;padding:2px 3px">'
+                '<span style="display:flex;align-items:center;justify-content:center;min-height:28px;'
+                'color:#8c959f;opacity:.4">·</span></td>')
+    k = _neg_kind(c)
+    color, bg = _NEG_KIND[k]
+    code = "—" if c.get("actual_status") is None else c.get("actual_status")
+    refl = ('<small style="display:block;font-size:8px;font-weight:600;text-transform:uppercase;'
+            'opacity:.85;margin-top:1px">refl</small>') if c.get("reflected") else ""
+    return (
+        f'<td style="text-align:center;padding:2px 3px">'
+        f'<span style="display:flex;flex-direction:column;align-items:center;justify-content:center;'
+        f'min-height:28px;padding:3px 5px;border-radius:6px;font-family:monospace;font-weight:700;'
+        f'font-size:12px;line-height:1.15;color:{color};background:{bg};border:1px solid {bg}">'
+        f'{_esc(str(code))}{refl}</span></td>'
+    )
+
+
+def _neg_grid_block(cat, cl) -> str:
+    subs, tgts, grid = [], [], {}
+    for c in cl:
+        if c.get("subtype") not in subs:
+            subs.append(c.get("subtype"))
+        if c.get("target") not in grid:
+            grid[c.get("target")] = {}
+            tgts.append(c.get("target"))
+        grid[c.get("target")][c.get("subtype")] = c
+    head = '<th style="text-align:left;width:150px;padding:5px 6px 7px;color:#57606a;font-weight:600;font-size:9.5px;text-transform:uppercase;letter-spacing:.03em">Field</th>'
+    for s in subs:
+        head += f'<th style="text-align:center;padding:5px 6px 7px;color:#57606a;font-weight:600;font-size:9.5px;text-transform:uppercase;letter-spacing:.03em">{_esc(_neg_sub(s))}</th>'
+    body = ""
+    for t in tgts:
+        n, kind_lbl = _neg_field(t)
+        kk = f'<span style="display:block;font-size:8.5px;text-transform:uppercase;letter-spacing:.04em;color:#8c959f;margin-top:1px">{_esc(kind_lbl)}</span>' if kind_lbl else ""
+        body += (
+            '<tr><td style="padding:2px 3px">'
+            f'<span style="font-family:monospace;color:#24292f;font-weight:600;font-size:12px">{_esc(n)}</span>{kk}</td>'
+            + "".join(_neg_cell(grid[t].get(s)) for s in subs) + '</tr>'
+        )
+    return (
+        '<div style="margin-top:16px">' + _neg_cat_head(cat, cl)
+        + '<div style="overflow-x:auto"><table style="border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed">'
+        + f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+        + '</div>'
+    )
+
+
+def _neg_list_block(cat, cl) -> str:
+    rows = ""
+    for c in sorted(cl, key=_neg_rank):
+        fail = not c.get("passed")
+        msg = (c.get("note") or "") if fail else f'rejected correctly — got {"—" if c.get("actual_status") is None else c.get("actual_status")}'
+        bg = "background:rgba(207,34,46,.10);" if fail else ""
+        rows += (
+            f'<div style="display:flex;align-items:center;gap:10px;padding:5px 8px;'
+            f'border-bottom:1px solid #eaeef2;border-radius:5px;{bg}">'
+            f'<span style="font-weight:600;font-size:12px;color:#24292f;min-width:150px">{_esc(_neg_sub(c.get("subtype")) or _neg_field(c.get("target"))[0])}</span>'
+            + _neg_tag_html(c)
+            + f'<span style="flex:1;min-width:0;font-size:11.5px;color:#57606a">{_esc(msg)}</span></div>'
+        )
+    return '<div style="margin-top:16px">' + _neg_cat_head(cat, cl) + f'<div>{rows}</div></div>'
+
+
+def _render_negative(nr) -> str:
+    """Render the negative-testing result block for the report, mirroring
+    web/static/api/components/negative-view.js (headline + count chips + a
+    per-category outcome heatmap + a findings list). Returns '' when empty."""
+    if not isinstance(nr, dict):
+        return ""
+    cases = nr.get("cases") or []
+    counts = nr.get("counts") or {}
+    if not cases or not counts.get("total"):
+        return ""
+
+    total = len(cases)
+    rej = fp = srv = other = crit_inj = 0
+    for c in cases:
+        if c.get("passed"):
+            rej += 1
+        elif c.get("false_pass"):
+            fp += 1
+        else:
+            if _neg_5xx(c.get("actual_status")):
+                srv += 1
+            else:
+                other += 1
+            if c.get("category") == "injection" and (c.get("reflected") or _neg_5xx(c.get("actual_status"))):
+                crit_inj += 1
+
+    worst = nr.get("worst_severity") or "none"
+    if worst == "critical":
+        hcolor, hbg, hicn = "#cf222e", "rgba(207,34,46,.08)", "⛔"
+    elif worst == "none":
+        hcolor, hbg, hicn = "#1a7f37", "rgba(26,127,55,.08)", "✓"
+    else:
+        hcolor, hbg, hicn = "#9a6700", "rgba(154,103,0,.10)", "⚠"
+
+    if fp:
+        htxt = f'{fp} false pass{"es" if fp > 1 else ""} — API accepted invalid input'
+    elif crit_inj:
+        htxt = f'{crit_inj} critical issue{"s" if crit_inj > 1 else ""} on fuzzed input'
+    elif total - rej > 0:
+        htxt = f'{total - rej} returned the wrong status'
+    else:
+        htxt = f'All {total} invalid inputs correctly rejected'
+
+    head = (
+        f'<div style="display:flex;align-items:center;gap:10px;padding:10px 13px;border-radius:8px;'
+        f'margin-bottom:10px;border:1px solid {hcolor};background:{hbg}">'
+        f'<span style="font-size:15px;flex:none;color:{hcolor}">{hicn}</span>'
+        f'<span style="font-size:13px;font-weight:700;color:{hcolor}">{_esc(htxt)}</span>'
+        f'<span style="margin-left:auto;font-size:11px;color:#57606a;font-weight:500;white-space:nowrap">{rej} / {total} rejected</span></div>'
+    )
+
+    def _chip(color, label, n):
+        border = ";border-color:#cf222e" if color == "#cf222e" else ""
+        return (f'<span style="font-size:10.5px;font-weight:600;padding:3px 9px;border-radius:999px;'
+                f'border:1px solid #d0d7de{border};color:{color}">{label} <b>{n}</b></span>')
+
+    chips = '<div style="display:flex;gap:7px;flex-wrap:wrap;margin:0 0 10px">' + _chip("#1a7f37", "REJECTED", rej)
+    if fp:
+        chips += _chip("#cf222e", "FALSE PASS", fp)
+    if srv:
+        chips += _chip("#9a6700", "SERVER ERROR", srv)
+    if other:
+        chips += _chip("#57606a", "FAILED", other)
+    chips += "</div>"
+
+    legend = (
+        '<div style="display:flex;gap:13px;flex-wrap:wrap;font-size:10px;color:#57606a;margin:0 0 12px">'
+        '<span><i style="width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:4px;background:#1a7f37"></i>rejected</span>'
+        '<span><i style="width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:4px;background:#cf222e"></i>false pass / reflected</span>'
+        '<span><i style="width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:4px;background:#9a6700"></i>server error</span>'
+        '<span><i style="width:9px;height:9px;border-radius:2px;display:inline-block;margin-right:4px;background:#57606a"></i>wrong code</span>'
+        '<span>· = not applicable</span></div>'
+    )
+
+    by_cat: dict = {}
+    for c in cases:
+        by_cat.setdefault(c.get("category", "other"), []).append(c)
+    groups = ""
+    for cat in _NEG_CAT_ORDER:
+        if cat in by_cat:
+            groups += _neg_list_block(cat, by_cat[cat]) if cat == "request-level" else _neg_grid_block(cat, by_cat[cat])
+    for cat, cl in by_cat.items():
+        if cat not in _NEG_CAT_ORDER:
+            groups += _neg_grid_block(cat, cl)
+
+    return (
+        '<div style="margin-bottom:14px">'
+        '<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
+        'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Negative Testing</div>'
+        + head + chips + legend + groups + '</div>'
+    )
+
+
 def _render_request_rows(request_results: list) -> str:
     rows = []
     for i, rr in enumerate(request_results):
@@ -223,6 +501,20 @@ def _render_request_rows(request_results: list) -> str:
                 f'<span style="margin-left:8px;background:{_dbg};color:{_dc};font-size:10px;'
                 f'font-weight:600;padding:1px 6px;border-radius:4px" title="Response schema drift">'
                 f'schema Δ {len(drift_diffs)}</span>'
+            )
+
+        neg = rr.get("negative_result")
+        neg_counts = neg.get("counts") if isinstance(neg, dict) else None
+        neg_pill = ""
+        if neg_counts and neg_counts.get("total"):
+            _nw = neg.get("worst_severity") or "none"
+            _nc, _ng = _NEG_SEV.get(_nw, _NEG_SEV["none"])
+            _nbg = {"critical": "rgba(207,34,46,.10)", "major": "rgba(154,103,0,.10)",
+                    "minor": "rgba(87,96,106,.12)", "none": "rgba(26,127,55,.10)"}.get(_nw, "rgba(26,127,55,.10)")
+            neg_pill = (
+                f'<span style="margin-left:8px;background:{_nbg};color:{_nc};font-size:10px;'
+                f'font-weight:600;padding:1px 6px;border-radius:4px" title="Negative testing">'
+                f'{_ng} neg {neg_counts.get("passed", 0)}/{neg_counts.get("total", 0)}</span>'
             )
 
         passed_count = sum(1 for a in assertions if a.get("passed"))
@@ -274,6 +566,7 @@ def _render_request_rows(request_results: list) -> str:
             f'{_render_assertions(assertions)}'
             f'</div>'
             f'{_render_schema_drift(drift)}'
+            f'{_render_negative(neg)}'
             f'<div style="margin-bottom:14px">'
             f'<div style="font-size:11px;font-weight:700;text-transform:uppercase;'
             f'letter-spacing:.05em;color:#57606a;margin-bottom:6px">Response Headers</div>'
@@ -296,7 +589,7 @@ def _render_request_rows(request_results: list) -> str:
             f'<span style="display:inline-block;background:{method_color};color:#fff;'
             f'font-size:10px;font-weight:700;padding:2px 7px;border-radius:4px;'
             f'min-width:50px;text-align:center">{_esc(method)}</span></td>'
-            f'<td style="padding:10px 12px;font-size:13px;font-weight:500">{name}{drift_pill}</td>'
+            f'<td style="padding:10px 12px;font-size:13px;font-weight:500">{name}{drift_pill}{neg_pill}</td>'
             f'<td style="padding:10px 12px;font-size:11px;font-family:monospace;'
             f'color:#57606a;max-width:260px;overflow:hidden;text-overflow:ellipsis;'
             f'white-space:nowrap" title="{url}">{url}</td>'
@@ -415,7 +708,7 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
     result_rows = conn.execute(
         "SELECT id, request_name, method, url, status, status_code, "
         "response_body, response_headers, duration_ms, assertion_results, "
-        "error_message, started_at, finished_at, schema_drift "
+        "error_message, started_at, finished_at, schema_drift, negative_result "
         "FROM api_request_results WHERE collection_run_id = ? ORDER BY order_index",
         (run_id,),
     ).fetchall()
@@ -423,7 +716,7 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
     request_results = []
     for r in result_rows:
         rr = dict(r)
-        for key in ("response_headers", "assertion_results", "schema_drift"):
+        for key in ("response_headers", "assertion_results", "schema_drift", "negative_result"):
             if isinstance(rr.get(key), str):
                 try:
                     rr[key] = json.loads(rr[key])
@@ -455,12 +748,19 @@ def generate_api_html_report(run_id: str, project_id: str) -> str:
         and (rr["schema_drift"].get("breaking_count") or 0) > 0
     )
 
+    neg_fail_count = sum(
+        1 for rr in request_results
+        if isinstance(rr.get("negative_result"), dict)
+        and (rr["negative_result"].get("worst_severity") in ("critical", "major"))
+    )
+
     stats = (
         _stat_card(total, "Total")
         + _stat_card(passed, "Passed", "#1a7f37")
         + _stat_card(failed, "Failed", "#cf222e")
         + (_stat_card(error_count, "Errors", "#9a6700") if error_count else "")
         + (_stat_card(drift_count, "Schema Drift", "#cf222e") if drift_count else "")
+        + (_stat_card(neg_fail_count, "Negative", "#cf222e") if neg_fail_count else "")
         + _stat_card(f"{passrate}%", "Pass Rate")
         + _stat_card(duration, "Duration")
     )
