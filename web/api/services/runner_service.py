@@ -149,6 +149,57 @@ def _requests_for_run(requests: list, col: dict | None, confirm_destructive: boo
             if _negatives_for_run(r, col, confirm_destructive, "only")[0]]
 
 
+def resolve_and_run_api_item(req: dict, col: dict | None, env_vars: dict, state: dict,
+                              state_path: str | None = None, include_negatives: bool = True,
+                              confirm_destructive: bool = False,
+                              negatives_mode: str = "default") -> dict:
+    """Resolve auth/schema-check/(optionally negative-check) for one request
+    against its collection, send it, capture a first-run schema baseline, and
+    persist any extracted variables into the collection's variable store.
+
+    This is the single per-request execution path shared by every automated
+    or ad-hoc runner (single send, collection run, suite run) — callers differ
+    only in how they set up `state`/`env_vars` and how they persist the
+    returned result row; the resolve+send+persist-vars sequence itself must
+    not drift between them.
+
+    `include_negatives=False` hard-disables negative testing regardless of
+    the request/collection's own configuration — used by callers (suites)
+    that must never run negatives.
+    """
+    from cli.api_runner import run_api_request
+
+    call_req = _resolve_auth(req, col)
+    schema_check_enabled = _resolve_schema_check(req, col)
+    baseline_schema = req.get("response_schema")
+
+    if include_negatives:
+        neg_enabled, neg_cases = _negatives_for_run(req, col, confirm_destructive, negatives_mode)
+        if negatives_mode == "only":
+            # Negatives-only run: suppress the happy-path checks; the base
+            # send still happens (it's the mutation source) but its status
+            # is judged by negatives alone.
+            call_req = {**call_req, "assertions": []}
+            schema_check_enabled = False
+    else:
+        neg_enabled, neg_cases = False, []
+
+    result = run_api_request(
+        call_req, env_vars, state, state_path=state_path,
+        baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
+        negative_enabled=neg_enabled, negative_cases=neg_cases,
+    )
+    _maybe_capture_baseline(req.get("id"), baseline_schema, result)
+
+    if result.get("state_updates") and req.get("collection_id"):
+        from web.api.repositories.collection_vars_repo import CollectionVarsRepo
+        vars_repo = CollectionVarsRepo()
+        for key, value in result["state_updates"].items():
+            vars_repo.upsert(req["collection_id"], key, str(value))
+
+    return result
+
+
 def _maybe_capture_baseline(request_id: str, baseline, result: dict):
     """Capture the first successful JSON response as the frozen response_schema
     baseline — only when nothing is stored yet (baseline is None) and the
@@ -174,7 +225,6 @@ class RunnerService:
         from web.api.repositories.request_repo import RequestRepo
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.collection_vars_repo import CollectionVarsRepo
-        from cli.api_runner import run_api_request
 
         req = RequestRepo().get(request_id, project_id)
         if req is None:
@@ -196,26 +246,9 @@ class RunnerService:
             seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"])
         state: dict = {"qaclan_vars": seed_vars} if seed_vars else {}
 
-        schema_check_enabled = _resolve_schema_check(req, col)
-        baseline_schema = req.get("response_schema")
-        result = run_api_request(
-            _resolve_auth(req, col), env_vars, state, state_path=None,
-            baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
-        )
-
-        # Capture the first successful JSON response as the frozen baseline.
-        # Never overwrites an existing response_schema — it stays frozen so the
-        # drift check has a stable reference (updated only via set_response_schema).
-        _maybe_capture_baseline(request_id, baseline_schema, result)
-
-        # Persist extracted vars back to collection_vars so subsequent single sends see them
-        if result.get("state_updates") and req.get("collection_id"):
-            from web.api.repositories.collection_vars_repo import CollectionVarsRepo
-            vars_repo = CollectionVarsRepo()
-            for key, value in result["state_updates"].items():
-                vars_repo.upsert(req["collection_id"], key, str(value))
-
-        return result
+        # Ordinary "Send" never fires negatives — include_negatives=False.
+        return resolve_and_run_api_item(req, col, env_vars, state, state_path=None,
+                                         include_negatives=False)
 
     def set_response_schema(self, request_id: str, project_id: str,
                             schema=None, response_body: str | None = None,
@@ -418,7 +451,6 @@ class RunnerService:
         from web.api.repositories.request_repo import RequestRepo
         from web.api.repositories.collection_run_repo import CollectionRunRepo
         from web.api.repositories.collection_vars_repo import CollectionVarsRepo
-        from cli.api_runner import run_api_request
         from datetime import datetime, timezone
 
         run_repo = CollectionRunRepo()
@@ -451,29 +483,15 @@ class RunnerService:
                     final_status = "STOPPED"
                     break
                 run_repo.update_current_index(run_id, idx)
-                schema_check_enabled = _resolve_schema_check(req, col)
-                baseline_schema = req.get("response_schema")
-                neg_enabled, neg_cases = _negatives_for_run(req, col, confirm_destructive, negatives_mode)
-                call_req = _resolve_auth(req, col)
-                if negatives_mode == "only":
-                    # Negatives-only run: suppress the happy-path checks; the base
-                    # send still happens (it's the mutation source) but its status
-                    # is judged by negatives alone. (Non-qualifying requests were
-                    # already filtered out of `requests`.)
-                    call_req = {**call_req, "assertions": []}
-                    schema_check_enabled = False
-                result = run_api_request(
-                    call_req, env_vars, state, state_path=None,
-                    baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
-                    negative_enabled=neg_enabled, negative_cases=neg_cases,
+                # Non-qualifying requests were already filtered out of `requests`
+                # by _requests_for_run when negatives_mode == "only".
+                result = resolve_and_run_api_item(
+                    req, col, env_vars, state, state_path=None,
+                    include_negatives=True, confirm_destructive=confirm_destructive,
+                    negatives_mode=negatives_mode,
                 )
-                _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append(result)
                 run_repo.create_request_result(run_id, req, result, idx)
-                # Persist extracted/script vars so subsequent requests and future runs see them
-                if result.get("state_updates"):
-                    for key, value in result["state_updates"].items():
-                        vars_repo.upsert(collection_id, key, str(value))
             else:
                 passed = sum(1 for r in results if r.get("status") == "PASSED")
                 failed_c = sum(1 for r in results if r.get("status") == "FAILED")
@@ -509,7 +527,6 @@ class RunnerService:
         from web.api.repositories.collection_repo import CollectionRepo
         from web.api.repositories.request_repo import RequestRepo
         from web.api.repositories.collection_run_repo import CollectionRunRepo
-        from cli.api_runner import run_api_request
         from datetime import datetime, timezone
 
         col = CollectionRepo().get(collection_id, project_id)
@@ -536,20 +553,13 @@ class RunnerService:
         results = []
         try:
             for idx, req in enumerate(requests):
-                schema_check_enabled = _resolve_schema_check(req, col)
-                baseline_schema = req.get("response_schema")
-                neg_enabled, neg_cases = _negatives_for_run(req, col, confirm_destructive, negatives_mode)
-                call_req = _resolve_auth(req, col)
-                if negatives_mode == "only":
-                    # Non-qualifying requests already filtered out of `requests`.
-                    call_req = {**call_req, "assertions": []}
-                    schema_check_enabled = False
-                result = run_api_request(
-                    call_req, env_vars, state, state_path=None,
-                    baseline_schema=baseline_schema, schema_check_enabled=schema_check_enabled,
-                    negative_enabled=neg_enabled, negative_cases=neg_cases,
+                # Non-qualifying requests already filtered out of `requests`
+                # by _requests_for_run when negatives_mode == "only".
+                result = resolve_and_run_api_item(
+                    req, col, env_vars, state, state_path=None,
+                    include_negatives=True, confirm_destructive=confirm_destructive,
+                    negatives_mode=negatives_mode,
                 )
-                _maybe_capture_baseline(req["id"], baseline_schema, result)
                 results.append({
                     "request_id": req["id"],
                     "name": req["name"],

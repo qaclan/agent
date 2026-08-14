@@ -21,7 +21,7 @@ def list_suites():
         rows = conn.execute(
             "SELECT su.id, su.cloud_id, su.name, su.channel, su.first_run_at, su.last_run_at, "
             "su.last_run_status, su.created_at, "
-            "(SELECT COUNT(*) FROM suite_items si WHERE si.suite_id = su.id) AS script_count "
+            "(SELECT COUNT(*) FROM suite_items si WHERE si.suite_id = su.id) AS item_count "
             "FROM suites su WHERE su.project_id = ? "
             "ORDER BY su.created_at DESC",
             (project_id,),
@@ -315,16 +315,24 @@ def remove_suite_item(suite_id, item_id):
 
 
 @bp.route('/api/suites/<suite_id>/order', methods=['PUT'])
-def reorder_suite_scripts(suite_id):
+def reorder_suite_items(suite_id):
+    """Reorder every item in a suite (script or api_request) by suite_items.id.
+
+    Accepts `item_ids`: the full, ordered list of suite_items.id covering
+    every item currently in the suite — not script_ids. A partial list (drag
+    only the scripts, leaving API items unmentioned) would let their
+    order_index drift out of sync with the rest, so the submitted set must
+    match the suite's current item set exactly.
+    """
     try:
         project_id = _require_active_project()
         if not project_id:
             return jsonify({"ok": False, "error": "No active project"}), 400
 
         data = request.get_json(force=True)
-        script_ids = data.get("script_ids", [])
-        if not script_ids:
-            return jsonify({"ok": False, "error": "script_ids array is required"}), 400
+        item_ids = data.get("item_ids", [])
+        if not item_ids:
+            return jsonify({"ok": False, "error": "item_ids array is required"}), 400
 
         conn = get_conn()
 
@@ -336,10 +344,21 @@ def reorder_suite_scripts(suite_id):
         if not suite:
             return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
 
-        for idx, sid in enumerate(script_ids):
+        current_ids = {
+            row["id"] for row in conn.execute(
+                "SELECT id FROM suite_items WHERE suite_id = ?", (suite_id,)
+            ).fetchall()
+        }
+        if len(item_ids) != len(current_ids) or set(item_ids) != current_ids:
+            return jsonify({
+                "ok": False,
+                "error": "item_ids must match the suite's current items exactly (no missing, extra, or duplicate ids)",
+            }), 400
+
+        for idx, iid in enumerate(item_ids):
             conn.execute(
-                "UPDATE suite_items SET order_index = ? WHERE suite_id = ? AND script_id = ?",
-                (idx, suite_id, sid),
+                "UPDATE suite_items SET order_index = ? WHERE suite_id = ? AND id = ?",
+                (idx, suite_id, iid),
             )
 
         conn.commit()

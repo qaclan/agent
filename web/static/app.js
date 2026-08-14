@@ -224,7 +224,9 @@ const routes = {
   settings: renderSettingsPage,
   api: () => {
     if (window.__qaclanApi) {
-      window.__qaclanApi.render(document.getElementById('page-content'));
+      const initialRequestId = window._qcApiInitialRequestId || null
+      window._qcApiInitialRequestId = null
+      window.__qaclanApi.render(document.getElementById('page-content'), initialRequestId);
     } else {
       document.getElementById('page-content').innerHTML = '<div class="empty-state">Loading API module...</div>';
     }
@@ -3888,7 +3890,7 @@ async function renderSuitesPage() {
                   </button>
                 ` : '<span class="text-muted text-sm">Not synced</span>'}
               </td>
-              <td><span class="badge badge-neutral">${s.script_count} scripts</span></td>
+              <td><span class="badge badge-neutral">${s.item_count} items</span></td>
               <td>${s.last_run_status
                 ? `<span class="badge ${s.last_run_status==='PASSED'?'badge-success':'badge-danger'}"><span class="badge-dot"></span>${s.last_run_status}</span>`
                 : '<span class="text-muted text-sm">Never</span>'}</td>
@@ -3969,22 +3971,37 @@ async function editSuiteModal(id) {
     const allItems = (suite.items || suite.scripts?.map(s => ({...s, item_type:'script', script_id:s.script_id, script_name:s.name})) || [])
       .sort((a,b) => a.order_index - b.order_index)
 
+    // One list, both item types — reorderable together (no separate
+    // script-only list; that used to duplicate every script row twice).
     const itemsHtml = allItems.length === 0
       ? '<p class="text-muted text-sm">No items yet.</p>'
-      : allItems.map(item => {
+      : allItems.map((item, i) => {
           if (item.item_type === 'api_request') {
-            return `<div class="suite-item-row" data-item-id="${item.item_id}" data-item-type="api_request">
+            return `<div class="suite-item-row" draggable="true" data-item-id="${item.item_id}" data-item-type="api_request">
+              <span class="suite-item-drag">⠿</span>
+              <span class="suite-item-order">${i + 1}</span>
               <span class="badge badge-neutral" style="font-size:10px">API</span>
-              <span>${escHtml(item.api_request_name || item.api_request_id)}</span>
-              <span class="text-muted text-sm">${escHtml(item.method||'')} ${escHtml(item.url||'').slice(0,40)}</span>
-              <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteItem('${id}','${item.item_id}')">×</button>
+              <span class="suite-item-info">
+                <span class="suite-item-name">${escHtml(item.api_request_name || item.api_request_id)}</span>
+                <span class="suite-item-url text-muted text-sm">${escHtml(item.url||'')}</span>
+              </span>
+              <span class="suite-item-actions">
+                <button class="btn btn-xs btn-ghost" onclick="viewApiRequestInEditor('${item.api_request_id}')">View</button>
+                <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteItem('${id}','${item.item_id}')">×</button>
+              </span>
             </div>`
           }
-          return `<div class="suite-item-row" data-item-id="${item.item_id}" data-item-type="script">
+          return `<div class="suite-item-row" draggable="true" data-item-id="${item.item_id}" data-item-type="script">
+            <span class="suite-item-drag">⠿</span>
+            <span class="suite-item-order">${i + 1}</span>
             <span class="badge badge-neutral" style="font-size:10px">E2E</span>
-            <span>${escHtml(item.script_name || item.name || '')}</span>
-            <button class="btn btn-xs btn-ghost" onclick="viewScriptModal('${item.script_id}')">View</button>
-            <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${item.script_id}')">×</button>
+            <span class="suite-item-info">
+              <span class="suite-item-name">${escHtml(item.script_name || item.name || '')}</span>
+            </span>
+            <span class="suite-item-actions">
+              <button class="btn btn-xs btn-ghost" onclick="viewScriptModal('${item.script_id}')">View</button>
+              <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteItem('${id}','${item.item_id}')">×</button>
+            </span>
           </div>`
         }).join('')
 
@@ -3995,21 +4012,6 @@ async function editSuiteModal(id) {
           <input type="text" id="edit-suite-name" value="${escHtml(suite.name)}">
           <button class="btn btn-sm btn-ghost" onclick="renameSuite('${id}')">Rename</button>
         </div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Scripts</label>
-      </div>
-      <div class="suite-script-list" id="suite-script-list">
-        ${suiteScripts.length === 0
-          ? '<p class="text-muted">No scripts in this suite yet.</p>'
-          : suiteScripts.map((s, i) => `
-          <div class="suite-script-row" draggable="true" data-script-id="${s.script_id}">
-            <span class="suite-script-drag">⠿</span>
-            <span class="suite-script-order">${i + 1}</span>
-            <span class="suite-script-name">${escHtml(s.name)}</span>
-            <button class="btn btn-xs btn-ghost" onclick="viewScriptModal('${s.script_id}')">View</button>
-            <button class="btn btn-xs btn-outline-danger" onclick="removeSuiteScript('${id}','${s.script_id}')">Remove</button>
-          </div>`).join('')}
       </div>
       <div class="form-group">
         <label class="form-label">Items</label>
@@ -4032,20 +4034,18 @@ async function editSuiteModal(id) {
   ], suite.name)
 
   window._editSuiteId = id
-  window._editSuiteScripts = suiteScripts
   window._editAllScripts = allScripts
   window._qcModalCleanupHook = () => {
     window._editSuiteId = null
-    window._editSuiteScripts = null
     window._editAllScripts = null
   }
 
-  // Drag-and-drop reordering
-  const list = document.getElementById('suite-script-list')
+  // Drag-and-drop reordering — one list, mixed item types together.
+  const list = document.getElementById('suite-item-list')
   if (list) {
     let dragEl = null
     list.addEventListener('dragstart', e => {
-      dragEl = e.target.closest('.suite-script-row')
+      dragEl = e.target.closest('.suite-item-row')
       if (!dragEl) return
       dragEl.classList.add('dragging')
       e.dataTransfer.effectAllowed = 'move'
@@ -4053,7 +4053,7 @@ async function editSuiteModal(id) {
     list.addEventListener('dragover', e => {
       e.preventDefault()
       e.dataTransfer.dropEffect = 'move'
-      const target = e.target.closest('.suite-script-row')
+      const target = e.target.closest('.suite-item-row')
       if (!target || target === dragEl) return
       const rect = target.getBoundingClientRect()
       const mid = rect.top + rect.height / 2
@@ -4068,22 +4068,18 @@ async function editSuiteModal(id) {
       dragEl.classList.remove('dragging')
       dragEl = null
       // Update order numbers
-      const rows = list.querySelectorAll('.suite-script-row')
-      const scriptIds = []
+      const rows = list.querySelectorAll('.suite-item-row')
+      const itemIds = []
       rows.forEach((row, i) => {
-        row.querySelector('.suite-script-order').textContent = i + 1
-        scriptIds.push(row.dataset.scriptId)
+        const orderEl = row.querySelector('.suite-item-order')
+        if (orderEl) orderEl.textContent = i + 1
+        itemIds.push(row.dataset.itemId)
       })
-      // Save new order
-      const res = await api('PUT', '/suites/' + id + '/order', { script_ids: scriptIds })
-      if (res.ok === false) toast(res.error, 'error')
-      else {
-        // Update local state so modal re-renders keep the new order
-        window._editSuiteScripts = scriptIds.map((sid, i) => {
-          const s = suiteScripts.find(x => x.script_id === sid)
-          return { ...s, order_index: i }
-        })
-      }
+      // Save new order — covers every item (script or API request); the
+      // endpoint rejects a submission that doesn't match the suite's full
+      // item set exactly.
+      const res = await api('PUT', '/suites/' + id + '/order', { item_ids: itemIds })
+      if (res.ok === false) { toast(res.error, 'error'); editSuiteModal(id) }
     })
   }
 }
@@ -4105,43 +4101,137 @@ async function addSuiteScript(suiteId) {
   editSuiteModal(suiteId)
 }
 
-async function removeSuiteScript(suiteId, scriptId) {
-  const res = await api('DELETE', '/suites/' + suiteId + '/scripts/' + scriptId)
-  if (res.ok === false) { toast(res.error, 'error'); return }
-  editSuiteModal(suiteId)
-}
-
 async function addApiRequestToSuite(suiteId) {
-  const res = await api('GET', '/api-requests')
-  const requests = res.requests || []
+  const [reqRes, colRes] = await Promise.all([
+    api('GET', '/api-requests'),
+    api('GET', '/collections'),
+  ])
+  const requests = reqRes.requests || []
   if (!requests.length) {
     toast('No API requests found. Create one in the API section first.', 'error')
     return
   }
-  const options = requests.map(r => `<option value="${r.id}">[${r.method}] ${escHtml(r.name)}</option>`).join('')
-  showModal('Add API Request to Suite', `
+  const colName = {}
+  ;(colRes.collections || []).forEach(c => { colName[c.id] = c.name })
+
+  // Group by collection, preserving each collection's own request order.
+  // Requests with no collection land in an "Uncategorized" bucket. Grouping
+  // (not scoping) — a user can still check requests across multiple
+  // collections and add them all in one go.
+  const groups = new Map()
+  requests.forEach(r => {
+    const cid = r.collection_id || '__none__'
+    if (!groups.has(cid)) groups.set(cid, [])
+    groups.get(cid).push(r)
+  })
+
+  const checkedIds = new Set()
+  // Purely a UI expand/collapse toggle for this picker session — nothing
+  // persisted; starts empty (every group expanded).
+  const collapsedGroups = new Set()
+
+  function renderList(filterText) {
+    const term = (filterText || '').trim().toLowerCase()
+    let html = ''
+    for (const [cid, reqs] of groups.entries()) {
+      const visible = reqs.filter(r => !term
+        || (r.name || '').toLowerCase().includes(term)
+        || (r.method || '').toLowerCase().includes(term)
+        || (r.url || '').toLowerCase().includes(term))
+      if (!visible.length) continue
+      const label = cid === '__none__' ? 'Uncategorized' : (colName[cid] || 'Unknown collection')
+      const selectedCount = reqs.filter(r => checkedIds.has(r.id)).length
+      // While searching, force-expand every group with a match so filtered
+      // results are never hidden behind a collapsed group.
+      const collapsed = !term && collapsedGroups.has(cid)
+      html += `<div class="api-picker-group">
+        <div class="api-picker-group-header" data-cid="${cid}">
+          <span class="api-picker-group-chevron">${collapsed ? '▸' : '▾'}</span>
+          <span class="api-picker-group-label">${escHtml(label)}</span>
+          <span class="api-picker-group-count">${selectedCount} selected</span>
+        </div>
+        <div class="api-picker-group-body" ${collapsed ? 'style="display:none"' : ''}>
+        ${visible.map(r => `
+          <label class="api-picker-row">
+            <input type="checkbox" data-req-id="${r.id}" ${checkedIds.has(r.id) ? 'checked' : ''}>
+            <span class="badge badge-neutral" style="font-size:10px">${escHtml(r.method)}</span>
+            <span>${escHtml(r.name)}</span>
+            <span class="text-muted text-sm">${escHtml((r.url || '').slice(0, 60))}</span>
+          </label>`).join('')}
+        </div>
+      </div>`
+    }
+    return html || '<p class="text-muted text-sm">No matching API requests.</p>'
+  }
+
+  showModal('Add API Requests to Suite', `
     <div class="form-group">
-      <label class="form-label">Select API Request</label>
-      <select id="api-req-select" class="input-sm" style="width:100%">${options}</select>
-    </div>`, [
+      <input type="text" id="api-picker-search" class="input-sm" style="width:100%"
+             placeholder="Search by name, method, or URL...">
+    </div>
+    <div id="api-picker-list" class="api-picker-list">${renderList('')}</div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
     { label: 'Add', cls: 'btn-primary', action: async () => {
-      const reqId = document.getElementById('api-req-select').value
-      const res = await api('POST', `/suites/${suiteId}/items`, { item_type: 'api_request', api_request_id: reqId })
-      if (res.ok === false) { toast(res.error, 'error'); return }
+      if (!checkedIds.size) { toast('Select at least one API request', 'error'); return }
+      // Insertion order of a Set is check order, not list order.
+      let addedCount = 0
+      for (const reqId of checkedIds) {
+        const res = await api('POST', `/suites/${suiteId}/items`, { item_type: 'api_request', api_request_id: reqId })
+        if (res.ok === false) { toast(res.error, 'error'); continue }
+        addedCount++
+      }
       closeModal()
-      toast('API request added to suite')
+      toast(`${addedCount} API request${addedCount === 1 ? '' : 's'} added to suite`)
       editSuiteModal(suiteId)
     }}
-  ])
+  ], '', 'lg')
+
+  function _rerenderPickerList() {
+    const list = document.getElementById('api-picker-list')
+    const scrollTop = list.scrollTop
+    list.innerHTML = renderList(document.getElementById('api-picker-search').value)
+    list.scrollTop = scrollTop
+  }
+  document.getElementById('api-picker-list').addEventListener('change', e => {
+    const cb = e.target.closest('input[type=checkbox][data-req-id]')
+    if (!cb) return
+    if (cb.checked) checkedIds.add(cb.dataset.reqId)
+    else checkedIds.delete(cb.dataset.reqId)
+    // Re-render just to refresh the "N selected" count next to the group
+    // label — scroll position preserved so ticking several boxes in a row
+    // doesn't keep jumping the list back to the top.
+    _rerenderPickerList()
+  })
+  document.getElementById('api-picker-list').addEventListener('click', e => {
+    const header = e.target.closest('.api-picker-group-header')
+    if (!header) return
+    const cid = header.dataset.cid
+    if (collapsedGroups.has(cid)) collapsedGroups.delete(cid)
+    else collapsedGroups.add(cid)
+    _rerenderPickerList()
+  })
+  document.getElementById('api-picker-search').addEventListener('input', e => {
+    document.getElementById('api-picker-list').innerHTML = renderList(e.target.value)
+  })
 }
 
 async function removeSuiteItem(suiteId, itemId) {
-  if (!confirm('Remove this item from the suite?')) return
+  const ok = await window._confirmDialog(
+    'Remove this item from the suite?',
+    'It will not delete the underlying script or API request.',
+    'Remove', 'btn btn-sm btn-danger',
+  )
+  if (!ok) return
   const res = await api('DELETE', `/suites/${suiteId}/items/${itemId}`)
   if (res.ok === false) { toast(res.error, 'error'); return }
   toast('Item removed')
   editSuiteModal(suiteId)
+}
+
+async function viewApiRequestInEditor(requestId) {
+  closeModal()
+  window._qcApiInitialRequestId = requestId
+  await navigate('api')
 }
 
 async function runSuiteModal(id, name) {
@@ -4317,29 +4407,11 @@ function showRunResults(run, suiteName) {
     <div class="run-history-scroll">
     ${scripts.map(s => {
       if (s.item_type === 'api_request') {
-        const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
-        const badge = s.status === 'PASSED'
-          ? '<span class="badge badge-success"><span class="badge-dot"></span>PASSED</span>'
-          : s.status === 'FAILED'
-          ? '<span class="badge badge-danger"><span class="badge-dot"></span>FAILED</span>'
-          : '<span class="badge badge-neutral">ERROR</span>'
-        const assertCount = (s.assertion_results || []).length
-        const assertPass = (s.assertion_results || []).filter(a => a.passed).length
-        return `<div class="script-result-row ${cls}">
-          <div class="script-result-header">
-            <div class="script-result-name">
-              <span class="badge badge-neutral" style="font-size:10px">API</span>
-              <strong>${escHtml(s.name)}</strong>
-            </div>
-            <div class="script-result-meta">
-              ${badge}
-              ${s.status_code ? `<span class="text-muted text-sm">${s.status_code}</span>` : ''}
-              <span class="text-muted text-sm">${s.duration_ms || 0}ms</span>
-              ${assertCount ? `<span class="text-muted text-sm">${assertPass}/${assertCount} assertions</span>` : ''}
-            </div>
-          </div>
-          ${s.error_message ? `<div class="script-result-error">${escHtml(s.error_message)}</div>` : ''}
-        </div>`
+        // Render suite API items in the same rich format as the API section's
+        // collection-run view (method pill · name · status · code · duration ·
+        // assertions, expanding to reason / assertions / schema-drift tree /
+        // response body). showNegative:false — suites never run negatives.
+        return qcApiResultRow(s, { showNegative: false })
       }
       // existing script item rendering continues below
       const cls = s.status === 'PASSED' ? 'pass' : s.status === 'FAILED' ? 'fail' : 'skip'
@@ -4906,6 +4978,103 @@ async function viewApiRunModal(runId) {
 
   _renderRows()
 }
+
+// Shared API-result row+detail used by the suite run-results / Execution
+// History view so a suite API item renders in the same rich format as the
+// API section's collection-run view (method pill · name · status · code ·
+// duration · assertions, expanding to reason / assertions / schema-drift
+// tree / response body). Reuses the same schema-drift renderer
+// (window.qcSchemaDiffHtml/qcSchemaDriftPill) so the two views can't drift.
+// opts.showNegative gates the negative-testing section — suites never
+// produce one, so they pass false. Returns an HTML string.
+function qcApiResultRow(item, opts) {
+  opts = opts || {}
+  const method = (item.method || '').toUpperCase()
+  const name = item.request_name || item.name || item.api_request_id || ''
+  const status = item.status || 'ERROR'
+  const code = item.status_code
+  const dur = item.duration_ms
+  const assertions = item.assertion_results || []
+  const passedA = assertions.filter(a => a.passed).length
+  const drift = item.schema_drift
+  const methodColors = { GET:'#0969da', POST:'#1a7f37', PUT:'#e16f24', PATCH:'#9a6700', DELETE:'#cf222e', HEAD:'#6e40c9' }
+  const mc = methodColors[method] || '#57606a'
+  const sc = status === 'PASSED' ? 'var(--success,#22c55e)' : status === 'FAILED' ? 'var(--danger,#ef4444)' : 'var(--warning,#f59e0b)'
+  const codeColor = code == null ? '' : (code >= 200 && code < 300 ? 'var(--success,#22c55e)' : code >= 300 && code < 400 ? 'var(--info,#60a5fa)' : code >= 400 ? 'var(--danger,#ef4444)' : '')
+  const durColor = dur == null ? '' : (dur < 300 ? 'var(--success,#22c55e)' : dur < 1000 ? 'var(--warning,#f59e0b)' : 'var(--danger,#ef4444)')
+  const driftPill = window.qcSchemaDriftPill ? window.qcSchemaDriftPill(drift) : ''
+  const negPill = opts.showNegative && window.qcNegativePill ? window.qcNegativePill(item.negative_result) : ''
+  const statusCls = status === 'PASSED' ? 'pass' : status === 'FAILED' ? 'fail' : 'skip'
+
+  // ── Detail panel ──
+  let reasonHtml = ''
+  if (item.error_message) reasonHtml += `<div class="api-run-reason">⚠ ${escHtml(item.error_message)}</div>`
+  if (status !== 'PASSED' && item.response_body) {
+    try {
+      const parsed = JSON.parse(item.response_body)
+      if (parsed && typeof parsed === 'object') {
+        const pick = parsed.error ?? parsed.message ?? parsed.detail ?? parsed.msg
+          ?? parsed.reason ?? parsed.errorMessage ?? parsed.description
+          ?? (Array.isArray(parsed.errors) ? (typeof parsed.errors[0] === 'string' ? parsed.errors[0] : JSON.stringify(parsed.errors[0])) : undefined)
+        if (pick != null) reasonHtml += `<div class="api-run-reason">${escHtml(String(pick))}</div>`
+      }
+    } catch (_) {}
+  }
+
+  let assertHtml = '<div class="api-run-detail-label">Assertions</div>'
+  if (!assertions.length) {
+    assertHtml += `<div class="api-run-muted">${status === 'FAILED' && code != null
+      ? `No assertions — HTTP ${code} — request failed`
+      : 'No assertions — pass/fail determined by HTTP status code (<400 = passed)'}</div>`
+  } else {
+    assertHtml += assertions.map(a => {
+      let t = (a.passed ? '✓ ' : '✗ ') + (a.type || '')
+      if (a.path) t += ' ' + a.path
+      if (a.key) t += ' ' + a.key
+      if (a.op) t += ' ' + a.op
+      if (a.value != null) t += ' ' + String(a.value)
+      if (!a.passed && a.actual != null) t += ' → actual: ' + String(a.actual)
+      else if (!a.passed && a.error) t += ' → eval error: ' + a.error
+      return `<div style="color:${a.passed ? 'var(--success,#22c55e)' : 'var(--danger,#ef4444)'};margin-bottom:2px">${escHtml(t)}</div>`
+    }).join('')
+  }
+
+  let driftHtml = ''
+  if (drift && Array.isArray(drift.differences) && drift.differences.length && window.qcSchemaDiffHtml) {
+    driftHtml = `<div class="api-run-detail-label">Schema drift</div>${window.qcSchemaDiffHtml(drift)}`
+  }
+
+  let negHtml = ''
+  if (opts.showNegative && item.negative_result && item.negative_result.counts
+      && item.negative_result.counts.total && window.qcNegativeCasesHtml) {
+    negHtml = `<div class="api-run-detail-label">Negative Testing</div>${window.qcNegativeCasesHtml(item.negative_result)}`
+  }
+
+  let bodyHtml = ''
+  if (item.response_body) {
+    let pretty = item.response_body
+    try { pretty = JSON.stringify(JSON.parse(item.response_body), null, 2) } catch (_) {}
+    if (pretty.length > 4000) pretty = pretty.slice(0, 4000) + '\n… (truncated)'
+    bodyHtml = `<div class="api-run-detail-label">Response body</div><pre class="api-run-body">${escHtml(pretty)}</pre>`
+  } else if (status !== 'PASSED') {
+    bodyHtml = '<div class="api-run-muted">No response body received</div>'
+  }
+
+  return `<div class="api-run-item ${statusCls}">
+    <div class="api-run-item-head" onclick="this.closest('.api-run-item').classList.toggle('open')">
+      <span class="api-run-method" style="background:${mc}">${escHtml(method || 'API')}</span>
+      <span class="api-run-name">${escHtml(name)}</span>
+      ${driftPill}${negPill}
+      <span class="api-run-status" style="color:${sc}">${escHtml(status)}</span>
+      <span class="api-run-code" style="color:${codeColor}">${code == null ? '—' : code}</span>
+      <span class="api-run-dur" style="color:${durColor}">${dur == null ? '—' : dur + 'ms'}</span>
+      <span class="api-run-assert">${passedA}/${assertions.length}</span>
+      <span class="api-run-chev">▾</span>
+    </div>
+    <div class="api-run-detail">${reasonHtml}${assertHtml}${driftHtml}${negHtml}${bodyHtml}</div>
+  </div>`
+}
+window.qcApiResultRow = qcApiResultRow
 
 // ── Environments Page ───────────────────────────────────────────
 

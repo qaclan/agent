@@ -174,7 +174,7 @@ def get_run(run_id):
         ).fetchall()
         # error_detail is stored as a JSON string — parse it so the frontend
         # gets a structured object, not a string.
-        run["scripts"] = []
+        script_items = []
         for sr in script_rows:
             d = dict(sr)
             if d.get("error_detail"):
@@ -182,7 +182,32 @@ def get_run(run_id):
                     d["error_detail"] = json.loads(d["error_detail"])
                 except (TypeError, ValueError):
                     d["error_detail"] = None
-            run["scripts"].append(d)
+            script_items.append(d)
+
+        # API items live in a separate table (api_runs) — merge them in by
+        # order_index so reopening a past run shows every item, not just
+        # scripts. Without this, run["total"] (from suite_runs, counts both
+        # types) doesn't match the number of rows actually returned here.
+        from web.api.repositories.api_run_repo import ApiRunRepo
+        api_items = [
+            {
+                "item_type": "api_request",
+                "api_request_id": a["api_request_id"],
+                "name": a.get("request_name") or a["api_request_id"],
+                "method": a.get("method"),
+                "status": a.get("status"),
+                "duration_ms": a.get("duration_ms"),
+                "status_code": a.get("status_code"),
+                "error_message": a.get("error_message"),
+                "assertion_results": a.get("assertion_results") or [],
+                "schema_drift": a.get("schema_drift"),
+                "response_body": a.get("response_body"),
+                "response_headers": a.get("response_headers"),
+                "order_index": a.get("order_index"),
+            }
+            for a in ApiRunRepo().list_by_suite_run(run_id)
+        ]
+        run["scripts"] = sorted(script_items + api_items, key=lambda r: r.get("order_index") or 0)
 
         return jsonify({"ok": True, "run": run})
     except Exception as e:
@@ -424,29 +449,32 @@ def execute_run():
                     api_start = time.time()
 
                     try:
-                        from cli.api_runner import run_api_request
+                        import json as _json
+                        from web.api.services.runner_service import resolve_and_run_api_item
                         from web.api.repositories.api_run_repo import ApiRunRepo
+                        from web.api.repositories.request_repo import RequestRepo
+                        from web.api.repositories.collection_repo import CollectionRepo
 
-                        # Load the api_request row
-                        api_req_row = conn.execute(
-                            "SELECT * FROM api_requests WHERE id = ?", (api_req_id,)
-                        ).fetchone()
-                        if not api_req_row:
+                        # Load the request the SAME way a collection run does:
+                        # RequestRepo.get() fully deserializes every JSON column
+                        # (response_schema, pre/post_extractor, assertions, …). A
+                        # raw SELECT * left response_schema a string, and the
+                        # schema-drift check then diffed that string against the
+                        # inferred type-tree → false breaking drift → the suite
+                        # failed a request that passes in its collection. Loading
+                        # through the repo makes the baseline a type-tree and the
+                        # verdict identical to the collection run. See openspec
+                        # change fix-suite-api-report-and-parity.
+                        api_req = RequestRepo().get(api_req_id, project_id)
+                        if api_req is None:
                             raise LookupError(f"api_request {api_req_id} not found")
 
-                        import json as _json
-                        api_req = dict(api_req_row)
-                        for _key in ("headers", "params", "assertions"):
-                            if isinstance(api_req.get(_key), str):
-                                try:
-                                    api_req[_key] = _json.loads(api_req[_key])
-                                except (ValueError, TypeError):
-                                    api_req[_key] = []
-                        if isinstance(api_req.get("auth_config"), str):
-                            try:
-                                api_req["auth_config"] = _json.loads(api_req["auth_config"])
-                            except (ValueError, TypeError):
-                                api_req["auth_config"] = {}
+                        # Load the parent collection the same way too, so
+                        # auth_type='inherit' and schema-check enablement resolve
+                        # identically to a standalone collection run.
+                        api_col = None
+                        if api_req.get("collection_id"):
+                            api_col = CollectionRepo().get(api_req["collection_id"], project_id)
 
                         # Load state.json and extract qaclan_vars
                         state_dict: dict = {}
@@ -456,14 +484,51 @@ def execute_run():
                             except (ValueError, OSError):
                                 state_dict = {}
 
-                        api_result = run_api_request(
-                            api_req, env_vars_dict, state_dict, state_path=str(state_file)
+                        # Build the state this API request resolves against in a
+                        # SEPARATE in-memory copy — never seed into `state_dict`
+                        # itself. `state_dict` is the shared on-disk state that
+                        # web-script items read/write (cookies, origins, and the
+                        # qaclan_vars extracted by earlier items); polluting it
+                        # with the collection seed would leak every collection
+                        # variable to later script items as a QACLAN_STATE_* env
+                        # var. The seed lives only for this call.
+                        #
+                        # Seed the request's collection variables the same way a
+                        # collection run does. Without it a suite API item can only
+                        # see variables that survive in state.json — and an
+                        # intervening web-script storage-state snapshot can drop
+                        # qaclan_vars, after which resolve_vars falls through to a
+                        # STALE environment variable of the same name (e.g. an old
+                        # access_token) and the request fails with an expired
+                        # token. An earlier login item persists its fresh token to
+                        # collection_vars every run, so the seed is fresh; vars
+                        # extracted into state.json THIS run take precedence.
+                        run_state = dict(state_dict)
+                        if api_req.get("collection_id"):
+                            from web.api.repositories.collection_vars_repo import CollectionVarsRepo
+                            _seed = CollectionVarsRepo().as_seed_dict(api_req["collection_id"]) or {}
+                            if _seed:
+                                run_state["qaclan_vars"] = {**_seed, **state_dict.get("qaclan_vars", {})}
+
+                        # Suites never run negative testing — include_negatives=False.
+                        # resolve_and_run_api_item also persists any extracted vars
+                        # into collection_vars (same as a standalone collection run).
+                        api_result = resolve_and_run_api_item(
+                            api_req, api_col, env_vars_dict, run_state,
+                            state_path=str(state_file), include_negatives=False,
                         )
 
-                        # Merge state_updates back into state.json qaclan_vars
+                        # Persist only the vars genuinely extracted THIS run back
+                        # into the shared state.json qaclan_vars — NOT the seed — so
+                        # a later script item reads exactly those (as
+                        # QACLAN_STATE_<KEY>), unchanged from before this fix. Carry
+                        # _last_response forward for a following API item's
+                        # pre-extractor. Cookies/origins in state_dict are untouched.
                         state_updates = api_result.get("state_updates", {})
                         if state_updates:
                             state_dict.setdefault("qaclan_vars", {}).update(state_updates)
+                            if "_last_response" in run_state:
+                                state_dict["_last_response"] = run_state["_last_response"]
                             try:
                                 state_file.write_text(_json.dumps(state_dict), encoding="utf-8")
                             except OSError as _ose:
@@ -473,6 +538,12 @@ def execute_run():
                         ApiRunRepo().create(run_id, api_req_id, item["order_index"], api_result)
 
                         api_duration_ms = int((time.time() - api_start) * 1000)
+                        # run_api_request already folds assertion failure and a
+                        # breaking schema-drift verdict into status='FAILED', and a
+                        # request exception into status='ERROR' — negatives never
+                        # run here (include_negatives=False above), so they never
+                        # factor in. This is exactly the suite API item failure
+                        # definition; no extra logic needed.
                         api_status = api_result.get("status", "ERROR")
                         if api_status == "PASSED":
                             passed += 1
@@ -485,11 +556,15 @@ def execute_run():
                             "item_type": "api_request",
                             "api_request_id": api_req_id,
                             "name": api_req.get("name", api_req_id),
+                            "method": api_req.get("method"),
                             "status": api_status,
                             "duration_ms": api_duration_ms,
                             "status_code": api_result.get("status_code"),
                             "error_message": api_result.get("error_message"),
                             "assertion_results": api_result.get("assertion_results", []),
+                            "schema_drift": api_result.get("schema_drift"),
+                            "response_body": api_result.get("response_body"),
+                            "response_headers": api_result.get("response_headers"),
                         })
                         logger.info("execute_run: [%d/%d] API '%s' — %s (%dms)",
                                     idx + 1, total, api_req.get("name"), api_status, api_duration_ms)
