@@ -423,7 +423,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // Query string in the URL bar is a display convenience, not a wire value —
   // the resolved request is built server-side from the params table. Only
   // escape the chars that are structurally significant to our own & / =
-  // splitting, so {{VAR}} tokens stay readable instead of percent-encoded.
+  // splitting, so {{var}} tokens stay readable instead of percent-encoded.
   function _decodeQueryPart(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
   function _encodeQueryPart(s) { return String(s).replace(/[&=#%]/g, c => encodeURIComponent(c)); }
 
@@ -475,7 +475,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   // ── Path Variables ──
   const pathVarsTable = createKeyValueTable({
-    placeholder: { key: 'param', value: 'value or {{VAR}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
+    placeholder: { key: 'param', value: 'value or {{var}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
     getVarsList: () => _allVarsList,
     onChange: () => _syncUrlFromPathVars(),
   });
@@ -486,7 +486,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     hdr.textContent = 'Path Variables';
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = 'Synced with {param} segments in the URL — renaming/adding/removing a row updates the URL too. Values support {{VAR}} syntax.';
+    hint.textContent = 'Synced with {param} segments in the URL — renaming/adding/removing a row updates the URL too. Values support {{var}} syntax.';
     pathVarsSection.appendChild(hdr);
     pathVarsSection.appendChild(hint);
     pathVarsSection.appendChild(pathVarsTable.el);
@@ -504,7 +504,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const _storedPathParams = r.path_params || [];
 
   // Matches single-brace {param} segments, excluding any brace that's part of
-  // a {{VAR}} token (even a malformed one missing its closing brace). Safari
+  // a {{var}} token (even a malformed one missing its closing brace). Safari
   // <16.4 has no lookbehind support, so adjacency is checked manually below
   // instead of via `(?<!\{)`.
   const PATH_VAR_RE = /\{([^{}]+)\}/g;
@@ -1089,18 +1089,18 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       authFieldsDiv.appendChild(hint);
     } else if (type === 'bearer') {
       authFieldsDiv.appendChild(_makeField(
-        'Bearer Token', '{{ACCESS_TOKEN}}',
+        'Bearer Token', '{{access_token}}',
         () => cfg.token || '',
         v => { cfg.token = v; _authConfigCache = JSON.stringify(cfg); }
       ));
     } else if (type === 'basic') {
       authFieldsDiv.appendChild(_makeField(
-        'Username', '{{USERNAME}}',
+        'Username', '{{username}}',
         () => cfg.username || '',
         v => { cfg.username = v; _authConfigCache = JSON.stringify(cfg); }
       ));
       authFieldsDiv.appendChild(_makeField(
-        'Password', '{{PASSWORD}}',
+        'Password', '{{password}}',
         () => cfg.password || '',
         v => { cfg.password = v; _authConfigCache = JSON.stringify(cfg); }
       ));
@@ -1111,19 +1111,19 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
         v => { cfg.key_name = v; _authConfigCache = JSON.stringify(cfg); }
       ));
       authFieldsDiv.appendChild(_makeField(
-        'Key Value', '{{API_KEY}}',
+        'Key Value', '{{api_key}}',
         () => cfg.key_value || '',
         v => { cfg.key_value = v; _authConfigCache = JSON.stringify(cfg); }
       ));
     } else {
       const hint = document.createElement('p');
       hint.className = 'req-section-hint';
-      hint.textContent = 'Enter auth config as JSON. Use {{VAR}} syntax to reference environment variables.';
+      hint.textContent = 'Enter auth config as JSON. Use {{var}} syntax to reference environment variables.';
       authFieldsDiv.appendChild(hint);
       const ta = document.createElement('textarea');
       ta.className = 'input-sm';
       ta.style.cssText = 'width:100%;min-height:100px;font-family:var(--font-mono);font-size:12px;';
-      ta.placeholder = '{"token": "{{ACCESS_TOKEN}}"}';
+      ta.placeholder = '{"token": "{{access_token}}"}';
       ta.value = _authConfigCache;
       ta.oninput = () => { _authConfigCache = ta.value; };
       authFieldsDiv.appendChild(ta);
@@ -1159,7 +1159,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     if (type === 'bearer') {
       lockedName = 'Authorization';
-      lockedValue = 'Bearer ' + (cfg.token || '{{ACCESS_TOKEN}}');
+      lockedValue = 'Bearer ' + (cfg.token || '{{access_token}}');
       sourceLabel = 'Auth tab →';
       sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
     } else if (type === 'basic') {
@@ -1169,7 +1169,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
     } else if (type === 'api_key') {
       lockedName = cfg.key_name || null;
-      lockedValue = cfg.key_value || '{{API_KEY}}';
+      lockedValue = cfg.key_value || '{{api_key}}';
       sourceLabel = 'Auth tab →';
       sourceClick = () => { tabBar.querySelectorAll('.req-tab').forEach(t => { if (t.textContent === 'Auth') t.click(); }); };
     } else if (type === 'oauth2') {
@@ -1192,13 +1192,13 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       sourceLabel = 'Collection auth';
       if (colType === 'bearer') {
         lockedName = 'Authorization';
-        lockedValue = 'Bearer ' + (colCfg.token || '{{ACCESS_TOKEN}}');
+        lockedValue = 'Bearer ' + (colCfg.token || '{{access_token}}');
       } else if (colType === 'basic') {
         lockedName = 'Authorization';
         lockedValue = 'Basic …';
       } else if (colType === 'api_key') {
         lockedName = colCfg.key_name || null;
-        lockedValue = colCfg.key_value || '{{API_KEY}}';
+        lockedValue = colCfg.key_value || '{{api_key}}';
       } else if (colType === 'oauth2') {
         lockedName = 'Authorization';
         lockedValue = 'Bearer … (via token URL)';
@@ -1538,7 +1538,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     const hint = document.createElement('p');
     hint.className = 'req-section-hint';
-    hint.textContent = hintText || 'Extract values from the response JSON and save as variables. Use {{VAR_NAME}} in later requests.';
+    hint.textContent = hintText || 'Extract values from the response JSON and save as variables. Use {{var_name}} in later requests.';
     div.appendChild(hint);
 
     // Schema tree (populated after _addRow is defined below)
