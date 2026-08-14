@@ -184,17 +184,17 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
         hint.textContent = 'No authentication — inheriting requests will send no auth headers.';
         authFieldsWrap.appendChild(hint);
       } else if (type === 'bearer') {
-        authFieldsWrap.appendChild(_colAuthField('Bearer Token', '{{ACCESS_TOKEN}}', 'token'));
+        authFieldsWrap.appendChild(_colAuthField('Bearer Token', '{{access_token}}', 'token'));
       } else if (type === 'basic') {
-        authFieldsWrap.appendChild(_colAuthField('Username', '{{USERNAME}}', 'username'));
-        authFieldsWrap.appendChild(_colAuthField('Password', '{{PASSWORD}}', 'password'));
+        authFieldsWrap.appendChild(_colAuthField('Username', '{{username}}', 'username'));
+        authFieldsWrap.appendChild(_colAuthField('Password', '{{password}}', 'password'));
       } else if (type === 'api_key') {
         authFieldsWrap.appendChild(_colAuthField('Header / Param Name', 'X-API-Key', 'key'));
-        authFieldsWrap.appendChild(_colAuthField('Key Value', '{{API_KEY}}', 'value'));
+        authFieldsWrap.appendChild(_colAuthField('Key Value', '{{api_key}}', 'value'));
       } else if (type === 'oauth2') {
         authFieldsWrap.appendChild(_colAuthField('Token URL', 'https://...', 'token_url'));
-        authFieldsWrap.appendChild(_colAuthField('Client ID', '{{CLIENT_ID}}', 'client_id'));
-        authFieldsWrap.appendChild(_colAuthField('Client Secret', '{{CLIENT_SECRET}}', 'client_secret'));
+        authFieldsWrap.appendChild(_colAuthField('Client ID', '{{client_id}}', 'client_id'));
+        authFieldsWrap.appendChild(_colAuthField('Client Secret', '{{client_secret}}', 'client_secret'));
       }
     }
 
@@ -240,7 +240,7 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
 
     const hdr = document.createElement('div');
     hdr.style.cssText = 'font-size:12px;color:var(--text-secondary);line-height:1.5;';
-    hdr.textContent = 'Seed values for {{VAR}} tokens set by post-scripts (qc.set). Pre-populated before each run. Tick Secret to encrypt a value at rest.';
+    hdr.textContent = 'Seed values for {{var}} tokens set by post-scripts (qc.set). Pre-populated before each run. Tick Secret to encrypt a value at rest.';
     wrap.appendChild(hdr);
 
     const tableWrap = document.createElement('div');
