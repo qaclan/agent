@@ -164,6 +164,12 @@ def generate_html_report(run_id: str) -> str:
         (run_id,),
     ).fetchall()
 
+    # API items live in api_runs, a separate table from script_runs — fetch
+    # and merge them in by order_index so the report includes every item,
+    # not just scripts (run["total"] already counts both).
+    from web.api.repositories.api_run_repo import ApiRunRepo
+    api_items = ApiRunRepo().list_by_suite_run(run_id)
+
     total = run["total"] or 0
     passed = run["passed"] or 0
     failed = run["failed"] or 0
@@ -189,9 +195,10 @@ def generate_html_report(run_id: str) -> str:
         ]
     )
 
-    # Failures grouped by category.
+    # Failures grouped by category (script items only — API items don't have
+    # this error-classification concept).
     cat_counts: dict = {}
-    parsed = []
+    rendered: list = []  # (order_index, html) — merged and sorted below
     for scr in scripts:
         ed = None
         if scr["error_detail"]:
@@ -201,7 +208,12 @@ def generate_html_report(run_id: str) -> str:
                 ed = None
         if scr["status"] == "FAILED" and ed and ed.get("category"):
             cat_counts[ed["category"]] = cat_counts.get(ed["category"], 0) + 1
-        parsed.append((scr, ed))
+        rendered.append((scr["order_index"] or 0, _render_script(scr, ed)))
+
+    for item in api_items:
+        rendered.append((item.get("order_index") or 0, _render_api_item(item)))
+
+    rendered.sort(key=lambda pair: pair[0])
 
     chips = ""
     if cat_counts:
@@ -210,7 +222,7 @@ def generate_html_report(run_id: str) -> str:
             for c, n in sorted(cat_counts.items(), key=lambda kv: -kv[1])
         ) + "</div>"
 
-    scripts_html = "".join(_render_script(scr, ed) for scr, ed in parsed)
+    scripts_html = "".join(frag for _, frag in rendered)
 
     version = ("v" + str(_AGENT_VERSION)) if _AGENT_VERSION else ""
 
@@ -225,6 +237,56 @@ def generate_html_report(run_id: str) -> str:
         run_id=_esc(run_id),
         generated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
+
+
+def _render_api_item(item: dict) -> str:
+    """Render one suite-run API item as a report card — same visual language
+    as _render_script (status-colored left bar, status badge), body/headers/
+    assertions in collapsible <details> blocks. Reuses the same renderers
+    cli/api_report.py uses for the standalone API collection-run report, so
+    the two reports render identically for the same captured result — no
+    negative-testing section, since suite runs never produce one."""
+    from cli.api_report import _render_body, _render_assertions, _render_headers_table, _render_schema_drift
+
+    status = item.get("status") or "UNKNOWN"
+    cls = {"PASSED": "s-pass", "FAILED": "s-fail"}.get(status, "s-fail")
+    bcls = {"PASSED": "b-pass", "FAILED": "b-fail"}.get(status, "b-fail")
+    dur = f"{item['duration_ms']/1000:.1f}s" if item.get("duration_ms") else "—"
+    assertions = item.get("assertion_results") or []
+    passed_count = sum(1 for a in assertions if a.get("passed"))
+
+    meta_bits = [f"Duration: {dur}"]
+    if item.get("status_code") is not None:
+        meta_bits.append(f"Status {item['status_code']}")
+    if assertions:
+        meta_bits.append(f"{passed_count}/{len(assertions)} assertions")
+
+    parts = [
+        f'<div class="card {cls}">',
+        '<div class="card-head">',
+        f'<span class="card-name">{_esc(item.get("request_name") or item.get("api_request_id"))}</span>',
+        f'<span class="badge {bcls}">{_esc(status)}</span>',
+        '</div>',
+        f'<div class="enext">{_esc(" · ".join(meta_bits))}</div>',
+    ]
+
+    drift_html = _render_schema_drift(item.get("schema_drift"))
+    if drift_html:
+        parts.append(drift_html)
+
+    if item.get("error_message"):
+        parts.append(f'<div class="ecard-msg" style="color:#cf222e">{_esc(item["error_message"])}</div>')
+
+    parts.append("<details><summary>Assertions</summary>" + _render_assertions(assertions) + "</details>")
+    parts.append("<details><summary>Response body</summary>" + _render_body(item.get("response_body")) + "</details>")
+    if item.get("response_headers"):
+        parts.append(
+            "<details><summary>Response headers</summary>"
+            + _render_headers_table(item["response_headers"]) + "</details>"
+        )
+
+    parts.append("</div>")
+    return "".join(parts)
 
 
 def _render_script(scr, ed) -> str:

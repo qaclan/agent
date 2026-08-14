@@ -230,7 +230,7 @@ async function _getViews() {
   return _views;
 }
 
-function renderApiPage(container) {
+function renderApiPage(container, initialRequestId = null) {
   container.innerHTML = '';
 
   // Top tab bar: Collections | API Docs
@@ -384,6 +384,13 @@ function renderApiPage(container) {
       if (requestId !== undefined) _setActiveRequestId(requestId);
       return _reloadCollections();
     };
+
+    // Opened via "View" on a suite's API item — jump straight to that
+    // request's editor and highlight it in the sidebar tree.
+    if (initialRequestId) {
+      window.__qaclanApi.refresh(initialRequestId);
+      renderRequestEditor(mainEl(), initialRequestId);
+    }
 
     // Top-bar run-status chip + completion notifications, both fed by one
     // shared poller (also feeds the sidebar's running-dots via _updateRunningRuns).

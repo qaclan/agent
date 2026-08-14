@@ -251,7 +251,20 @@ def run():
                 except Exception:
                     pass
                 try:
-                    context.storage_state(path=_STATE)
+                    # Merge, don't overwrite: state.json also carries qaclan_vars
+                    # (API items' extracted variables within this same suite run).
+                    # A plain storage_state(path=_STATE) write replaces the whole
+                    # file with just cookies/origins, silently dropping those vars.
+                    _new_state = context.storage_state()
+                    try:
+                        with open(_STATE, "r", encoding="utf-8") as _f:
+                            _existing_state = json.load(_f)
+                    except Exception:
+                        _existing_state = {}
+                    if isinstance(_existing_state, dict) and _existing_state.get("qaclan_vars"):
+                        _new_state["qaclan_vars"] = _existing_state["qaclan_vars"]
+                    with open(_STATE, "w", encoding="utf-8") as _f:
+                        json.dump(_new_state, _f)
                 except Exception:
                     pass
             try:
