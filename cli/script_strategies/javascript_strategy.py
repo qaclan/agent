@@ -206,7 +206,19 @@ async function run() {
       // after the page renders) a short window to land before snapshotting,
       // so the next script in the suite doesn't inherit a partial session.
       try { await _waitForNetworkSettle(page, { graceMs: 200, quietMs: 300, timeoutMs: 3000 }); } catch (_) {}
-      try { await context.storageState({ path: _STATE }); } catch (_) {}
+      // Merge, don't overwrite: state.json also carries qaclan_vars (API
+      // items' extracted variables within this same suite run). A plain
+      // storageState({path}) write replaces the whole file with just
+      // cookies/origins, silently dropping those vars.
+      try {
+        const _newState = await context.storageState();
+        let _existingState = {};
+        try { _existingState = JSON.parse(fs.readFileSync(_STATE, 'utf-8')); } catch (_) {}
+        if (_existingState && typeof _existingState === 'object' && _existingState.qaclan_vars) {
+          _newState.qaclan_vars = _existingState.qaclan_vars;
+        }
+        fs.writeFileSync(_STATE, JSON.stringify(_newState));
+      } catch (_) {}
     }
     try { await page.close(); } catch (_) {}
     try { await context.close(); } catch (_) {}
