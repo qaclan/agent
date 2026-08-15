@@ -200,10 +200,12 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
 
     authTypeSel.addEventListener('change', async () => {
       col.auth_type = authTypeSel.value;
-      _colAuthConfig = {};
-      col.auth_config = '{}';
       _renderColAuthFields(authTypeSel.value);
-      await window.api('PATCH', `/collections/${col.id}`, { auth_type: col.auth_type, auth_config: col.auth_config });
+      // Don't send auth_config here — omitting it lets the PATCH route keep
+      // the stored value (routes/collections.py falls back to col.auth_config
+      // when the key is absent). Sending '{}' wiped a saved token just from
+      // clicking through the dropdown, with no field ever touched.
+      await window.api('PATCH', `/collections/${col.id}`, { auth_type: col.auth_type });
     });
 
     _renderColAuthFields(col.auth_type || 'none');
