@@ -1,7 +1,7 @@
 from flask import Blueprint, jsonify
 
 from cli.config import get_active_project_id, get_auth_key
-from cli.sync_queue import enqueue_all, flush_sync, queue_depth, trigger_now
+from cli.sync_queue import enqueue_all, flush_sync, list_failing, queue_depth, trigger_now
 
 bp = Blueprint('sync', __name__, url_prefix='/api/sync')
 
@@ -26,10 +26,12 @@ def push_now():
     trigger_now()
     flush_sync(deadline=30)
     remaining = queue_depth()
+    failing = list_failing() if remaining > 0 else []
     return jsonify({
         "ok": True,
         "queued": queued,
         "remaining": remaining,
+        "failing": failing,
         "message": (
             f"Push complete — {queued} item(s) enqueued"
             if remaining == 0
@@ -65,4 +67,4 @@ def pull_now():
 
 @bp.route('/status', methods=['GET'])
 def sync_status():
-    return jsonify({"ok": True, "queue_depth": queue_depth()}), 200
+    return jsonify({"ok": True, "queue_depth": queue_depth(), "failing": list_failing()}), 200

@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify
 from cli.config import get_auth_key, set_auth_key, remove_auth_key, get_server_url, set_server_url
 from cli.api import validate_auth_key
+from cli.sync_queue import start_worker
 
 bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
@@ -47,6 +48,7 @@ def auth_save():
         return jsonify({"ok": False, "error": "Invalid auth key. Please check and try again."}), 401
 
     set_auth_key(key)
+    start_worker()
     return jsonify({"ok": True, "user": user}), 200
 
 

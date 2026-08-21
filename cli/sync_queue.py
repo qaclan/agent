@@ -53,6 +53,26 @@ IDLE_SLEEP = 30
 OFFLINE_BACKOFFS = (30, 60, 300, 900)
 BATCH_SIZE = 50
 ONLINE_PROBE_TIMEOUT = 3
+PARENT_FAILURE_COOLDOWN_SECONDS = 60
+
+# entity_type -> (local table, name column) used to build a human-readable
+# label for the failing-items list. Types without a natural name (e.g. "run")
+# fall back to "<entity_type> <entity_id>".
+FAILING_LABEL_LOOKUP = {
+    "project": ("projects", "name"),
+    "feature": ("features", "name"),
+    "suite": ("suites", "name"),
+    "script": ("scripts", "name"),
+    "api_collection": ("api_collections", "name"),
+    "collection_vars": ("api_collections", "name"),
+    "api_folder": ("api_folders", "name"),
+    "api_request": ("api_requests", "name"),
+    "api_request_example": ("api_request_examples", "label"),
+    "environment": ("environments", "name"),
+    "env_vars": ("environments", "name"),
+    "suite_items": ("suites", "name"),
+    "api_collection_run": ("api_collection_runs", "collection_name"),
+}
 
 
 def enqueue(entity_type, entity_id, op):
@@ -79,6 +99,71 @@ def queue_depth():
     from cli.db import get_conn
     row = get_conn().execute("SELECT COUNT(*) AS n FROM sync_queue").fetchone()
     return row["n"] if row else 0
+
+
+def _label_for(conn, entity_type, entity_id):
+    spec = FAILING_LABEL_LOOKUP.get(entity_type)
+    if spec:
+        table, col = spec
+        row = conn.execute(f"SELECT {col} FROM {table} WHERE id = ?", (entity_id,)).fetchone()
+        if row and row[col]:
+            return row[col]
+    return f"{entity_type} {entity_id}"
+
+
+def list_failing(limit=20):
+    """Return up to `limit` sync-queue rows that have failed at least once
+    (attempts > 0), most-attempted first, each enriched with a human-readable
+    label so callers don't have to know per-table schema."""
+    from cli.db import get_conn
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT entity_type, entity_id, attempts, last_error, last_attempt_at "
+        "FROM sync_queue WHERE attempts > 0 "
+        "ORDER BY attempts DESC, last_attempt_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [
+        {
+            "entity_type": r["entity_type"],
+            "entity_id": r["entity_id"],
+            "label": _label_for(conn, r["entity_type"], r["entity_id"]),
+            "attempts": r["attempts"],
+            "last_error": r["last_error"],
+            "last_attempt_at": r["last_attempt_at"],
+        }
+        for r in rows
+    ]
+
+
+def _recent_project_failure(conn, project_id):
+    """Return the project's last_error if its own sync_queue row has failed
+    within PARENT_FAILURE_COOLDOWN_SECONDS, else None."""
+    row = conn.execute(
+        "SELECT attempts, last_error, last_attempt_at FROM sync_queue "
+        "WHERE entity_type = 'project' AND entity_id = ? AND op = 'upsert'",
+        (project_id,),
+    ).fetchone()
+    if not row or not row["attempts"] or not row["last_attempt_at"]:
+        return None
+    try:
+        last = datetime.fromisoformat(row["last_attempt_at"])
+    except ValueError:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - last).total_seconds()
+    if age <= PARENT_FAILURE_COOLDOWN_SECONDS:
+        return row["last_error"]
+    return None
+
+
+def _blocked_by_project_failure(conn, project_id):
+    """Raise if the parent project has failed within the cooldown window, so
+    the caller doesn't re-issue a doomed sync attempt for it."""
+    error = _recent_project_failure(conn, project_id)
+    if error:
+        raise RuntimeError(f"blocked on parent project: {error}")
 
 
 def _is_online():
@@ -148,12 +233,14 @@ def _dispatch(row):
                 "SELECT name, project_id, channel FROM features WHERE id = ?", (eid,)
             ).fetchone()
             if r:
+                _blocked_by_project_failure(conn, r["project_id"])
                 sync.sync_feature_to_cloud(eid, r["name"], r["project_id"], r["channel"])
         elif et == "suite":
             r = conn.execute(
                 "SELECT name, project_id, channel FROM suites WHERE id = ?", (eid,)
             ).fetchone()
             if r:
+                _blocked_by_project_failure(conn, r["project_id"])
                 sync.sync_suite_to_cloud(eid, r["name"], r["project_id"], r["channel"])
         elif et == "script":
             r = conn.execute(
@@ -187,6 +274,9 @@ def _dispatch(row):
                     wait_timeout=r["wait_timeout"],
                 )
         elif et == "api_collection":
+            r = conn.execute("SELECT project_id FROM api_collections WHERE id = ?", (eid,)).fetchone()
+            if r:
+                _blocked_by_project_failure(conn, r["project_id"])
             sync.sync_api_collection_to_cloud(eid)
         elif et == "api_folder":
             sync.sync_api_folder_to_cloud(eid)
@@ -203,6 +293,7 @@ def _dispatch(row):
                 "SELECT name, project_id FROM environments WHERE id = ?", (eid,)
             ).fetchone()
             if r:
+                _blocked_by_project_failure(conn, r["project_id"])
                 sync.sync_environment_to_cloud(eid, r["name"], r["project_id"])
         elif et == "env_vars":
             sync.sync_env_vars_to_cloud(eid)
@@ -211,6 +302,7 @@ def _dispatch(row):
                 "SELECT project_id FROM suites WHERE id = ?", (eid,)
             ).fetchone()
             if r:
+                _blocked_by_project_failure(conn, r["project_id"])
                 sync.sync_suite_items_to_cloud(eid, r["project_id"])
         elif et == "run":
             _dispatch_run(eid, conn, sync)
