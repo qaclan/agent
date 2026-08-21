@@ -459,7 +459,13 @@ async function triggerPush() {
   try {
     const res = await api('POST', '/sync/push')
     if (res.ok === false) { toast(res.error || 'Push failed', 'error'); return }
-    toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+    if (res.failing && res.failing.length > 0) {
+      const first = res.failing[0]
+      const more = res.failing.length > 1 ? ` (+${res.failing.length - 1} more)` : ''
+      toast(`${first.label} failed to sync: ${first.last_error}${more}`, 'error')
+    } else {
+      toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+    }
   } catch (e) {
     toast('Push failed: ' + e, 'error')
   } finally {
