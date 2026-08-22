@@ -7,7 +7,7 @@ from rich.console import Console
 from cli.config import get_auth_key, set_active_project_id, get_active_project_id, SCRIPTS_DIR
 from cli.db import get_conn, generate_id
 from cli import api
-from cli.crypto import encrypt
+from cli.crypto import encrypt, decrypt, is_encrypted
 from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 
 console = Console()
@@ -57,6 +57,7 @@ def pull_workspace():
     env_map = {}        # cloud environment id -> local environment id
     collection_map = {} # cloud api_collection id -> local api_collection id
     folder_map = {}     # cloud api_folder id -> local api_folder id
+    request_map = {}    # cloud api_request cli_request_id -> local api_request id
 
     counts = {
         "projects": 0, "features": 0, "scripts": 0, "suites": 0, "environments": 0, "env_vars": 0,
@@ -83,9 +84,15 @@ def pull_workspace():
     # 2. Features
     for f in data.get("features", []):
         cloud_id = f["id"]
+        channel = f.get("channel") or "web"
+        description = f.get("description") or ""
+        source_url = f.get("source_url") or ""
         existing = conn.execute("SELECT id FROM features WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
-            conn.execute("UPDATE features SET name = ? WHERE id = ?", (f["name"], existing["id"]))
+            conn.execute(
+                "UPDATE features SET name = ?, channel = ?, description = ?, source_url = ? WHERE id = ?",
+                (f["name"], channel, description, source_url, existing["id"]),
+            )
             feature_map[cloud_id] = existing["id"]
         else:
             local_project_id = project_map.get(f["project_id"])
@@ -93,8 +100,9 @@ def pull_workspace():
                 continue
             local_id = generate_id("feat")
             conn.execute(
-                "INSERT INTO features (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
-                (local_id, local_project_id, f["name"], now, cloud_id),
+                "INSERT INTO features (id, project_id, channel, name, description, source_url, created_at, cloud_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_project_id, channel, f["name"], description, source_url, now, cloud_id),
             )
             feature_map[cloud_id] = local_id
             counts["features"] += 1
@@ -115,13 +123,14 @@ def pull_workspace():
         # var_keys: list[str] = s.get("var_keys") or []
         # var_keys: str =  "[" + ",".join(s.get("var_keys") or []) + "]"
         var_keys: str = json.dumps(s.get("var_keys") or [], separators=(",", ":"))
+        channel = s.get("channel") or "web"
 
         ext = get_strategy(language).file_extension
         existing = conn.execute("SELECT id, file_path FROM scripts WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
             # Update name and file content and start_url_key, start_url_value and var_keys also.
-            conn.execute("UPDATE scripts SET name = ?, start_url_key= ?, start_url_value = ?, var_keys = ? WHERE id = ?", 
-                         (s["name"], start_url_key, start_url_value, var_keys, existing["id"]))
+            conn.execute("UPDATE scripts SET name = ?, channel = ?, start_url_key= ?, start_url_value = ?, var_keys = ? WHERE id = ?",
+                         (s["name"], channel, start_url_key, start_url_value, var_keys, existing["id"]))
             file_content = s.get("file_content")
             if file_content and existing["file_path"]:
                 with open(existing["file_path"], "w", encoding="utf-8") as fp:
@@ -144,8 +153,8 @@ def pull_workspace():
             created_by = s.get("created_by")
             conn.execute(
                 "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, created_at, cloud_id, created_by, start_url_key, start_url_value, var_keys) "
-                "VALUES (?, ?, ?, 'web', ?, ?, 'PULLED', ?, ?, ?, ?, ?, ?, ?)",
-                (local_id, local_feature_id, local_project_id, s["name"], file_path, language, now, cloud_id, created_by, start_url_key, start_url_value, var_keys),
+                "VALUES (?, ?, ?, ?, ?, ?, 'PULLED', ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_feature_id, local_project_id, channel, s["name"], file_path, language, now, cloud_id, created_by, start_url_key, start_url_value, var_keys),
             )
             script_map[s.get("cli_script_id", cloud_id)] = local_id
             counts["scripts"] += 1
@@ -269,6 +278,7 @@ def pull_workspace():
                 "feature_id=?, collection_id=?, folder_id=? WHERE id=?",
                 row_values + (local_feature_id, local_collection_id, local_folder_id, existing["id"]),
             )
+            request_map[r.get("cli_request_id", cloud_id)] = existing["id"]
         else:
             if not local_project_id:
                 console.print(f"  [yellow]⚠[/yellow] API request skipped (missing project): {r.get('name')}")
@@ -285,6 +295,7 @@ def pull_workspace():
                 (local_id, local_project_id, local_feature_id, local_collection_id, local_folder_id)
                 + row_values + (now, cloud_id),
             )
+            request_map[r.get("cli_request_id", cloud_id)] = local_id
             counts["api_requests"] += 1
             console.print(f"  [green]✓[/green] API request: {r.get('name')}")
 
@@ -293,21 +304,35 @@ def pull_workspace():
         local_collection_id = collection_map.get(v["collection_id"])
         if not local_collection_id:
             continue
+        is_secret = bool(v.get("is_secret"))
+        raw_value = v.get("initial_value") or ""
+        # Values pushed before the secrecy fix are ciphertext from another
+        # machine's key: decrypt() leaves those untouched, sentinel and all.
+        # Writing one locally would replace a readable value with garbage, so
+        # skip the row and let the owning machine's next push correct the cloud.
+        if is_secret and is_encrypted(decrypt(raw_value)):
+            console.print(
+                f"  [yellow]⚠[/yellow] Collection variable kept local (cloud copy not readable): {v['key']}"
+            )
+            continue
+        # Server sends plaintext; re-encrypt with this machine's key so reveal
+        # works regardless of which machine originally pushed the value.
+        value = encrypt(raw_value) if is_secret and raw_value else raw_value
         existing = conn.execute(
             "SELECT id FROM collection_vars WHERE collection_id = ? AND key = ?",
             (local_collection_id, v["key"]),
         ).fetchone()
         if existing:
             conn.execute(
-                "UPDATE collection_vars SET initial_value = ? WHERE id = ?",
-                (v["initial_value"], existing["id"]),
+                "UPDATE collection_vars SET initial_value = ?, is_secret = ? WHERE id = ?",
+                (value, 1 if is_secret else 0, existing["id"]),
             )
         else:
             local_id = generate_id("cv")
             conn.execute(
-                "INSERT INTO collection_vars (id, collection_id, key, initial_value, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (local_id, local_collection_id, v["key"], v["initial_value"], now),
+                "INSERT INTO collection_vars (id, collection_id, key, initial_value, is_secret, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (local_id, local_collection_id, v["key"], value, 1 if is_secret else 0, now),
             )
             counts["collection_vars"] += 1
 
@@ -362,9 +387,13 @@ def pull_workspace():
     # 6. Suites
     for s in data.get("suites", []):
         cloud_id = s["id"]
+        channel = s.get("channel") or "web"
         existing = conn.execute("SELECT id FROM suites WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
-            conn.execute("UPDATE suites SET name = ? WHERE id = ?", (s["name"], existing["id"]))
+            conn.execute(
+                "UPDATE suites SET name = ?, channel = ? WHERE id = ?",
+                (s["name"], channel, existing["id"]),
+            )
             suite_map[cloud_id] = existing["id"]
         else:
             local_project_id = project_map.get(s["project_id"])
@@ -372,22 +401,30 @@ def pull_workspace():
                 continue
             local_id = generate_id("suite")
             conn.execute(
-                "INSERT INTO suites (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, 'web', ?, ?, ?)",
-                (local_id, local_project_id, s["name"], now, cloud_id),
+                "INSERT INTO suites (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?)",
+                (local_id, local_project_id, channel, s["name"], now, cloud_id),
             )
             suite_map[cloud_id] = local_id
             counts["suites"] += 1
             console.print(f"  [green]✓[/green] Suite: {s['name']}")
 
-    # 7. Suite items
+    # 7. Suite items (scripts and API requests — mixed suites carry both)
     for si in data.get("suite_items", []):
         local_suite_id = suite_map.get(si["suite_id"])
-        local_script_id = script_map.get(si["cli_script_id"])
-        if not local_suite_id or not local_script_id:
+        if not local_suite_id:
+            continue
+        item_type = si.get("item_type") or "script"
+        if item_type == "api_request":
+            local_ref = request_map.get(si.get("cli_api_request_id"))
+            ref_column = "api_request_id"
+        else:
+            local_ref = script_map.get(si.get("cli_script_id"))
+            ref_column = "script_id"
+        if not local_ref:
             continue
         existing = conn.execute(
-            "SELECT id FROM suite_items WHERE suite_id = ? AND script_id = ?",
-            (local_suite_id, local_script_id),
+            f"SELECT id FROM suite_items WHERE suite_id = ? AND {ref_column} = ?",
+            (local_suite_id, local_ref),
         ).fetchone()
         if existing:
             conn.execute(
@@ -397,8 +434,9 @@ def pull_workspace():
         else:
             local_id = generate_id("si")
             conn.execute(
-                "INSERT INTO suite_items (id, suite_id, script_id, order_index, created_at) VALUES (?, ?, ?, ?, ?)",
-                (local_id, local_suite_id, local_script_id, si["order_index"], now),
+                f"INSERT INTO suite_items (id, suite_id, {ref_column}, item_type, order_index, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (local_id, local_suite_id, local_ref, item_type, si["order_index"], now),
             )
 
     conn.commit()

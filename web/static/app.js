@@ -451,6 +451,8 @@ function toggleTheme() {
 // Apply immediately so first paint matches the saved theme
 applyTheme(getTheme())
 
+let _pushPollTimer = null
+
 async function triggerPush() {
   const btn = document.getElementById('btn-push')
   if (!btn || btn.disabled) return
@@ -465,6 +467,7 @@ async function triggerPush() {
       toast(`${first.label} failed to sync: ${first.last_error}${more}`, 'error')
     } else {
       toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+      if (res.remaining > 0) pollPushCompletion()
     }
   } catch (e) {
     toast('Push failed: ' + e, 'error')
@@ -472,6 +475,33 @@ async function triggerPush() {
     btn.disabled = false
     btn.classList.remove('syncing')
   }
+}
+
+// Backgrounded push (didn't fully drain within the server's own deadline) resolves
+// asynchronously via the worker - poll status briefly so success/failure isn't silent.
+function pollPushCompletion(attempt = 0) {
+  clearTimeout(_pushPollTimer)
+  if (attempt >= 6) return
+  _pushPollTimer = setTimeout(async () => {
+    let res
+    try {
+      res = await api('GET', '/sync/status')
+    } catch (e) {
+      return
+    }
+    if (res.ok === false) return
+    if (res.failing && res.failing.length > 0) {
+      const first = res.failing[0]
+      const more = res.failing.length > 1 ? ` (+${res.failing.length - 1} more)` : ''
+      toast(`${first.label} failed to sync: ${first.last_error}${more}`, 'error')
+      return
+    }
+    if (res.queue_depth === 0) {
+      toast('Sync completed in background', 'success')
+      return
+    }
+    pollPushCompletion(attempt + 1)
+  }, 5000)
 }
 
 async function triggerPull() {
@@ -703,10 +733,16 @@ function toast(message, type = 'success') {
   el.className = `toast toast-${type}`
   el.innerHTML = `<span class="toast-icon"></span><span>${escHtml(message)}</span>`
   container.appendChild(el)
-  setTimeout(() => {
+  const dismiss = () => {
     el.style.animation = 'toastOut 0.2s ease forwards'
     setTimeout(() => el.remove(), 200)
-  }, 3000)
+  }
+  if (type === 'error') {
+    el.classList.add('toast-dismissible')
+    el.addEventListener('click', dismiss)
+  } else {
+    setTimeout(dismiss, 3000)
+  }
 }
 
 // ── No Project State ────────────────────────────────────────────

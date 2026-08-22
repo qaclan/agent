@@ -283,6 +283,9 @@ def add_suite_item(suite_id):
         )
         conn.commit()
 
+        from cli.sync_queue import enqueue
+        enqueue("suite_items", suite_id, "upsert")
+
         return jsonify({"ok": True, "item_id": item_id, "order_index": order_index}), 201
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
@@ -309,6 +312,10 @@ def remove_suite_item(suite_id, item_id):
         conn.commit()
         if cur.rowcount == 0:
             return jsonify({"ok": False, "error": f"Item {item_id} not found"}), 404
+
+        from cli.sync_queue import enqueue
+        enqueue("suite_items", suite_id, "upsert")
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500

@@ -312,27 +312,31 @@ def _dispatch(row):
 
 def _dispatch_run(run_id, conn, sync):
     run = conn.execute(
-        "SELECT suite_id, status, started_at, finished_at, browser, resolution, headless, project_id "
-        "FROM suite_runs WHERE id = ?", (run_id,)
+        "SELECT suite_id, status, started_at, finished_at, browser, resolution, headless, "
+        "project_id, environment_id FROM suite_runs WHERE id = ?", (run_id,)
     ).fetchone()
     if not run:
         return
     script_rows = conn.execute(
         "SELECT scr.script_id, s.name AS script_name, scr.status, scr.duration_ms, "
         "scr.error_message, scr.error_detail, scr.order_index, scr.console_errors, "
-        "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path "
+        "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path, "
+        "scr.captured_requests_count "
         "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
         "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
         (run_id,)
     ).fetchall()
+    started = run["started_at"] or ""
+    finished = run["finished_at"] or started
     sync.sync_run_to_cloud(
         run_id=run_id,
         suite_id=run["suite_id"],
         status=run["status"],
-        started_at=run["started_at"] or "",
-        completed_at=run["finished_at"] or run["started_at"] or "",
-        duration_ms=0,
+        started_at=started,
+        completed_at=finished,
+        duration_ms=sync.elapsed_ms(started, finished),
         project_id=run["project_id"],
+        environment_id=run["environment_id"],
         browser=run["browser"],
         resolution=run["resolution"],
         headless=bool(run["headless"]) if run["headless"] is not None else None,
@@ -351,6 +355,7 @@ def _dispatch_run(run_id, conn, sync):
                 "console_log": r["console_log"],
                 "network_log": r["network_log"],
                 "screenshot_b64": sync._read_screenshot_b64(r["screenshot_path"]),
+                "captured_requests_count": r["captured_requests_count"],
             }
             for r in script_rows
         ],
