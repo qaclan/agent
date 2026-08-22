@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import threading
+from datetime import datetime
 
 from rich.console import Console
 from cli.config import get_auth_key
@@ -38,6 +39,27 @@ def _read_screenshot_b64(path):
             return base64.b64encode(f.read()).decode("ascii")
     except Exception:
         return None
+
+
+def elapsed_ms(started_at, finished_at):
+    """Milliseconds between two ISO-8601 timestamps, clamped at zero.
+
+    Returns 0 when either timestamp is missing or unparseable so a partial or
+    interrupted run still syncs rather than failing outright. Run payloads used
+    to hardcode 0 here, which made every run in the cloud report 0.0s.
+    """
+    if not started_at or not finished_at:
+        return 0
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = datetime.fromisoformat(finished_at)
+    except (TypeError, ValueError):
+        return 0
+    if (start.tzinfo is None) != (end.tzinfo is None):
+        # One side is naive; comparing them raises. Treat both as wall clock.
+        start = start.replace(tzinfo=None)
+        end = end.replace(tzinfo=None)
+    return max(0, int((end - start).total_seconds() * 1000))
 
 
 def _try_sync(label, fn):
@@ -118,9 +140,11 @@ def sync_feature_to_cloud(feature_id, name, project_id, channel=None):
     cloud_project_id = _ensure_project_synced(project_id)
     if not cloud_project_id:
         return None
+    from cli.db import get_conn
+    row = get_conn().execute(
+        "SELECT channel, description, source_url FROM features WHERE id = ?", (feature_id,)
+    ).fetchone()
     if not channel:
-        from cli.db import get_conn
-        row = get_conn().execute("SELECT channel FROM features WHERE id = ?", (feature_id,)).fetchone()
         channel = row["channel"] if row else "web"
     cloud_id = _get_cloud_id("features", feature_id)
     result = _try_sync("feature", lambda: api.sync_feature(key, {
@@ -129,6 +153,8 @@ def sync_feature_to_cloud(feature_id, name, project_id, channel=None):
         "name": name,
         "project_id": cloud_project_id,
         "channel": channel,
+        "description": row["description"] if row else None,
+        "source_url": row["source_url"] if row else None,
     }))
     if result:
         _save_cloud_id("features", feature_id, result["id"])
@@ -460,7 +486,7 @@ def sync_api_collection_run_to_cloud(run_id):
         "error_count": run["error_count"],
         "started_at": run["started_at"],
         "completed_at": run["finished_at"],
-        "duration_ms": 0,
+        "duration_ms": elapsed_ms(run["started_at"], run["finished_at"]),
         "request_results": [
             {
                 "cli_request_id": r["api_request_id"],
@@ -602,21 +628,38 @@ def sync_suite_items_to_cloud(suite_id, project_id):
     _ensure_suite_synced(suite_id, project_id)
     from cli.db import get_conn
     items = get_conn().execute(
-        "SELECT script_id, order_index FROM suite_items WHERE suite_id = ? ORDER BY order_index",
+        "SELECT item_type, script_id, api_request_id, order_index "
+        "FROM suite_items WHERE suite_id = ? ORDER BY order_index",
         (suite_id,)
     ).fetchall()
     cloud_suite_id = _get_cloud_id("suites", suite_id)
-    return _try_sync("suite items", lambda: api.sync_suite_items(key, {
-        "cli_suite_id": str(suite_id),
-        "cloud_suite_id": cloud_suite_id,
-        "items": [
-            {
+    payload_items = []
+    for r in items:
+        # Mixed suites hold API requests too; those rows have a NULL script_id.
+        # Stringifying it blindly used to send the literal "None" upstream.
+        item_type = r["item_type"] or "script"
+        if item_type == "api_request":
+            if not r["api_request_id"]:
+                continue
+            payload_items.append({
+                "item_type": "api_request",
+                "cli_api_request_id": str(r["api_request_id"]),
+                "cloud_api_request_id": _get_cloud_id("api_requests", r["api_request_id"]),
+                "order_index": r["order_index"],
+            })
+        else:
+            if not r["script_id"]:
+                continue
+            payload_items.append({
+                "item_type": "script",
                 "cli_script_id": str(r["script_id"]),
                 "cloud_script_id": _get_cloud_id("scripts", r["script_id"]),
                 "order_index": r["order_index"],
-            }
-            for r in items
-        ],
+            })
+    return _try_sync("suite items", lambda: api.sync_suite_items(key, {
+        "cli_suite_id": str(suite_id),
+        "cloud_suite_id": cloud_suite_id,
+        "items": payload_items,
     }))
 
 
@@ -673,14 +716,26 @@ def sync_collection_vars_to_cloud(collection_id):
         return None
     from cli.db import get_conn
     rows = get_conn().execute(
-        "SELECT key, initial_value FROM collection_vars WHERE collection_id = ? ORDER BY key",
+        "SELECT key, initial_value, is_secret FROM collection_vars WHERE collection_id = ? ORDER BY key",
         (collection_id,)
     ).fetchall()
     cloud_collection_id = _get_cloud_id("api_collections", collection_id)
+    # Secret values are encrypted at rest with a per-machine key — decrypt before
+    # sending so other machines get usable plaintext, exactly as env vars do.
     return _try_sync("collection vars", lambda: api.sync_collection_vars(key, {
         "cli_collection_id": str(collection_id),
         "cloud_collection_id": cloud_collection_id,
-        "vars": [{"key": r["key"], "initial_value": r["initial_value"]} for r in rows],
+        "vars": [
+            {
+                "key": r["key"],
+                "initial_value": (
+                    decrypt(r["initial_value"]) if r["is_secret"] and r["initial_value"]
+                    else r["initial_value"]
+                ),
+                "is_secret": bool(r["is_secret"]),
+            }
+            for r in rows
+        ],
     }))
 
 
@@ -799,7 +854,7 @@ def sync_all(project_id=None):
         # Past runs
         runs = conn.execute(
             "SELECT sr.id, sr.suite_id, sr.status, sr.started_at, sr.finished_at, "
-            "sr.browser, sr.resolution, sr.headless "
+            "sr.browser, sr.resolution, sr.headless, sr.environment_id "
             "FROM suite_runs sr WHERE sr.project_id = ? ORDER BY sr.started_at",
             (pid,)
         ).fetchall()
@@ -807,7 +862,8 @@ def sync_all(project_id=None):
             script_run_rows = conn.execute(
                 "SELECT scr.script_id, s.name as script_name, scr.status, scr.duration_ms, "
                 "scr.error_message, scr.error_detail, scr.order_index, scr.console_errors, "
-                "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path "
+                "scr.network_failures, scr.console_log, scr.network_log, scr.screenshot_path, "
+                "scr.captured_requests_count "
                 "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
                 "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
                 (run["id"],)
@@ -820,8 +876,9 @@ def sync_all(project_id=None):
                 status=run["status"],
                 started_at=started,
                 completed_at=finished,
-                duration_ms=0,
+                duration_ms=elapsed_ms(started, finished),
                 project_id=pid,
+                environment_id=run["environment_id"],
                 browser=run["browser"],
                 resolution=run["resolution"],
                 headless=bool(run["headless"]) if run["headless"] is not None else None,
@@ -840,6 +897,7 @@ def sync_all(project_id=None):
                         "console_log": r["console_log"],
                         "network_log": r["network_log"],
                         "screenshot_b64": _read_screenshot_b64(r["screenshot_path"]),
+                        "captured_requests_count": r["captured_requests_count"],
                     }
                     for r in script_run_rows
                 ],
@@ -860,7 +918,8 @@ def sync_all(project_id=None):
 
 
 def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, duration_ms, script_results,
-                      project_id=None, browser=None, resolution=None, headless=None, api_results=None):
+                      project_id=None, browser=None, resolution=None, headless=None, api_results=None,
+                      environment_id=None):
     """Sync a completed test run with all script results (and, for mixed
     E2E+API suites, api_results). Ensures the parent suite (and its project)
     are synced first."""
@@ -878,6 +937,12 @@ def sync_run_to_cloud(run_id, suite_id, status, started_at, completed_at, durati
         "duration_ms": duration_ms,
         "script_results": script_results,
     }
+    # Send the environment's cloud id, not the local one — the cloud has no way
+    # to resolve a local id. Omitted when the environment hasn't synced yet.
+    if environment_id:
+        cloud_environment_id = _get_cloud_id("environments", environment_id)
+        if cloud_environment_id:
+            payload["environment_id"] = cloud_environment_id
     if api_results:
         payload["api_results"] = api_results
     if browser:
