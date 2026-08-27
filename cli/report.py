@@ -13,7 +13,7 @@ import base64
 import html
 import json
 import mimetypes
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from cli.db import get_conn
@@ -45,7 +45,7 @@ def _fmt_dt(value) -> str:
     if not value:
         return "—"
     try:
-        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S UTC")
     except (ValueError, TypeError):
         return str(value)
 
@@ -235,7 +235,7 @@ def generate_html_report(run_id: str) -> str:
         scripts=scripts_html,
         version=_esc(version),
         run_id=_esc(run_id),
-        generated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     )
 
 

@@ -24,7 +24,7 @@ def _fmt_dt(value) -> str:
     if not value:
         return "—"
     try:
-        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M:%S UTC")
     except (ValueError, TypeError):
         return str(value)
 
