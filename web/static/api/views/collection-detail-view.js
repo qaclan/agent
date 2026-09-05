@@ -1,24 +1,30 @@
 import { createInlineVarDrop } from '../components/inline-var-drop.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
 import { applyVarStyle } from '../components/var-style.js';
+import { createEnvSelector } from '../components/env-selector.js';
+import { onEnvChanged } from '../components/env-events.js';
 
 /**
- * renderCollectionDetailView(container, col, runId, onViewRun, onBack)
- * Shows collection detail with Environment selector, Auth + Variables tabs.
- * If runId provided, shows a live run summary card.
- * Polls GET /api/api-collection-runs/<runId> every 2s while RUNNING.
- * Sets container.__destroyRunView for teardown by parent.
+ * renderCollectionSettingsTabs(host, col) → { destroy }
+ *
+ * Builds the collection's Auth / Variables / Schema Check / Negative tab UI into
+ * `host`. Extracted so it can be reused verbatim by both the collection-detail
+ * page and the collection-settings drawer opened from the request editor —
+ * one implementation of each settings surface, no drift.
+ *
+ * The tabs read/write the collection via the same endpoints as before and keep
+ * their var styling in sync with the shared env-changed signal.
  */
-export function renderCollectionDetailView(container, col, runId, onViewRun, onBack) {
-  let _pollTimer = null;
-  let _destroyed = false;
-
+export function renderCollectionSettingsTabs(host, col) {
   // Env (col.env_name) + Collection vars — feeds the {{ }} suggestion dropdown
   // and existence-based coloring on the Auth tab fields.
   let _knownVarNames = null;
   let _allVarsList = null;
   let _authFieldInputs = [];
   let _authFieldOverlays = [];
+  let _varSuggestUIs = [];
+  // Set when the Variables tab is built, so the controller can add+focus a row.
+  let _varsAddRow = null;
 
   async function getAllVars() {
     const results = [];
@@ -35,12 +41,6 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     return results;
   }
 
-  // Registered by _colAuthField() below — busts the suggestion dropdown's 30s
-  // cache whenever env/collection var data actually changes (env switch, var
-  // save/delete/secret toggle), otherwise an already-open-once dropdown can
-  // keep showing stale contents for up to 30s.
-  let _varSuggestUIs = [];
-
   async function _refreshKnownVarNames() {
     const vars = await getAllVars();
     _knownVarNames = new Set(vars.map(v => v.key));
@@ -48,67 +48,6 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     _authFieldInputs.forEach(inp => applyVarStyle(inp, _knownVarNames));
     _authFieldOverlays.forEach(o => o.refresh());
     _varSuggestUIs.forEach(u => u.invalidate());
-  }
-
-  function _destroy() {
-    _destroyed = true;
-    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-  }
-  container.__destroyRunView = _destroy;
-
-  function _esc(s) {
-    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  function _renderCard(run) {
-    const el = document.getElementById('cdv-card');
-    if (!el) return;
-    if (!run) { el.style.display = 'none'; return; }
-
-    const isRunning   = run.status === 'RUNNING';
-    const done        = (run.request_results || []).length;
-    const total       = run.total || 0;
-    const pct         = total > 0 ? Math.round(done / total * 100) : 0;
-    const statusColor = isRunning         ? 'var(--warning,#f59e0b)'
-      : run.status === 'PASSED'           ? 'var(--success,#10b981)'
-      :                                     'var(--danger,#ef4444)';
-
-    el.style.display = '';
-    el.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-        <span style="font-size:12px;font-weight:600;color:${statusColor};display:flex;align-items:center;gap:6px;">
-          ${isRunning ? '<span style="animation:cdv-pulse 1s infinite;display:inline-block;">⟳</span>' : ''}
-          ${_esc(run.status)} &nbsp;·&nbsp; ${done}/${total} &nbsp;·&nbsp; ${run.passed} passed &nbsp;·&nbsp; ${run.failed} failed
-        </span>
-        <div style="display:flex;gap:6px;">
-          ${isRunning ? `<button class="btn btn-xs btn-danger" id="cdv-stop">■ Stop</button>` : ''}
-          <button class="btn btn-xs btn-ghost" id="cdv-view">View Progress →</button>
-        </div>
-      </div>
-      <div style="height:3px;background:var(--border-default);border-radius:2px;overflow:hidden;">
-        <div style="height:100%;width:${pct}%;background:${statusColor};border-radius:2px;transition:width .4s;"></div>
-      </div>`;
-
-    const viewBtn = document.getElementById('cdv-view');
-    if (viewBtn) viewBtn.onclick = () => { _destroy(); if (onViewRun) onViewRun(run.id); };
-
-    const stopBtn = document.getElementById('cdv-stop');
-    if (stopBtn) stopBtn.onclick = async () => {
-      stopBtn.disabled = true; stopBtn.textContent = 'Stopping…';
-      await window.api('POST', `/api-collection-runs/${run.id}/stop`);
-    };
-
-    if (!isRunning) {
-      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-    }
-  }
-
-  async function _poll() {
-    if (_destroyed || !runId) return;
-    try {
-      const res = await window.api('GET', `/api-collection-runs/${runId}`);
-      if (res.ok && res.run) _renderCard(res.run);
-    } catch (_) {}
   }
 
   // ── Auth tab ──
@@ -365,10 +304,249 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
     }
 
     addVarBtn.onclick = () => _addVarRow({ key: '', initial_value: '', is_secret: 0 }, true);
+    _varsAddRow = _addVarRow; // expose to the tabs controller (drawer add-variable)
 
     window.api('GET', `/collections/${col.id}/vars`).then(res => {
       (res.vars || []).forEach(v => _addVarRow(v));
     });
+  }
+
+  // ── Schema Check tab ──
+  function _buildSchemaTab(wrap) {
+    wrap.className = 'sc-panel';
+    wrap.style.cssText = '';
+    wrap.innerHTML = `
+      <p class="sc-desc">Default for every request in this collection.
+        Changing it <strong>resets all per-request overrides</strong> so each request follows this setting —
+        you can override an individual request afterward.</p>
+      <div class="sc-row">
+        <div class="sc-row__label">Default for all requests</div>
+        <div class="sc-row__body">
+          <div class="sc-seg" role="group" aria-label="Collection schema-check default">
+            <button type="button" class="sc-seg__btn" data-val="on">On</button>
+            <button type="button" class="sc-seg__btn" data-val="off">Off</button>
+          </div>
+          <div class="sc-row__hint">On — every request is checked. Off — none are, unless a request is individually turned on.</div>
+        </div>
+      </div>`;
+
+    const seg = wrap.querySelector('.sc-seg');
+    function paint() {
+      const cur = col.schema_check_default || 'off';
+      seg.querySelectorAll('.sc-seg__btn').forEach(b =>
+        b.classList.toggle('is-active', b.dataset.val === cur));
+    }
+    seg.querySelectorAll('.sc-seg__btn').forEach(b => {
+      b.onclick = async () => {
+        const val = b.dataset.val;
+        if ((col.schema_check_default || 'off') === val) return;
+        const msg = `Turn schema check ${val === 'on' ? 'On' : 'Off'} for every request in “${col.name}”? `
+          + 'This resets all per-request overrides.';
+        const ok = await (window._confirmDialog
+          ? window._confirmDialog(msg)
+          : Promise.resolve(window.confirm(msg)));
+        if (!ok) return;
+        col.schema_check_default = val;
+        paint();
+        await window.api('PATCH', `/collections/${col.id}`, { schema_check_default: val });
+      };
+    });
+    paint();
+  }
+
+  // ── Negative testing tab ──
+  function _buildNegativeTab(wrap) {
+    wrap.className = 'sc-panel';
+    wrap.style.cssText = '';
+    wrap.innerHTML = `
+      <p class="sc-desc">Negative-testing default for every request in this collection.
+        Changing it <strong>resets all per-request overrides</strong> so each request follows this setting —
+        you can override an individual request afterward.</p>
+      <div class="sc-row">
+        <div class="sc-row__label">Default for all requests</div>
+        <div class="sc-row__body">
+          <div class="sc-seg" role="group" aria-label="Collection negative-testing default">
+            <button type="button" class="sc-seg__btn" data-val="on">On</button>
+            <button type="button" class="sc-seg__btn" data-val="off">Off</button>
+          </div>
+          <div class="sc-row__hint">On — negatives run for every request in collection runs. Off — none, unless a request is individually turned on.</div>
+        </div>
+      </div>`;
+
+    const seg = wrap.querySelector('.sc-seg');
+    function paint() {
+      const cur = col.negative_check_default || 'off';
+      seg.querySelectorAll('.sc-seg__btn').forEach(b =>
+        b.classList.toggle('is-active', b.dataset.val === cur));
+    }
+    seg.querySelectorAll('.sc-seg__btn').forEach(b => {
+      b.onclick = async () => {
+        const val = b.dataset.val;
+        if ((col.negative_check_default || 'off') === val) return;
+        const msg = `Turn negative testing ${val === 'on' ? 'On' : 'Off'} for every request in “${col.name}”? `
+          + 'This resets all per-request overrides.';
+        const ok = await (window._confirmDialog
+          ? window._confirmDialog(msg)
+          : Promise.resolve(window.confirm(msg)));
+        if (!ok) return;
+        col.negative_check_default = val;
+        paint();
+        await window.api('PATCH', `/collections/${col.id}`, { negative_check_default: val });
+      };
+    });
+    paint();
+  }
+
+  // Tabs
+  host.innerHTML = '';
+  const tabsEl = document.createElement('div');
+  tabsEl.style.cssText = 'display:flex;gap:0;border-bottom:1px solid var(--border-default);margin-bottom:20px;';
+  const contentEl = document.createElement('div');
+  host.appendChild(tabsEl);
+  host.appendChild(contentEl);
+
+  const TABS = [
+    { id: 'auth', label: 'Auth', build: _buildAuthTab },
+    { id: 'vars', label: 'Variables', build: _buildVarsTab },
+    { id: 'schema', label: 'Schema Check', build: _buildSchemaTab },
+    { id: 'negative', label: 'Negative', build: _buildNegativeTab },
+  ];
+
+  let _activeTab = null;
+  const _panels = {};
+  const _btns = {};
+
+  TABS.forEach(tab => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.style.cssText = 'background:none;border:none;border-bottom:2px solid transparent;padding:8px 16px;font-size:12px;font-weight:500;cursor:pointer;color:var(--text-muted);margin-bottom:-1px;letter-spacing:.01em;transition:color .15s;';
+    btn.textContent = tab.label;
+    btn.onmouseenter = () => { if (_activeTab !== tab.id) btn.style.color = 'var(--text-secondary)'; };
+    btn.onmouseleave = () => { if (_activeTab !== tab.id) btn.style.color = 'var(--text-muted)'; };
+    tabsEl.appendChild(btn);
+    _btns[tab.id] = btn;
+
+    const panel = document.createElement('div');
+    panel.style.display = 'none';
+    contentEl.appendChild(panel);
+    _panels[tab.id] = { el: panel, built: false };
+
+    btn.onclick = () => _switchTab(tab.id);
+  });
+
+  function _switchTab(id) {
+    if (_activeTab) {
+      _panels[_activeTab].el.style.display = 'none';
+      _btns[_activeTab].style.color = 'var(--text-muted)';
+      _btns[_activeTab].style.borderBottomColor = 'transparent';
+      _btns[_activeTab].style.fontWeight = '500';
+    }
+    _activeTab = id;
+    const panel = _panels[id];
+    if (!panel.built) {
+      panel.built = true;
+      TABS.find(t => t.id === id).build(panel.el);
+    }
+    panel.el.style.display = '';
+    _btns[id].style.color = 'var(--accent)';
+    _btns[id].style.borderBottomColor = 'var(--accent)';
+    _btns[id].style.fontWeight = '600';
+  }
+
+  _switchTab('auth');
+
+  // Keep the tabs' var styling consistent when the environment binding changes
+  // elsewhere (the header selector, or the request editor's selector/drawer).
+  const _unsub = onEnvChanged(({ collectionId, envName }) => {
+    if (String(collectionId) !== String(col.id)) return;
+    col.env_name = envName;
+    _refreshKnownVarNames();
+  });
+
+  return {
+    openTab(id) { _switchTab(id); },
+    addVariable() {
+      _switchTab('vars');
+      if (_varsAddRow) _varsAddRow({ key: '', initial_value: '', is_secret: 0 }, true);
+    },
+    destroy() { try { _unsub(); } catch (_) {} },
+  };
+}
+
+/**
+ * renderCollectionDetailView(container, col, runId, onViewRun, onBack)
+ *
+ * The collection-detail page: header (back / title / env selector / run), the
+ * run-status card, and the settings tabs (delegated to renderCollectionSettingsTabs).
+ */
+export function renderCollectionDetailView(container, col, runId, onViewRun, onBack) {
+  let _pollTimer = null;
+  let _destroyed = false;
+  let _tabsCtl = null;
+  let _envSelector = null;
+
+  function _destroy() {
+    _destroyed = true;
+    if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    if (_tabsCtl) { _tabsCtl.destroy(); _tabsCtl = null; }
+    if (_envSelector) { try { _envSelector.destroy(); } catch (_) {} _envSelector = null; }
+    if (container.__cdvEnvUnsub) { try { container.__cdvEnvUnsub(); } catch (_) {} container.__cdvEnvUnsub = null; }
+  }
+  container.__destroyRunView = _destroy;
+
+  function _esc(s) {
+    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function _renderCard(run) {
+    const el = document.getElementById('cdv-card');
+    if (!el) return;
+    if (!run) { el.style.display = 'none'; return; }
+
+    const isRunning   = run.status === 'RUNNING';
+    const done        = (run.request_results || []).length;
+    const total       = run.total || 0;
+    const pct         = total > 0 ? Math.round(done / total * 100) : 0;
+    const statusColor = isRunning         ? 'var(--warning,#f59e0b)'
+      : run.status === 'PASSED'           ? 'var(--success,#10b981)'
+      :                                     'var(--danger,#ef4444)';
+
+    el.style.display = '';
+    el.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+        <span style="font-size:12px;font-weight:600;color:${statusColor};display:flex;align-items:center;gap:6px;">
+          ${isRunning ? '<span style="animation:cdv-pulse 1s infinite;display:inline-block;">⟳</span>' : ''}
+          ${_esc(run.status)} &nbsp;·&nbsp; ${done}/${total} &nbsp;·&nbsp; ${run.passed} passed &nbsp;·&nbsp; ${run.failed} failed
+        </span>
+        <div style="display:flex;gap:6px;">
+          ${isRunning ? `<button class="btn btn-xs btn-danger" id="cdv-stop">■ Stop</button>` : ''}
+          <button class="btn btn-xs btn-ghost" id="cdv-view">View Progress →</button>
+        </div>
+      </div>
+      <div style="height:3px;background:var(--border-default);border-radius:2px;overflow:hidden;">
+        <div style="height:100%;width:${pct}%;background:${statusColor};border-radius:2px;transition:width .4s;"></div>
+      </div>`;
+
+    const viewBtn = document.getElementById('cdv-view');
+    if (viewBtn) viewBtn.onclick = () => { _destroy(); if (onViewRun) onViewRun(run.id); };
+
+    const stopBtn = document.getElementById('cdv-stop');
+    if (stopBtn) stopBtn.onclick = async () => {
+      stopBtn.disabled = true; stopBtn.textContent = 'Stopping…';
+      await window.api('POST', `/api-collection-runs/${run.id}/stop`);
+    };
+
+    if (!isRunning) {
+      if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+    }
+  }
+
+  async function _poll() {
+    if (_destroyed || !runId) return;
+    try {
+      const res = await window.api('GET', `/api-collection-runs/${runId}`);
+      if (res.ok && res.run) _renderCard(res.run);
+    } catch (_) {}
   }
 
   async function _init() {
@@ -385,16 +563,15 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
             <div style="font-size:16px;font-weight:700;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${_esc(col.name)}</div>
             <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">${col.request_count || 0} requests</div>
           </div>
-          <select id="cdv-env-sel" class="input-sm" style="flex-shrink:0;max-width:150px;font-size:12px;"></select>
+          <span id="cdv-env-slot" style="flex-shrink:0;display:inline-flex;"></span>
           <button class="btn btn-sm btn-primary" id="cdv-run" style="flex-shrink:0;white-space:nowrap;">▶ Run</button>
         </div>
 
         <!-- Run status card -->
         <div id="cdv-card" style="display:none;background:var(--bg-elevated);border:1px solid var(--border-default);border-radius:var(--radius-md);padding:12px 16px;margin-bottom:20px;"></div>
 
-        <!-- Tabs -->
-        <div id="cdv-tabs" style="display:flex;gap:0;border-bottom:1px solid var(--border-default);margin-bottom:20px;"></div>
-        <div id="cdv-tab-content"></div>
+        <!-- Settings tabs -->
+        <div id="cdv-settings-host"></div>
 
       </div>`;
 
@@ -412,166 +589,23 @@ export function renderCollectionDetailView(container, col, runId, onViewRun, onB
       if (onViewRun && res.run_id) onViewRun(res.run_id);
     };
 
-    // Env selector
-    const envSel = document.getElementById('cdv-env-sel');
-    try {
-      const envRes = await window.api('GET', '/envs');
-      const envNames = (envRes.environments || envRes.envs || []).map(e => typeof e === 'string' ? e : (e.name || ''));
-      const noOpt = document.createElement('option');
-      noOpt.value = ''; noOpt.textContent = 'No environment';
-      envSel.appendChild(noOpt);
-      envNames.forEach(name => {
-        const opt = document.createElement('option');
-        opt.value = name; opt.textContent = name;
-        if (name === col.env_name) opt.selected = true;
-        envSel.appendChild(opt);
-      });
-    } catch(_) {}
-    envSel.addEventListener('change', async () => {
-      col.env_name = envSel.value || null;
-      await window.api('PATCH', `/collections/${col.id}`, { env_name: col.env_name });
-      _refreshKnownVarNames();
+    // Env selector (shared component) — binds env to the collection and emits
+    // the env-changed signal so the request editor / drawer stay in sync.
+    _envSelector = createEnvSelector({
+      collectionId: col.id,
+      envName: col.env_name,
+      onChange: (name) => { col.env_name = name; },
+    });
+    document.getElementById('cdv-env-slot').appendChild(_envSelector.el);
+
+    container.__cdvEnvUnsub = onEnvChanged(({ collectionId, envName }) => {
+      if (String(collectionId) !== String(col.id)) return;
+      col.env_name = envName;
+      _envSelector.setEnv(envName);
     });
 
-    // ── Schema Check tab ──
-    function _buildSchemaTab(wrap) {
-      wrap.className = 'sc-panel';
-      wrap.style.cssText = '';
-      wrap.innerHTML = `
-        <p class="sc-desc">Default for every request in this collection.
-          Changing it <strong>resets all per-request overrides</strong> so each request follows this setting —
-          you can override an individual request afterward.</p>
-        <div class="sc-row">
-          <div class="sc-row__label">Default for all requests</div>
-          <div class="sc-row__body">
-            <div class="sc-seg" role="group" aria-label="Collection schema-check default">
-              <button type="button" class="sc-seg__btn" data-val="on">On</button>
-              <button type="button" class="sc-seg__btn" data-val="off">Off</button>
-            </div>
-            <div class="sc-row__hint">On — every request is checked. Off — none are, unless a request is individually turned on.</div>
-          </div>
-        </div>`;
-
-      const seg = wrap.querySelector('.sc-seg');
-      function paint() {
-        const cur = col.schema_check_default || 'off';
-        seg.querySelectorAll('.sc-seg__btn').forEach(b =>
-          b.classList.toggle('is-active', b.dataset.val === cur));
-      }
-      seg.querySelectorAll('.sc-seg__btn').forEach(b => {
-        b.onclick = async () => {
-          const val = b.dataset.val;
-          if ((col.schema_check_default || 'off') === val) return;
-          const msg = `Turn schema check ${val === 'on' ? 'On' : 'Off'} for every request in “${col.name}”? `
-            + 'This resets all per-request overrides.';
-          const ok = await (window._confirmDialog
-            ? window._confirmDialog(msg)
-            : Promise.resolve(window.confirm(msg)));
-          if (!ok) return;
-          col.schema_check_default = val;
-          paint();
-          await window.api('PATCH', `/collections/${col.id}`, { schema_check_default: val });
-        };
-      });
-      paint();
-    }
-
-    // ── Negative testing tab ──
-    function _buildNegativeTab(wrap) {
-      wrap.className = 'sc-panel';
-      wrap.style.cssText = '';
-      wrap.innerHTML = `
-        <p class="sc-desc">Negative-testing default for every request in this collection.
-          Changing it <strong>resets all per-request overrides</strong> so each request follows this setting —
-          you can override an individual request afterward.</p>
-        <div class="sc-row">
-          <div class="sc-row__label">Default for all requests</div>
-          <div class="sc-row__body">
-            <div class="sc-seg" role="group" aria-label="Collection negative-testing default">
-              <button type="button" class="sc-seg__btn" data-val="on">On</button>
-              <button type="button" class="sc-seg__btn" data-val="off">Off</button>
-            </div>
-            <div class="sc-row__hint">On — negatives run for every request in collection runs. Off — none, unless a request is individually turned on.</div>
-          </div>
-        </div>`;
-
-      const seg = wrap.querySelector('.sc-seg');
-      function paint() {
-        const cur = col.negative_check_default || 'off';
-        seg.querySelectorAll('.sc-seg__btn').forEach(b =>
-          b.classList.toggle('is-active', b.dataset.val === cur));
-      }
-      seg.querySelectorAll('.sc-seg__btn').forEach(b => {
-        b.onclick = async () => {
-          const val = b.dataset.val;
-          if ((col.negative_check_default || 'off') === val) return;
-          const msg = `Turn negative testing ${val === 'on' ? 'On' : 'Off'} for every request in “${col.name}”? `
-            + 'This resets all per-request overrides.';
-          const ok = await (window._confirmDialog
-            ? window._confirmDialog(msg)
-            : Promise.resolve(window.confirm(msg)));
-          if (!ok) return;
-          col.negative_check_default = val;
-          paint();
-          await window.api('PATCH', `/collections/${col.id}`, { negative_check_default: val });
-        };
-      });
-      paint();
-    }
-
-    // Tabs
-    const tabsEl = document.getElementById('cdv-tabs');
-    const contentEl = document.getElementById('cdv-tab-content');
-
-    const TABS = [
-      { id: 'auth', label: 'Auth', build: _buildAuthTab },
-      { id: 'vars', label: 'Variables', build: _buildVarsTab },
-      { id: 'schema', label: 'Schema Check', build: _buildSchemaTab },
-      { id: 'negative', label: 'Negative', build: _buildNegativeTab },
-    ];
-
-    let _activeTab = null;
-    const _panels = {};
-    const _btns = {};
-
-    TABS.forEach(tab => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.style.cssText = 'background:none;border:none;border-bottom:2px solid transparent;padding:8px 16px;font-size:12px;font-weight:500;cursor:pointer;color:var(--text-muted);margin-bottom:-1px;letter-spacing:.01em;transition:color .15s;';
-      btn.textContent = tab.label;
-      btn.onmouseenter = () => { if (_activeTab !== tab.id) btn.style.color = 'var(--text-secondary)'; };
-      btn.onmouseleave = () => { if (_activeTab !== tab.id) btn.style.color = 'var(--text-muted)'; };
-      tabsEl.appendChild(btn);
-      _btns[tab.id] = btn;
-
-      const panel = document.createElement('div');
-      panel.style.display = 'none';
-      contentEl.appendChild(panel);
-      _panels[tab.id] = { el: panel, built: false };
-
-      btn.onclick = () => _switchTab(tab.id);
-    });
-
-    function _switchTab(id) {
-      if (_activeTab) {
-        _panels[_activeTab].el.style.display = 'none';
-        _btns[_activeTab].style.color = 'var(--text-muted)';
-        _btns[_activeTab].style.borderBottomColor = 'transparent';
-        _btns[_activeTab].style.fontWeight = '500';
-      }
-      _activeTab = id;
-      const panel = _panels[id];
-      if (!panel.built) {
-        panel.built = true;
-        TABS.find(t => t.id === id).build(panel.el);
-      }
-      panel.el.style.display = '';
-      _btns[id].style.color = 'var(--accent)';
-      _btns[id].style.borderBottomColor = 'var(--accent)';
-      _btns[id].style.fontWeight = '600';
-    }
-
-    _switchTab('auth');
+    // Settings tabs
+    _tabsCtl = renderCollectionSettingsTabs(document.getElementById('cdv-settings-host'), col);
 
     if (runId) {
       await _poll();

@@ -1,13 +1,19 @@
 /**
- * createInlineVarDrop(getVars) → { open, close, isOpen, handleKeydown, watchInput }
+ * createInlineVarDrop(getVars, opts) → { open, close, isOpen, handleKeydown, watchInput }
  *
  * Inline autocomplete dropdown for {{VAR}} token insertion.
  * Does NOT steal focus — the source input keeps focus throughout.
  *
  * watchInput(inp): attach to any <input> or <textarea> to get automatic
  * {{ detection, dropdown display, keyboard nav, and token insertion.
+ *
+ * opts.emptyActions: array (or function returning an array) of { label, onClick }.
+ *   When there are NO variables at all, these render as buttons in the empty
+ *   state so the user can act (select/create an environment, add a variable)
+ *   without leaving the field. Presentation-only — the caller owns the logic.
  */
-export function createInlineVarDrop(getVars) {
+export function createInlineVarDrop(getVars, opts = {}) {
+  const _emptyActions = opts.emptyActions;
   let _allVars = [];
   let _cacheTs = 0;
   let _activeIdx = -1;
@@ -39,6 +45,28 @@ export function createInlineVarDrop(getVars) {
     _items.forEach(i => { i.el.style.background = ''; });
   }
 
+  function _resolveEmptyActions() {
+    const a = typeof _emptyActions === 'function' ? _emptyActions() : _emptyActions;
+    return Array.isArray(a) ? a.filter(Boolean) : [];
+  }
+
+  function _renderEmptyActions(parent, acts) {
+    if (!acts.length) return;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;padding:2px 12px 10px;';
+    acts.forEach(a => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = a.label;
+      b.style.cssText = 'font-size:11px;padding:3px 8px;border:1px solid var(--border-default);border-radius:5px;background:var(--bg-panel);color:var(--text-primary);cursor:pointer;';
+      // mousedown + preventDefault: fire before the source input blurs, then
+      // close so the action (which may open a dialog) has a clean stage.
+      b.onmousedown = (e) => { e.preventDefault(); _close(); Promise.resolve().then(() => a.onClick && a.onClick()); };
+      bar.appendChild(b);
+    });
+    parent.appendChild(bar);
+  }
+
   function _render(filter) {
     pop.innerHTML = '';
     _activeIdx = -1;
@@ -50,8 +78,12 @@ export function createInlineVarDrop(getVars) {
     if (!filtered.length) {
       const em = document.createElement('div');
       em.style.cssText = 'padding:8px 12px;font-size:12px;color:var(--text-muted);';
-      em.textContent = _allVars.length ? 'No matching variables' : 'No variables — add env or collection vars';
+      const acts = _resolveEmptyActions();
+      em.textContent = _allVars.length
+        ? 'No matching variables'
+        : (acts.length ? 'No variables yet' : 'No variables — add env or collection vars');
       pop.appendChild(em);
+      if (!_allVars.length) _renderEmptyActions(pop, acts);
       return;
     }
 

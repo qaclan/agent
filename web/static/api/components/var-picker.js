@@ -2,9 +2,18 @@
  * createVarPicker(opts) → { open(anchorEl, onSelect, initialQuery?), close() }
  * opts.getVars: async () => [{key, value, is_secret?, group?}]
  * group: 'Environment' | 'Collection' | undefined — renders section headers when present
+ * opts.emptyActions: array (or function returning an array) of { label, onClick } —
+ *   buttons rendered in the empty state (no variables at all) so the user can
+ *   select/create an environment or add a variable in place. Presentation-only.
  */
 export function createVarPicker(opts = {}) {
   const { getVars = async () => [] } = opts;
+  const _emptyActions = opts.emptyActions;
+
+  function _resolveEmptyActions() {
+    const a = typeof _emptyActions === 'function' ? _emptyActions() : _emptyActions;
+    return Array.isArray(a) ? a.filter(Boolean) : [];
+  }
 
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;inset:0;z-index:1000;pointer-events:none;';
@@ -55,12 +64,26 @@ export function createVarPicker(opts = {}) {
     const filtered = q ? _allVars.filter(v => v.key.toLowerCase().includes(q)) : _allVars;
 
     if (!filtered.length) {
+      const acts = _resolveEmptyActions();
       const empty = document.createElement('div');
       empty.style.cssText = 'padding:10px 12px;font-size:12px;color:var(--text-muted);';
       empty.textContent = _allVars.length
         ? 'No matching variables.'
-        : 'No variables available. Select an environment or add collection variables.';
+        : (acts.length ? 'No variables yet.' : 'No variables available. Select an environment or add collection variables.');
       list.appendChild(empty);
+      if (!_allVars.length && acts.length) {
+        const bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;padding:0 12px 10px;';
+        acts.forEach(a => {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.textContent = a.label;
+          b.style.cssText = 'font-size:11px;padding:3px 8px;border:1px solid var(--border-default);border-radius:5px;background:var(--bg-panel);color:var(--text-primary);cursor:pointer;';
+          b.onclick = () => { _close(); Promise.resolve().then(() => a.onClick && a.onClick()); };
+          bar.appendChild(b);
+        });
+        list.appendChild(bar);
+      }
       return;
     }
 
