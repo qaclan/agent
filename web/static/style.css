@@ -1252,6 +1252,7 @@ select option { background: var(--bg-panel); color: var(--text-primary); }
 .toast-success .toast-icon::before { content: '\2713'; color: var(--success); }
 .toast-error { background: #450a0a; border-color: rgba(239,68,68,0.3); }
 .toast-error .toast-icon::before { content: '\2715'; color: var(--danger); }
+.toast-dismissible { cursor: pointer; }
 .toast-info { background: #1e3a5f; border-color: rgba(59,130,246,0.3); }
 .toast-info .toast-icon::before { content: '\2139'; color: var(--accent); }
 

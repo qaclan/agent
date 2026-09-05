@@ -121,23 +121,36 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
     return labels.slice(-n).join('.');
   }
 
-  let startHostname = '';
-  try { startHostname = new URL(startUrl || '').hostname; } catch {}
-  const startRootDomain = _rootDomain(startHostname);
-
   function _hostname(url) {
     try { return new URL(url).hostname; } catch { return ''; }
   }
 
+  // Each request is classified against its OWN owning script's recorded
+  // start URL (r._scriptStartUrl), not one value shared across the whole
+  // modal — a suite mixing scripts recorded against different sites would
+  // otherwise flag one script's real API as third-party just because
+  // another script's request happened to be used as the reference. Requests
+  // with no _scriptStartUrl (older import flows, single-script Record-APIs
+  // mode) fall back to the modal-level startUrl param.
+  function _rowRootDomain(r) {
+    let hostname = '';
+    try { hostname = new URL(r._scriptStartUrl || startUrl || '').hostname; } catch {}
+    return _rootDomain(hostname);
+  }
+
   const indexedRequests = requests.map((r, i) => ({ ...r, _idx: i }));
-  const thirdPartyCount = startRootDomain
-    ? indexedRequests.filter(r => _rootDomain(_hostname(r.url)) !== startRootDomain).length
-    : 0;
+  const thirdPartyCount = indexedRequests.filter(r => {
+    const rootDomain = _rowRootDomain(r);
+    return rootDomain && _rootDomain(_hostname(r.url)) !== rootDomain;
+  }).length
   let hidingThirdParty = false;
 
   function _visible() {
-    if (!hidingThirdParty || !startRootDomain) return indexedRequests;
-    return indexedRequests.filter(r => _rootDomain(_hostname(r.url)) === startRootDomain);
+    if (!hidingThirdParty) return indexedRequests;
+    return indexedRequests.filter(r => {
+      const rootDomain = _rowRootDomain(r);
+      return !rootDomain || _rootDomain(_hostname(r.url)) === rootDomain;
+    });
   }
 
   function _renderList(listEl) {
@@ -159,7 +172,8 @@ export function showRequestReviewModal(requests, defaultCollectionName, startUrl
       const displayName = (r.name || '').replace(methodPrefix, '') || r.url.replace(/\?.*/, '');
       const hostname = _hostname(r.url);
       const origin = (() => { try { return new URL(r.url).origin; } catch { return hostname; } })();
-      const isThirdParty = startRootDomain && _rootDomain(hostname) !== startRootDomain;
+      const rowRootDomain = _rowRootDomain(r);
+      const isThirdParty = rowRootDomain && _rootDomain(hostname) !== rowRootDomain;
 
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 10px;font-size:12px;';

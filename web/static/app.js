@@ -451,6 +451,8 @@ function toggleTheme() {
 // Apply immediately so first paint matches the saved theme
 applyTheme(getTheme())
 
+let _pushPollTimer = null
+
 async function triggerPush() {
   const btn = document.getElementById('btn-push')
   if (!btn || btn.disabled) return
@@ -465,6 +467,7 @@ async function triggerPush() {
       toast(`${first.label} failed to sync: ${first.last_error}${more}`, 'error')
     } else {
       toast(res.message || 'Pushed', res.remaining > 0 ? 'info' : 'success')
+      if (res.remaining > 0) pollPushCompletion()
     }
   } catch (e) {
     toast('Push failed: ' + e, 'error')
@@ -472,6 +475,33 @@ async function triggerPush() {
     btn.disabled = false
     btn.classList.remove('syncing')
   }
+}
+
+// Backgrounded push (didn't fully drain within the server's own deadline) resolves
+// asynchronously via the worker - poll status briefly so success/failure isn't silent.
+function pollPushCompletion(attempt = 0) {
+  clearTimeout(_pushPollTimer)
+  if (attempt >= 6) return
+  _pushPollTimer = setTimeout(async () => {
+    let res
+    try {
+      res = await api('GET', '/sync/status')
+    } catch (e) {
+      return
+    }
+    if (res.ok === false) return
+    if (res.failing && res.failing.length > 0) {
+      const first = res.failing[0]
+      const more = res.failing.length > 1 ? ` (+${res.failing.length - 1} more)` : ''
+      toast(`${first.label} failed to sync: ${first.last_error}${more}`, 'error')
+      return
+    }
+    if (res.queue_depth === 0) {
+      toast('Sync completed in background', 'success')
+      return
+    }
+    pollPushCompletion(attempt + 1)
+  }, 5000)
 }
 
 async function triggerPull() {
@@ -703,10 +733,16 @@ function toast(message, type = 'success') {
   el.className = `toast toast-${type}`
   el.innerHTML = `<span class="toast-icon"></span><span>${escHtml(message)}</span>`
   container.appendChild(el)
-  setTimeout(() => {
+  const dismiss = () => {
     el.style.animation = 'toastOut 0.2s ease forwards'
     setTimeout(() => el.remove(), 200)
-  }, 3000)
+  }
+  if (type === 'error') {
+    el.classList.add('toast-dismissible')
+    el.addEventListener('click', dismiss)
+  } else {
+    setTimeout(dismiss, 3000)
+  }
 }
 
 // ── No Project State ────────────────────────────────────────────
@@ -1221,13 +1257,13 @@ function _categorizeField(locator, patterns) {
 function _suggestEnvKeysForCategory(category, envVars, secretCategories) {
   // Return env vars sorted by likelihood of matching the category.
   // Score: substring match against category and its synonyms = high, others = low.
-  // For secret categories, only suggest is_secret=true vars.
+  // All env vars are offered (including non-secret ones); scoring floats the
+  // most relevant keys to the top. is_secret is not used to filter — a matching
+  // key the user forgot to flag secret must still be bindable.
   if (!category || !envVars) return []
-  const isSecretCat = secretCategories && secretCategories.includes(category)
-  const candidates = isSecretCat ? envVars.filter(v => v.is_secret) : envVars
 
   const cat = category.toLowerCase()
-  return candidates
+  return envVars
     .map(v => {
       const k = v.key.toLowerCase()
       let score = 0
@@ -4332,7 +4368,7 @@ async function reviewRunCapturedRequests() {
   if (!requests.length) { toast('No captured requests', 'error'); return }
   const returnToRunResults = window._lastRunResultsRender
   const { showRequestReviewModal } = await import('./api/views/request-review-modal.js')
-  showRequestReviewModal(requests, 'Recorded APIs', requests[0].url, {
+  showRequestReviewModal(requests, 'Recorded APIs', requests[0]._scriptStartUrl || requests[0].url, {
     onSaved: () => {
       window._runCapturedRequests = []
       window._modalCloseGuard = null
@@ -4364,7 +4400,7 @@ function showRunResults(run, suiteName) {
     scripts.forEach(s => {
       if (!s.captured_requests) return
       const parsed = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
-      parsed.forEach(r => runCapturedRequests.push({ ...r, _scriptName: s.name }))
+      parsed.forEach(r => runCapturedRequests.push({ ...r, _scriptName: s.name, _scriptStartUrl: s.start_url_value }))
     })
     runCapturedCount = runCapturedRequests.length
     if (runCapturedCount > 0) {

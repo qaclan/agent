@@ -8,6 +8,9 @@ import { createGraphqlEditor, formatGraphQL } from '../components/graphql-editor
 import { buildCurlCommand } from '../curl-builder.js';
 import { applyVarStyle, tokenSpansIn, escapeHtml } from '../components/var-style.js';
 import { attachTokenOverlay } from '../components/var-token-overlay.js';
+import { createEnvSelector } from '../components/env-selector.js';
+import { onEnvChanged } from '../components/env-events.js';
+import { openCollectionSettingsDrawer } from '../components/collection-settings-drawer.js';
 
 /**
  * renderRequestEditor(container, requestId, defaultCollectionId, collectionId, collectionEnvName, defaultFolderId)
@@ -26,6 +29,10 @@ let _renderGen = 0;
 
 export async function renderRequestEditor(container, requestId = null, defaultCollectionId = null, collectionId = null, collectionEnvName = null, defaultFolderId = null) {
   const myGen = ++_renderGen;
+  // Tear down the previous editor's env-change subscription before this render
+  // installs its own — otherwise stale editors keep reacting into a dead DOM.
+  if (container.__qcEnvUnsub) { try { container.__qcEnvUnsub(); } catch (_) {} container.__qcEnvUnsub = null; }
+  if (container.__qcEnvSelDestroy) { try { container.__qcEnvSelDestroy(); } catch (_) {} container.__qcEnvSelDestroy = null; }
   container.innerHTML = '<div class="text-muted text-sm" style="padding:20px">Loading...</div>';
 
   let existing = null;
@@ -46,11 +53,15 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const r = existing || {};
   const _effectiveCollectionId = r.collection_id || collectionId || defaultCollectionId;
 
+  // The bound environment is mutable state, not the frozen open-time argument:
+  // the header selector and cross-view env-changed signal both update it live.
+  let _boundEnvName = collectionEnvName;
+
   async function getAllVars() {
     const results = [];
-    if (collectionEnvName) {
+    if (_boundEnvName) {
       try {
-        const res = await window.api('GET', `/envs/${encodeURIComponent(collectionEnvName)}`);
+        const res = await window.api('GET', `/envs/${encodeURIComponent(_boundEnvName)}`);
         const envVars = res.variables || [];
         envVars.forEach(v => results.push({ key: v.key, value: v.value, is_secret: !!v.is_secret, group: 'Environment' }));
       } catch(e) { /* no env */ }
@@ -109,6 +120,35 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     _varSuggestUIs.forEach(u => u.invalidate());
   }
 
+  // Header env selector, assigned when the header is built below. Declared here
+  // so the empty-state actions and the add-variable flow can reach it.
+  let _envSelector = null;
+
+  // Open the collection-settings drawer (used by ⚙ Config and the empty-state
+  // "add variable"). Refreshes the editor's variable list on close so a newly
+  // added collection variable is immediately insertable, without reopening.
+  async function _openCollectionSettings(drawerOpts = {}) {
+    if (!_effectiveCollectionId) return;
+    const res = await window.api('GET', `/collections/${_effectiveCollectionId}`);
+    const col = res && (res.collection || res);
+    if (!col || col.ok === false) { await window._alertDialog?.('Could not load collection settings.'); return; }
+    openCollectionSettingsDrawer(col, { ...drawerOpts, onClose: () => _refreshKnownVarNames() });
+  }
+
+  // Actions offered in a variable picker's empty state, so the user can resolve
+  // "no variables" without leaving the editor (the reported UX gap): add a
+  // collection variable via the Variables tab, or open the environment chooser.
+  function _emptyVarActions() {
+    if (!_effectiveCollectionId) return [];
+    return [
+      { label: '+ Add variable', onClick: () => _openCollectionSettings({ tab: 'vars', addRow: true }) },
+      {
+        label: _boundEnvName ? 'Change environment' : 'Select environment',
+        onClick: () => { _envSelector && _envSelector.open(); },
+      },
+    ];
+  }
+
   container.innerHTML = '';
 
   const editor = document.createElement('div');
@@ -119,7 +159,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // non-input actions below (body-type switch, curl paste-import) need to
   // call it explicitly.
   let _dirty = false;
-  function _markDirty() { _dirty = true; }
+  function _markDirty() { _dirty = true; _syncSaveBtn(); }
 
   // ── Header: name + save ──
   const header = document.createElement('div');
@@ -131,10 +171,68 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   nameInput.value = r.name || '';
   header.appendChild(nameInput);
 
+  // Save is a REQUEST action. Kept muted/disabled until the request has unsaved
+  // edits, so it can never be mistaken for the auto-saving env/collection
+  // controls that sit beside it (_markDirty and _save call _syncSaveBtn).
   const saveBtn = document.createElement('button');
   saveBtn.className = 'btn btn-sm btn-ghost';
   saveBtn.textContent = 'Save';
+  function _syncSaveBtn() {
+    saveBtn.disabled = !_dirty;
+    saveBtn.style.opacity = _dirty ? '' : '.45';
+    saveBtn.style.cursor = _dirty ? '' : 'default';
+    saveBtn.title = _dirty ? 'Save request' : 'No unsaved request changes';
+  }
+
+  // Collection context — environment selector + a "Config" drawer trigger.
+  // Grouped together (and divided from Save) so they read as one collection-level
+  // unit, distinct from the request's Save. Only shown inside a collection.
+  if (_effectiveCollectionId) {
+    const envGroup = document.createElement('div');
+    envGroup.style.cssText = 'display:flex;align-items:center;gap:6px;margin-left:auto;';
+
+    _envSelector = createEnvSelector({
+      collectionId: _effectiveCollectionId,
+      envName: _boundEnvName,
+      onChange: (name) => { _boundEnvName = name; },
+    });
+    envGroup.appendChild(_envSelector.el);
+    // Tear down the custom dropdown (body-level menu + global listeners) on the
+    // next render into this container.
+    container.__qcEnvSelDestroy = () => { try { _envSelector.destroy(); } catch (_) {} };
+
+    const settingsBtn = document.createElement('button');
+    settingsBtn.type = 'button';
+    settingsBtn.className = 'btn btn-sm btn-ghost';
+    settingsBtn.title = 'Collection settings — auth, variables, schema check, negative';
+    settingsBtn.textContent = '⚙ Config';
+    settingsBtn.onclick = async () => {
+      settingsBtn.disabled = true;
+      await _openCollectionSettings();
+      settingsBtn.disabled = false;
+    };
+    envGroup.appendChild(settingsBtn);
+    header.appendChild(envGroup);
+
+    // Thin divider so Save reads as a separate (request) action.
+    const sep = document.createElement('div');
+    sep.style.cssText = 'width:1px;align-self:stretch;min-height:18px;background:var(--border-default);margin:0 2px;';
+    header.appendChild(sep);
+
+    // Live-sync: when the binding changes anywhere (this selector, the collection
+    // view, or the drawer) mirror it here and re-fetch the variable list.
+    container.__qcEnvUnsub = onEnvChanged(({ collectionId, envName }) => {
+      if (String(collectionId) !== String(_effectiveCollectionId)) return;
+      _boundEnvName = envName;
+      _envSelector.setEnv(envName);
+      _refreshKnownVarNames();
+    });
+  } else {
+    saveBtn.style.marginLeft = 'auto';
+  }
+
   header.appendChild(saveBtn);
+  _syncSaveBtn();
   editor.appendChild(header);
 
   // ── URL bar ──
@@ -238,7 +336,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   // {{ autocomplete — contenteditable has no .selectionStart/.setSelectionRange,
   // so this can't use watchInput() (built for real <input>/<textarea>); wire the
   // same open/handleKeydown primitives by hand against the caret-offset helpers above.
-  const _urlInlineDrop = createInlineVarDrop(getAllVars);
+  const _urlInlineDrop = createInlineVarDrop(getAllVars, { emptyActions: _emptyVarActions });
   _varSuggestUIs.push(_urlInlineDrop);
   urlInput.addEventListener('input', _renderUrlTokens);
   urlInput.addEventListener('input', (e) => {
@@ -603,8 +701,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   minifyBtn.textContent = 'Minify';
   bodyTypeGroup.appendChild(minifyBtn);
 
-  const _bodyVarPicker = createVarPicker({ getVars: getAllVars });
-  const _bodyInlineDrop = createInlineVarDrop(getAllVars);
+  const _bodyVarPicker = createVarPicker({ getVars: getAllVars, emptyActions: _emptyVarActions });
+  const _bodyInlineDrop = createInlineVarDrop(getAllVars, { emptyActions: _emptyVarActions });
   _varSuggestUIs.push(_bodyVarPicker, _bodyInlineDrop);
   const bodyVarBtn = document.createElement('button');
   bodyVarBtn.type = 'button';
@@ -1037,7 +1135,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     ? JSON.stringify(r.auth_config, null, 2)
     : (r.auth_config || '{}');
 
-  const _authInlineDrop = createInlineVarDrop(getAllVars);
+  const _authInlineDrop = createInlineVarDrop(getAllVars, { emptyActions: _emptyVarActions });
   _varSuggestUIs.push(_authInlineDrop);
 
   function _makeField(labelText, placeholder, getValue, setValue) {
@@ -1319,7 +1417,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   }
 
   // ── Script sections ──
-  const _scriptInlineDrop = createInlineVarDrop(getAllVars);
+  const _scriptInlineDrop = createInlineVarDrop(getAllVars, { emptyActions: _emptyVarActions });
   _varSuggestUIs.push(_scriptInlineDrop);
   function makeScriptSection(lang, code, hint) {
     const div = document.createElement('div');
@@ -1532,8 +1630,8 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
   function _buildExtractorPane(initialRules, responseSchema, hintText) {
     const div = document.createElement('div');
-    const _namePicker = createVarPicker({ getVars: getAllVars });
-    const _nameDrop = createInlineVarDrop(getAllVars);
+    const _namePicker = createVarPicker({ getVars: getAllVars, emptyActions: _emptyVarActions });
+    const _nameDrop = createInlineVarDrop(getAllVars, { emptyActions: _emptyVarActions });
     _varSuggestUIs.push(_namePicker, _nameDrop);
 
     const hint = document.createElement('p');
@@ -2348,6 +2446,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
 
     if (res.ok === false) { await window._alertDialog('Save failed: ' + res.error); return null; }
     _dirty = false;
+    _syncSaveBtn();
     window.__qaclanApi?.refresh?.(res.request?.id || requestId);
     return res.request?.id || requestId;
   }
