@@ -1257,13 +1257,13 @@ function _categorizeField(locator, patterns) {
 function _suggestEnvKeysForCategory(category, envVars, secretCategories) {
   // Return env vars sorted by likelihood of matching the category.
   // Score: substring match against category and its synonyms = high, others = low.
-  // For secret categories, only suggest is_secret=true vars.
+  // All env vars are offered (including non-secret ones); scoring floats the
+  // most relevant keys to the top. is_secret is not used to filter — a matching
+  // key the user forgot to flag secret must still be bindable.
   if (!category || !envVars) return []
-  const isSecretCat = secretCategories && secretCategories.includes(category)
-  const candidates = isSecretCat ? envVars.filter(v => v.is_secret) : envVars
 
   const cat = category.toLowerCase()
-  return candidates
+  return envVars
     .map(v => {
       const k = v.key.toLowerCase()
       let score = 0
