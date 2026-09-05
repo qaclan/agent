@@ -744,6 +744,7 @@ def execute_run():
                     script_results.append({
                         "script_id": item["script_id"],
                         "name": item["script_name"],
+                        "start_url_value": item["start_url_value"],
                         "status": status,
                         "duration_ms": duration_ms,
                         "error_message": error_msg,
@@ -796,6 +797,7 @@ def execute_run():
                     script_results.append({
                         "script_id": item["script_id"],
                         "name": item["script_name"],
+                        "start_url_value": item["start_url_value"],
                         "status": "FAILED",
                         "duration_ms": duration_ms,
                         "error_message": error_msg,
@@ -830,6 +832,7 @@ def execute_run():
                     script_results.append({
                         "script_id": item["script_id"],
                         "name": item["script_name"],
+                        "start_url_value": item["start_url_value"],
                         "status": "FAILED",
                         "duration_ms": duration_ms,
                         "error_message": error_msg,

@@ -4368,7 +4368,7 @@ async function reviewRunCapturedRequests() {
   if (!requests.length) { toast('No captured requests', 'error'); return }
   const returnToRunResults = window._lastRunResultsRender
   const { showRequestReviewModal } = await import('./api/views/request-review-modal.js')
-  showRequestReviewModal(requests, 'Recorded APIs', requests[0].url, {
+  showRequestReviewModal(requests, 'Recorded APIs', requests[0]._scriptStartUrl || requests[0].url, {
     onSaved: () => {
       window._runCapturedRequests = []
       window._modalCloseGuard = null
@@ -4400,7 +4400,7 @@ function showRunResults(run, suiteName) {
     scripts.forEach(s => {
       if (!s.captured_requests) return
       const parsed = (() => { try { return JSON.parse(s.captured_requests) } catch { return [] } })()
-      parsed.forEach(r => runCapturedRequests.push({ ...r, _scriptName: s.name }))
+      parsed.forEach(r => runCapturedRequests.push({ ...r, _scriptName: s.name, _scriptStartUrl: s.start_url_value }))
     })
     runCapturedCount = runCapturedRequests.length
     if (runCapturedCount > 0) {
