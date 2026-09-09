@@ -469,6 +469,9 @@ body {
 .btn-sm { padding: 5px 11px; font-size: 12.5px; }
 .btn-xs { padding: 3px 8px; font-size: 11.5px; border-radius: var(--radius-sm); }
 
+.api-collapse-btn { padding: 6px 10px; }
+.api-collapse-btn svg { width: 13px; height: 13px; display: block; }
+
 /* Cards */
 .card {
   background: var(--bg-surface);

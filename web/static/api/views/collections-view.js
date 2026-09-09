@@ -178,9 +178,12 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       else if (action === 'delete') _deleteCollection(col.id, col.name);
     };
 
+    const CHEVRON_DOWN = '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5l4.5 4 4.5-4"/></svg>';
+    const CHEVRON_RIGHT = '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3l4 4.5-4 4.5"/></svg>';
     const expandBtn = document.createElement('button');
-    expandBtn.className = 'btn btn-xs btn-ghost';
-    expandBtn.textContent = '▾';
+    expandBtn.className = 'btn btn-xs btn-ghost api-collapse-btn';
+    expandBtn.title = 'Collapse/expand';
+    expandBtn.innerHTML = CHEVRON_DOWN;
     rightSide.appendChild(expandBtn);
     header.appendChild(rightSide);
 
@@ -193,7 +196,7 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     function _toggleExpand() {
       expanded = !expanded;
       treeRoot.style.display = expanded ? '' : 'none';
-      expandBtn.textContent = expanded ? '▾' : '▸';
+      expandBtn.innerHTML = expanded ? CHEVRON_DOWN : CHEVRON_RIGHT;
     }
     header.onclick = (e) => {
       if (rightSide.contains(e.target)) return;
