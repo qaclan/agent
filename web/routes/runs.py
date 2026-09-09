@@ -506,7 +506,7 @@ def execute_run():
                         run_state = dict(state_dict)
                         if api_req.get("collection_id"):
                             from web.api.repositories.collection_vars_repo import CollectionVarsRepo
-                            _seed = CollectionVarsRepo().as_seed_dict(api_req["collection_id"]) or {}
+                            _seed = CollectionVarsRepo().as_seed_dict(api_req["collection_id"], env_name) or {}
                             if _seed:
                                 run_state["qaclan_vars"] = {**_seed, **state_dict.get("qaclan_vars", {})}
 
@@ -516,6 +516,7 @@ def execute_run():
                         api_result = resolve_and_run_api_item(
                             api_req, api_col, env_vars_dict, run_state,
                             state_path=str(state_file), include_negatives=False,
+                            env_name=env_name,
                         )
 
                         # Persist only the vars genuinely extracted THIS run back
