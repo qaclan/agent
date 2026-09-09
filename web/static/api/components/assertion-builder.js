@@ -8,12 +8,16 @@
  * matchMode ('first'|'any'|'all', json_path only, default 'first') — which of
  * possibly-multiple JSONPath matches (wildcard/recursive-descent paths) must
  * satisfy the op. Omitted when 'first' to keep old assertion JSON valid.
+ * options.onChange?: () => void — fired after a user-driven row mutation
+ * (add, delete). Type/op/value edits already bubble native input/change
+ * events, so callers relying on that don't need this for those — but a
+ * removed row doesn't fire any DOM event, so onChange is the only signal.
  */
 import { attachTokenOverlay } from './var-token-overlay.js';
 import { applyVarStyle } from './var-style.js';
 
 export function createAssertionBuilder(options = {}) {
-  const { getVarsList = null } = options;
+  const { getVarsList = null, onChange = null } = options;
   const _overlays = [];
   let _hasInvalid = false;
   const wrapper = document.createElement('div');
@@ -28,7 +32,7 @@ export function createAssertionBuilder(options = {}) {
   addBtn.className = 'btn btn-xs btn-ghost';
   addBtn.style.marginTop = '6px';
   addBtn.textContent = '+ Add Assertion';
-  addBtn.onclick = () => _addRow({});
+  addBtn.onclick = () => { _addRow({}); if (onChange) onChange(); };
   wrapper.appendChild(addBtn);
 
   const TYPE_OPS = {
@@ -123,7 +127,7 @@ export function createAssertionBuilder(options = {}) {
     delBtn.type = 'button';
     delBtn.className = 'btn btn-xs btn-ghost btn-icon-danger';
     delBtn.textContent = '×';
-    delBtn.onclick = () => row.remove();
+    delBtn.onclick = () => { row.remove(); if (onChange) onChange(); };
     row.appendChild(delBtn);
 
     // Rebuilding <option>s on every change (including the op select's own

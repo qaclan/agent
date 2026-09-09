@@ -206,9 +206,19 @@ function qcEditorSmokeTest() {
 
 // ── State & Router ──────────────────────────────────────────────
 
+// Keep in sync with the `routes` keys below — validated against a static
+// list (rather than `Object.keys(routes)`) since `state` is initialized
+// before `routes` is declared further down this module.
+const VALID_PAGES = ['features', 'scripts', 'suites', 'runs', 'envs', 'settings', 'api']
+
+function getStoredPage() {
+  const stored = localStorage.getItem('qaclan-page')
+  return VALID_PAGES.includes(stored) ? stored : 'scripts'
+}
+
 const state = {
   activeProject: null,
-  page: 'scripts',
+  page: getStoredPage(),
   authenticated: false,
   user: null,
   settings: { editor_mode: 'code' },  // backend overrides via /api/settings on init
@@ -251,6 +261,7 @@ function _renderResolutionOptions(selected = '') {
 
 async function navigate(page) {
   state.page = page
+  localStorage.setItem('qaclan-page', page)
   renderSidebar()
   renderTopbar()
   const el = document.getElementById('page-content')
