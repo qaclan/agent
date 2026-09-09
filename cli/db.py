@@ -154,6 +154,7 @@ def init_db():
     _migrate_captured_requests(conn)
     _migrate_api_cloud_id(conn)
     _migrate_collection_var_secret(conn)
+    _migrate_collection_var_runtime(conn)
     _migrate_request_body_columns(conn)
     _migrate_api_schema_check(conn)
     _migrate_api_negative_testing(conn)
@@ -642,6 +643,21 @@ def _migrate_collection_var_secret(conn):
     """Add is_secret to collection_vars, mirroring env_vars.is_secret."""
     try:
         conn.execute("ALTER TABLE collection_vars ADD COLUMN is_secret INTEGER DEFAULT 0")
+    except Exception:
+        pass  # already exists
+    conn.commit()
+
+
+def _migrate_collection_var_runtime(conn):
+    """Add runtime_value/runtime_env_name to collection_vars — separates a
+    script's qc.set output (scoped to the environment active when captured)
+    from the user-authored initial_value default."""
+    try:
+        conn.execute("ALTER TABLE collection_vars ADD COLUMN runtime_value TEXT DEFAULT NULL")
+    except Exception:
+        pass  # already exists
+    try:
+        conn.execute("ALTER TABLE collection_vars ADD COLUMN runtime_env_name TEXT DEFAULT NULL")
     except Exception:
         pass  # already exists
     conn.commit()

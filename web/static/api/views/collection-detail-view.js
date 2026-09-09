@@ -225,7 +225,9 @@ export function renderCollectionSettingsTabs(host, col) {
       keyTd.appendChild(keyInp);
 
       const valTd = document.createElement('td');
-      valTd.style.padding = '4px 6px';
+      valTd.style.cssText = 'padding:4px 6px;';
+      const valRow = document.createElement('div');
+      valRow.style.cssText = 'display:flex;align-items:center;gap:6px;';
       const valInp = document.createElement('input');
       valInp.type = isSecretInitially ? 'password' : 'text';
       valInp.placeholder = '(empty — set by post-script)';
@@ -238,7 +240,16 @@ export function renderCollectionSettingsTabs(host, col) {
       });
       valInp.addEventListener('input', () => { tr.dataset.edited = '1'; delete tr.dataset.masked; });
       valInp.addEventListener('blur',  () => { valInp.style.borderColor = 'transparent'; });
-      valTd.appendChild(valInp);
+      valRow.appendChild(valInp);
+      if (v.runtime_active) {
+        const badge = document.createElement('span');
+        badge.textContent = 'live';
+        const envLabel = v.runtime_env_name ? `environment "${v.runtime_env_name}"` : 'no environment';
+        badge.title = `Current value was captured by a script (qc.set) while ${envLabel} was bound — shown instead of the static default above. Switching or unbinding the environment reverts to the default.`;
+        badge.style.cssText = 'flex:none;font-size:9px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--accent,#4a9eff);border:1px solid currentColor;border-radius:3px;padding:1px 4px;cursor:help;';
+        valRow.appendChild(badge);
+      }
+      valTd.appendChild(valRow);
 
       const secretTd = document.createElement('td');
       secretTd.style.cssText = 'padding:4px 6px;text-align:center;';

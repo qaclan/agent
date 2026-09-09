@@ -152,7 +152,8 @@ def _requests_for_run(requests: list, col: dict | None, confirm_destructive: boo
 def resolve_and_run_api_item(req: dict, col: dict | None, env_vars: dict, state: dict,
                               state_path: str | None = None, include_negatives: bool = True,
                               confirm_destructive: bool = False,
-                              negatives_mode: str = "default") -> dict:
+                              negatives_mode: str = "default",
+                              env_name: str | None = None) -> dict:
     """Resolve auth/schema-check/(optionally negative-check) for one request
     against its collection, send it, capture a first-run schema baseline, and
     persist any extracted variables into the collection's variable store.
@@ -166,6 +167,10 @@ def resolve_and_run_api_item(req: dict, col: dict | None, env_vars: dict, state:
     `include_negatives=False` hard-disables negative testing regardless of
     the request/collection's own configuration — used by callers (suites)
     that must never run negatives.
+
+    `env_name` is the environment currently bound to the collection (or None
+    if unbound) — extracted variables persist tagged with it, so they only
+    apply as a seed for a later run while that same environment stays bound.
     """
     from cli.api_runner import run_api_request
 
@@ -195,7 +200,7 @@ def resolve_and_run_api_item(req: dict, col: dict | None, env_vars: dict, state:
         from web.api.repositories.collection_vars_repo import CollectionVarsRepo
         vars_repo = CollectionVarsRepo()
         for key, value in result["state_updates"].items():
-            vars_repo.upsert(req["collection_id"], key, str(value))
+            vars_repo.upsert_runtime(req["collection_id"], key, str(value), env_name=env_name)
 
     return result
 
@@ -243,12 +248,12 @@ class RunnerService:
         # Seed state with collection vars initial values
         seed_vars: dict = {}
         if req.get("collection_id"):
-            seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"])
+            seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"], env_name)
         state: dict = {"qaclan_vars": seed_vars} if seed_vars else {}
 
         # Ordinary "Send" never fires negatives — include_negatives=False.
         return resolve_and_run_api_item(req, col, env_vars, state, state_path=None,
-                                         include_negatives=False)
+                                         include_negatives=False, env_name=env_name)
 
     def set_response_schema(self, request_id: str, project_id: str,
                             schema=None, response_body: str | None = None,
@@ -335,7 +340,7 @@ class RunnerService:
         env_vars = load_env_vars(project_id, env_name)
         seed_vars: dict = {}
         if req.get("collection_id"):
-            seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"])
+            seed_vars = CollectionVarsRepo().as_seed_dict(req["collection_id"], env_name)
         state: dict = {"qaclan_vars": seed_vars} if seed_vars else {}
 
         result = run_api_request(
@@ -471,7 +476,7 @@ class RunnerService:
             env_vars = load_env_vars(project_id, env_name)
 
             # Seed state from persisted collection vars (same as single-request run)
-            cv_seed = vars_repo.as_seed_dict(collection_id)
+            cv_seed = vars_repo.as_seed_dict(collection_id, env_name)
             state: dict = {"qaclan_vars": dict(cv_seed)} if cv_seed else {}
             # Explicitly passed seed_vars override persisted values
             if seed_vars:
@@ -488,7 +493,7 @@ class RunnerService:
                 result = resolve_and_run_api_item(
                     req, col, env_vars, state, state_path=None,
                     include_negatives=True, confirm_destructive=confirm_destructive,
-                    negatives_mode=negatives_mode,
+                    negatives_mode=negatives_mode, env_name=env_name,
                 )
                 results.append(result)
                 run_repo.create_request_result(run_id, req, result, idx)
@@ -558,7 +563,7 @@ class RunnerService:
                 result = resolve_and_run_api_item(
                     req, col, env_vars, state, state_path=None,
                     include_negatives=True, confirm_destructive=confirm_destructive,
-                    negatives_mode=negatives_mode,
+                    negatives_mode=negatives_mode, env_name=env_name,
                 )
                 results.append({
                     "request_id": req["id"],

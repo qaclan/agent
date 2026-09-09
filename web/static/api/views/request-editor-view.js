@@ -545,7 +545,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const paramsTable = createKeyValueTable({
     placeholder: { key: 'Parameter', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
     getVarsList: () => _allVarsList,
-    onChange: () => _syncUrlFromQueryParams(),
+    onChange: () => { _syncUrlFromQueryParams(); _markDirty(); },
   });
   paramsTable.setRows(r.params || []);
 
@@ -560,7 +560,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
     urlInput.value = path + (qs ? '?' + qs : '') + hash;
   }
 
-  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList });
+  const headersTable = createKeyValueTable({ placeholder: { key: 'Header', value: 'Value' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList, onChange: () => _markDirty() });
   headersTable.setRows(r.headers || []);
 
   const authBanner = document.createElement('div');
@@ -575,7 +575,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const pathVarsTable = createKeyValueTable({
     placeholder: { key: 'param', value: 'value or {{var}}' }, varPickerEnabled: true, getVars: getAllVars, getKnownVarNames: () => _knownVarNames,
     getVarsList: () => _allVarsList,
-    onChange: () => _syncUrlFromPathVars(),
+    onChange: () => { _syncUrlFromPathVars(); _markDirty(); },
   });
   const pathVarsSection = document.createElement('div');
   {
@@ -656,7 +656,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   _syncPathVars();
   _syncUrlFromQueryParams(); // reflect params loaded from the saved request in the URL bar
 
-  const assertionBuilder = createAssertionBuilder({ getVarsList: () => _allVarsList });
+  const assertionBuilder = createAssertionBuilder({ getVarsList: () => _allVarsList, onChange: () => _markDirty() });
   assertionBuilder.setAssertions(r.assertions || []);
 
   // ── Body section ──
@@ -918,10 +918,12 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
   const formBodyTable = createKeyValueTable({
     placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars,
     getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+    onChange: () => _markDirty(),
   });
   const multipartBodyTable = createKeyValueTable({
     placeholder: { key: 'field', value: 'value' }, varPickerEnabled: true, getVars: getAllVars, fileFieldsEnabled: true,
     getKnownVarNames: () => _knownVarNames, getVarsList: () => _allVarsList,
+    onChange: () => _markDirty(),
   });
   formBodyTable.setRows(_formRows);
   multipartBodyTable.setRows(_multipartRows);
@@ -1734,7 +1736,7 @@ export async function renderRequestEditor(container, requestId = null, defaultCo
       del.type = 'button';
       del.style.cssText = 'background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:16px;padding:0;line-height:1;';
       del.textContent = '×';
-      del.onclick = () => row.remove();
+      del.onclick = () => { row.remove(); _markDirty(); };
 
       row.appendChild(pathInp);
       row.appendChild(nameWrap);

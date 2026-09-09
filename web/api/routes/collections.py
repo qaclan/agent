@@ -176,12 +176,20 @@ def plan_collection_negatives(col_id):
 def list_collection_vars(col_id):
     try:
         pid = _project_id()
-        if not CollectionRepo().get(col_id, pid):
+        col = CollectionRepo().get(col_id, pid)
+        if not col:
             return jsonify({"ok": False, "error": "Not found"}), 404
+        active_env = col.get("env_name") or ""
         rows = CollectionVarsRepo().list(col_id)
         for v in rows:
+            # A runtime override (from a script's qc.set) only applies while
+            # the environment it was captured under is still bound.
+            v["runtime_active"] = v.get("runtime_value") is not None \
+                and (v.get("runtime_env_name") or "") == active_env
             if v.get("is_secret"):
                 v["initial_value"] = MASKED_DISPLAY
+                if v.get("runtime_value") is not None:
+                    v["runtime_value"] = MASKED_DISPLAY
         return jsonify({"ok": True, "vars": rows})
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400

@@ -1,3 +1,12 @@
+import { onEnvChanged } from '../components/env-events.js';
+
+// Module-level, not per-call: renderCollectionsView() re-mounts on every nav
+// into the API tab (see api-section.js), so a call-scoped subscription would
+// leak one listener per re-entry. Only one sidebar mount is ever live at a
+// time, so unsubscribing the previous one before subscribing the new one
+// keeps exactly one active.
+let _unsubEnvChanged = null;
+
 /**
  * renderCollectionsView(container, onSelectRequest, onRunStarted, onSelectCollection)
  * container: DOM element to render into
@@ -8,6 +17,16 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
   container.innerHTML = '<div class="text-muted text-sm" style="padding:10px 14px">Loading...</div>';
 
   let _runningByColId = {};
+  // Keyed by collection id, populated on each reload() — kept live so a
+  // click on a collection/request (which reads col.env_name straight out of
+  // this closed-over object) always sees the environment as of the last
+  // env-changed broadcast, not just as of the last full reload().
+  const _colsById = {};
+  if (_unsubEnvChanged) _unsubEnvChanged();
+  _unsubEnvChanged = onEnvChanged(({ collectionId, envName }) => {
+    const col = _colsById[collectionId];
+    if (col) col.env_name = envName;
+  });
   let _activeRequestId = null; // re-applied to the matching row after every reload()
   const _scrollParent = container.closest('.api-sidebar') || container;
   let _savedScrollTop = 0; // restored after reload() and after each collection's async tree load
@@ -53,7 +72,8 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       return;
     }
 
-    collections.forEach(col => container.appendChild(_renderCollectionSection(col)));
+    Object.keys(_colsById).forEach(k => delete _colsById[k]);
+    collections.forEach(col => { _colsById[col.id] = col; container.appendChild(_renderCollectionSection(col)); });
     _appendNewCollectionButton();
     _wireCollectionOrderDrag();
     _reapplyActiveRow();
@@ -158,9 +178,12 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
       else if (action === 'delete') _deleteCollection(col.id, col.name);
     };
 
+    const CHEVRON_DOWN = '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5l4.5 4 4.5-4"/></svg>';
+    const CHEVRON_RIGHT = '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3l4 4.5-4 4.5"/></svg>';
     const expandBtn = document.createElement('button');
-    expandBtn.className = 'btn btn-xs btn-ghost';
-    expandBtn.textContent = '▾';
+    expandBtn.className = 'btn btn-xs btn-ghost api-collapse-btn';
+    expandBtn.title = 'Collapse/expand';
+    expandBtn.innerHTML = CHEVRON_DOWN;
     rightSide.appendChild(expandBtn);
     header.appendChild(rightSide);
 
@@ -173,7 +196,7 @@ export function renderCollectionsView(container, onSelectRequest, onRunStarted, 
     function _toggleExpand() {
       expanded = !expanded;
       treeRoot.style.display = expanded ? '' : 'none';
-      expandBtn.textContent = expanded ? '▾' : '▸';
+      expandBtn.innerHTML = expanded ? CHEVRON_DOWN : CHEVRON_RIGHT;
     }
     header.onclick = (e) => {
       if (rightSide.contains(e.target)) return;
