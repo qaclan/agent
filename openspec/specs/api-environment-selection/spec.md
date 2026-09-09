@@ -80,9 +80,13 @@ The environment SHALL be bound at the collection level only; there is no per-req
 - **WHEN** the user binds an environment while editing one request and then runs a different request in the same collection
 - **THEN** the second request resolves its variables against the same bound environment
 
-#### Scenario: Run-time variable precedence is unchanged
+#### Scenario: Run-time variable precedence favors the collection's current value
 - **WHEN** a collection variable and an environment variable share the same key at run time
-- **THEN** the collection variable's value takes precedence, as it did before this change
+- **THEN** the collection variable's current value takes precedence, as it did before this change — where, per `collection-runtime-variables`, the collection's "current value" for a key a script has captured is scoped to the environment that was bound at capture time, not simply the most recently captured value
+
+#### Scenario: Switching or unsetting the environment stops a stale script-captured value from taking precedence
+- **WHEN** a script previously captured a collection variable's value while a different environment (or no environment) was bound, and the user then binds a different environment
+- **THEN** that stale script-captured value no longer takes precedence over the environment variable of the same key; the collection variable resolves to its static default, or is treated as unset if it has none
 
 ### Requirement: Collection settings are reachable from the request editor
 The request editor SHALL provide a way to view and edit the collection's settings — its auth, variables, schema-check and negative-testing defaults — in context, without navigating away from the request being edited, and any change made there SHALL persist to the collection.
