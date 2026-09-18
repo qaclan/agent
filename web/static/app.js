@@ -233,12 +233,14 @@ const routes = {
   envs:     renderEnvsPage,
   settings: renderSettingsPage,
   api: () => {
+    const page = document.getElementById('page-content')
+    if (!state.activeProject) { renderNoProject(page); return }
     if (window.__qaclanApi) {
       const initialRequestId = window._qcApiInitialRequestId || null
       window._qcApiInitialRequestId = null
-      window.__qaclanApi.render(document.getElementById('page-content'), initialRequestId);
+      window.__qaclanApi.render(page, initialRequestId);
     } else {
-      document.getElementById('page-content').innerHTML = '<div class="empty-state">Loading API module...</div>';
+      page.innerHTML = '<div class="empty-state">Loading API module...</div>';
     }
   },
 }
