@@ -55,6 +55,30 @@ BATCH_SIZE = 50
 ONLINE_PROBE_TIMEOUT = 3
 PARENT_FAILURE_COOLDOWN_SECONDS = 60
 
+# entity_type -> (local table, id column) holding the row that a pending
+# 'upsert' actually reads from. Some entity_types are keyed by a *parent's*
+# id (env_vars/collection_vars/suite_items), so a cascade delete of that
+# parent (e.g. deleting the project/environment) leaves the child's queue
+# row pointing at nothing. Checked before every upsert dispatch so those
+# orphans are dropped instead of being sent to the server with empty/None
+# payloads (which the server rejects, e.g. "Environment not found").
+UPSERT_EXISTENCE_CHECK = {
+    "project": ("projects", "id"),
+    "feature": ("features", "id"),
+    "suite": ("suites", "id"),
+    "script": ("scripts", "id"),
+    "api_collection": ("api_collections", "id"),
+    "api_folder": ("api_folders", "id"),
+    "api_request": ("api_requests", "id"),
+    "collection_vars": ("api_collections", "id"),
+    "api_request_example": ("api_request_examples", "id"),
+    "environment": ("environments", "id"),
+    "env_vars": ("environments", "id"),
+    "suite_items": ("suites", "id"),
+    "api_collection_run": ("api_collection_runs", "id"),
+    "run": ("suite_runs", "id"),
+}
+
 # entity_type -> (local table, name column) used to build a human-readable
 # label for the failing-items list. Types without a natural name (e.g. "run")
 # fall back to "<entity_type> <entity_id>".
@@ -182,6 +206,17 @@ def _is_online():
         return False
     except Exception:
         return True  # something else — let the real call fail and count as attempt
+
+
+def _upsert_target_exists(conn, entity_type, entity_id):
+    """True if the row a pending 'upsert' would read from is still present.
+    entity_types with no existence check registered are assumed present
+    (dispatch and let a real failure surface normally)."""
+    spec = UPSERT_EXISTENCE_CHECK.get(entity_type)
+    if not spec:
+        return True
+    table, col = spec
+    return conn.execute(f"SELECT 1 FROM {table} WHERE {col} = ?", (entity_id,)).fetchone() is not None
 
 
 def _fetch_batch(conn, limit):
@@ -383,6 +418,13 @@ def drain_once(max_items=BATCH_SIZE):
         now_iso = datetime.now(timezone.utc).isoformat()
 
         for row in rows:
+            if row["op"] == "upsert" and not _upsert_target_exists(conn, row["entity_type"], row["entity_id"]):
+                # Parent (project/environment/collection/...) was deleted after
+                # this upsert was queued — nothing left to sync, drop silently.
+                conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
+                conn.commit()
+                synced += 1
+                continue
             try:
                 _dispatch(row)
                 conn.execute("DELETE FROM sync_queue WHERE id = ?", (row["id"],))
