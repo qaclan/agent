@@ -179,6 +179,105 @@ function _createTextareaScriptEditor(hostEl, initialContent, { readOnly }) {
   }
 }
 
+// ── Script editor full-screen mode ─────────────────────────────
+// Pins the editor host over the whole viewport (above the modal) so only the
+// script fills the screen — for reading/editing large harnesses. The host is
+// moved to <body> and restyled, but its CM6/textarea subtree moves intact, so
+// editor state (content, cursor, undo history) is preserved. Esc or the Exit
+// button returns the host to the modal, untouched.
+function _toggleScriptEditorFullscreen(hostId) {
+  const host = document.getElementById(hostId)
+  if (!host) return
+  if (host.classList.contains('qc-editor-fs')) {
+    _exitScriptEditorFullscreen(host)
+  } else {
+    _enterScriptEditorFullscreen(host)
+  }
+}
+
+function _enterScriptEditorFullscreen(host) {
+  if (!host || host.classList.contains('qc-editor-fs')) return
+  // The modal-root ancestor uses `transform`, which makes it the containing
+  // block for position:fixed descendants — so a fixed host pinned there would
+  // cover only the modal, not the viewport. Reparent the host to <body> (its
+  // CM6/textarea subtree moves intact, preserving editor state) so inset:0
+  // resolves against the viewport. Remember where to put it back on exit.
+  window._qcEditorFsReturn = { parent: host.parentNode, next: host.nextSibling }
+  document.body.appendChild(host)
+
+  host.dataset.qcPrevCss = host.style.cssText
+  host.classList.add('qc-editor-fs')
+  host.style.cssText = 'position:fixed;inset:0;z-index:500;margin:0;border:none;border-radius:0;' +
+    'min-height:0;max-height:none;height:100vh;width:100vw;overflow:hidden;' +
+    'display:flex;flex-direction:column;background:var(--bg-base)'
+
+  const bar = document.createElement('div')
+  bar.className = 'qc-editor-fs-bar'
+  bar.style.cssText = 'flex:0 0 auto;display:flex;align-items:center;justify-content:flex-end;gap:10px;' +
+    'padding:8px 12px;background:var(--bg-secondary);border-bottom:1px solid var(--border-default);' +
+    'font-size:12px;color:var(--text-muted)'
+  bar.innerHTML = '<span>Press <kbd>Esc</kbd> to exit full screen</span>' +
+    `<button type="button" class="btn btn-sm btn-ghost" onclick="_exitScriptEditorFullscreen(document.getElementById('${host.id}'))">✕ Exit</button>`
+  host.insertBefore(bar, host.firstChild)
+
+  const inner = host.querySelector('.cm-editor, textarea')
+  if (inner) {
+    inner.dataset.qcPrevCss = inner.style.cssText
+    inner.style.flex = '1 1 auto'
+    inner.style.minHeight = '0'
+    inner.style.height = '100%'
+    inner.style.maxHeight = 'none'
+    inner.style.resize = 'none'
+  }
+
+  window._qcEditorFsHost = host
+  document.addEventListener('keydown', _qcEditorFsEsc, true)
+  if (window._qcCurrentEditor && window._qcCurrentEditor.focus) window._qcCurrentEditor.focus()
+}
+
+function _exitScriptEditorFullscreen(host) {
+  if (!host || !host.classList.contains('qc-editor-fs')) return
+  host.querySelector('.qc-editor-fs-bar')?.remove()
+
+  const inner = host.querySelector('.cm-editor, textarea')
+  if (inner && inner.dataset.qcPrevCss !== undefined) {
+    inner.style.cssText = inner.dataset.qcPrevCss
+    delete inner.dataset.qcPrevCss
+  }
+
+  host.style.cssText = host.dataset.qcPrevCss || ''
+  delete host.dataset.qcPrevCss
+  host.classList.remove('qc-editor-fs')
+
+  // Put the host back where it was in the modal DOM.
+  const ret = window._qcEditorFsReturn
+  if (ret && ret.parent) {
+    if (ret.next && ret.next.parentNode === ret.parent) {
+      ret.parent.insertBefore(host, ret.next)
+    } else {
+      ret.parent.appendChild(host)
+    }
+  }
+  window._qcEditorFsReturn = null
+
+  window._qcEditorFsHost = null
+  document.removeEventListener('keydown', _qcEditorFsEsc, true)
+  if (window._qcCurrentEditor && window._qcCurrentEditor.focus) window._qcCurrentEditor.focus()
+}
+
+function _qcEditorFsEsc(e) {
+  if (e.key === 'Escape' && window._qcEditorFsHost) {
+    e.preventDefault()
+    e.stopPropagation()
+    _exitScriptEditorFullscreen(window._qcEditorFsHost)
+  }
+}
+
+// Full-screen toggle button for a Content header. `hostId` is the editor host div.
+function _editorFullscreenBtnHTML(hostId) {
+  return `<button type="button" class="btn btn-sm btn-ghost" onclick="_toggleScriptEditorFullscreen('${hostId}')" title="Full screen (Esc to exit)">⛶ Full screen</button>`
+}
+
 // Call from DevTools console as `qcEditorSmokeTest()` to spawn a test CM6 editor
 // in the current page. Leaves a bordered panel at the top-left. Useful for
 // verifying the bundle renders before wiring it into real modals.
@@ -666,6 +765,13 @@ function _closeOrReturn() {
 }
 
 function _doCloseModal() {
+  // If the script editor is still full-screen, tear that down first so its
+  // global Esc listener is removed before the modal DOM is destroyed.
+  if (window._qcEditorFsHost) {
+    try { _exitScriptEditorFullscreen(window._qcEditorFsHost) } catch (_) {}
+    window._qcEditorFsHost = null
+  }
+
   // Fire any cleanup hook the current modal registered (e.g. CM6 editor teardown)
   // before we blow away the modal DOM. Runs once, then clears.
   const hook = window._qcModalCleanupHook
@@ -1794,7 +1900,10 @@ async function createScriptModal() {
       <p class="form-hint"><strong style="color:var(--text-primary)">Insert</strong> inserts <code>{{KEY}}</code> at the cursor. <strong style="color:var(--text-primary)">Review &amp; Improve</strong> binds <code>.fill()</code> values, adds smart waits, and converts search inputs to typed input.</p>
     </div>
     <div class="form-group">
-      <label class="form-label">Script Content</label>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="form-label" style="margin:0">Script Content</label>
+        ${_editorFullscreenBtnHTML('create-script-editor-host')}
+      </div>
       <div id="create-script-editor-host"></div>
     </div>`, [
     { label: 'Cancel', cls: 'btn-ghost', action: closeModal },
@@ -2056,7 +2165,10 @@ async function _openImportedScriptEditor(preview, filename) {
       </div>
     </div>
     <div class="form-group">
-      <label class="form-label">Script Content</label>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+        <label class="form-label" style="margin:0">Script Content</label>
+        ${_editorFullscreenBtnHTML('import-script-editor-host')}
+      </div>
       <div id="import-script-editor-host"></div>
     </div>`, [
     { label: 'View Original', cls: 'btn-ghost', action: () => {
@@ -2210,7 +2322,10 @@ async function viewScriptModal(id) {
     <div class="form-group">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
         <label class="form-label" style="margin:0">Content</label>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${_editorFullscreenBtnHTML('view-script-editor-host')}
+          <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+        </div>
       </div>
       <div id="view-script-editor-host"></div>
     </div>`, [
@@ -2333,7 +2448,10 @@ async function editScriptModal(id) {
     <div class="form-group">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
         <label class="form-label" style="margin:0">Content</label>
-        <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${_editorFullscreenBtnHTML('edit-script-editor-host')}
+          <button type="button" class="btn btn-sm btn-ghost" onclick="_copyEditorContent(this)" title="Copy script content">📋 Copy</button>
+        </div>
       </div>
       <div id="edit-script-editor-host"></div>
     </div>`, [
