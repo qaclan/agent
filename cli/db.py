@@ -499,6 +499,11 @@ def _migrate_api_tables(conn):
             FROM _suite_items_old
         """)
         conn.execute("DROP TABLE _suite_items_old")
+        # PRAGMA foreign_keys is a no-op while a transaction is open (SQLite
+        # docs), and the INSERT above left one implicitly open — commit first
+        # or this silently fails to re-enable FK enforcement for the rest of
+        # the connection's lifetime, breaking every ON DELETE CASCADE.
+        conn.commit()
         conn.execute("PRAGMA foreign_keys = ON")
 
     # 5. Add description column to suites (safe — nullable, no default needed)
