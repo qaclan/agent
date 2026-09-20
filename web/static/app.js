@@ -3157,6 +3157,13 @@ function _parseTypedInputCandidates(content, config) {
       const fillStart = start + local
       const fillEnd = absClose + 1
       const fillArg = content.slice(absOpen + 1, absClose)
+      // Skip empty `.fill('')` — that is a field clear, never a typed search.
+      // Converting it yields `.pressSequentially('', {delay:50})`, a no-op that
+      // leaves the prior text in place. Advance past it and move on.
+      if (fillArg.trim().replace(/^(['"`])\1$/, '') === '') {
+        cursor = local + fillMarker.length
+        continue
+      }
       const locatorChain = text.slice(0, local)
 
       const alreadyTyped = text.indexOf(typedMarker) !== -1
