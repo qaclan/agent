@@ -96,6 +96,11 @@ class ScriptStrategy(ABC):
         """
         return "await _waitForNetworkSettle(page);"
 
+    def settle_call_snippet_fast(self) -> str:
+        """Settle line for clicks / goto, where the request starts with the
+        action itself — skips the debounce grace used after typed input."""
+        return "await _waitForNetworkSettle(page, { graceMs: 150 });"
+
     def settle_marker(self) -> str:
         """Return the substring that identifies an existing settle call.
 

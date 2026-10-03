@@ -207,6 +207,22 @@ double-inject):
 | JavaScript / JS-test / TypeScript / TS-test | `await _waitForNetworkSettle(page);` |
 | Python | `_wait_for_network_settle(page)` |
 
+**Timing update.** Harness defaults are now `graceMs=500`, `quietMs=250` (were 700 / 400):
+500ms still covers a typical 300-500ms search debounce. Typed-input (`fill`) candidates get
+the snippet above. `click` / `goto` candidates get a fast variant — JS/TS
+`await _waitForNetworkSettle(page, { graceMs: 150 });`, Python
+`_wait_for_network_settle(page, grace_ms=150)` — since their request starts with the action
+(no debounce), so an idle settle costs ~150ms instead of 700ms. `/api/scripts/wait-config`
+returns it as `settle_snippet_fast`. Existing bare calls keep working (marker unchanged).
+
+**"Next step already waits" hint** (`_nextExpectInfo` in `web/static/app.js`). A recommended
+goto / click candidate is moved to "Probably not needed" (unticked by default) when the very next
+statement is an `expect(...)`, because `expect` retries by itself. Guards, so the hint stays
+accurate: negative checks (`.not`, `toBeHidden`, `toHaveCount(0)`, `toBeEmpty`) never trigger it;
+nor does an expect whose quoted text already appears earlier in the script (it could match the
+page's *old* state and pass early); nor typed-search steps (old results may still match). Existing
+waits are never auto-removed — the row stays ticked with a note that it can be turned off.
+
 ### 4.3 The review modal
 
 Plain-language, non-technical. No mention of "XHR", "network", "Playwright",

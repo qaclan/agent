@@ -110,7 +110,7 @@ function _trackNetwork(page: any) {
 // Wait until in-flight XHR/fetch stays 0 for `quietMs`, capped at `timeoutMs`.
 // Two-step grace probe (150ms then graceMs) catches debounced inputs whose
 // XHR has not fired yet at 150ms.
-async function _waitForNetworkSettle(page: any, { graceMs = 700, quietMs = 400, timeoutMs = 15000 }: { graceMs?: number; quietMs?: number; timeoutMs?: number } = {}) {
+async function _waitForNetworkSettle(page: any, { graceMs = 500, quietMs = 250, timeoutMs = 15000 }: { graceMs?: number; quietMs?: number; timeoutMs?: number } = {}) {
   await page.waitForTimeout(150);
   if (_inFlight === 0) {
     const extra = Math.max(0, graceMs - 150);
