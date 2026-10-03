@@ -2280,3 +2280,14 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .sc-expected__badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .sc-expected__badge.is-captured { color: var(--success); background: var(--success-bg); border: 1px solid var(--success-border); }
 .sc-expected__badge.is-empty { color: var(--text-secondary); background: var(--bg-elevated); border: 1px solid var(--border-default); }
+
+/* One-click fix for ambiguous selectors (openAmbiguousFix) */
+.error-card-fix { margin-top: 6px; }
+.fix-match-list { margin: 6px 0 12px 18px; font-size: 13px; }
+.fix-choice { margin: 8px 0; }
+.fix-help { font-size: 12px; margin: 2px 0 0 22px; }
+.fix-preview-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary); margin-top: 14px; }
+.fix-preview { font-family: var(--font-mono, monospace); font-size: 12px; white-space: pre-wrap; word-break: break-word; background: var(--bg-sunken, rgba(0,0,0,0.12)); border-radius: var(--radius-sm, 6px); padding: 8px 10px; margin-top: 4px; }
+.fix-del { color: var(--danger); }
+.fix-add { color: var(--success, #3fb950); }
+.fix-reco { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent); background: var(--accent-subtle); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }

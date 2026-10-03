@@ -446,8 +446,8 @@ def describe(category: str, fields: dict, meta: dict):
             title = "Selector matched multiple elements"
             message = (f"The selector {sel} matched {count} elements but the "
                        f"script needs exactly one.")
-            next_step = ("Make the selector specific to a single element, "
-                         "then re-record the script.")
+            next_step = ("The page may still have been updating. Make the script "
+                         "wait for a single match, accept any match, or pin one.")
         elif state == "found-but-hidden" and sel:
             act = verb or "interact with"
             waited = f" but gave up after {to}" if to else ""

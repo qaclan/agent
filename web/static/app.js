@@ -4744,6 +4744,11 @@ function showRunResults(run, suiteName) {
         if (ed.match_count) diagItems.push(['matched', `${ed.match_count} elements`])
         if (ed.url) diagItems.push(['url', `<code>${escHtml(ed.url)}</code>`])
         if (ed.net_error) diagItems.push(['network', `<code>${escHtml(ed.net_error)}</code>`])
+        // Strict-mode failures (selector matched N>1) can be fixed in one
+        // click -- see openAmbiguousFix / cli/locator_fix.py.
+        const fixBtn = (ed.match_count > 1 && s.script_id && run.id)
+          ? `<div class="error-card-fix"><button class="btn btn-sm btn-primary" onclick="openAmbiguousFix('${escHtml(run.id)}', '${escHtml(s.script_id)}')">Fix it</button></div>`
+          : ''
         const failingStep = diagItems.length
           ? `<div class="error-card-step">${diagItems.map(([k, v]) =>
               `<span class="diag-pill"><span class="diag-k">${k}</span><span class="diag-v">${v}</span></span>`
@@ -4755,7 +4760,7 @@ function showRunResults(run, suiteName) {
               <span class="error-card-title">${escHtml(ed.title)}</span>
             </div>
             <div class="error-card-message">${escHtml(ed.message)}</div>
-            <div class="error-card-next"><span class="error-card-next-label">What to do</span>${escHtml(ed.next_step)}</div>
+            <div class="error-card-next"><span class="error-card-next-label">What to do</span>${escHtml(ed.next_step)}${fixBtn}</div>
             ${failingStep}
             ${screenshotBlock}
             <div class="script-result-error-toggle" onclick="document.getElementById('${traceId}').classList.toggle('collapsed')">
@@ -4821,6 +4826,82 @@ function showRunResults(run, suiteName) {
     ))
   }
 }
+
+// One-click fix for "selector matched multiple elements" failures. Playwright
+// does not retry that error, so it usually means the page was still updating
+// (stale rows) when the check ran. Default fix = wait until exactly one is
+// left; "any" / "specific" are for pages that really show several. Server side:
+// cli/locator_fix.py.
+async function openAmbiguousFix(runId, scriptId) {
+  const res = await api('GET', `/scripts/${encodeURIComponent(scriptId)}/fix-ambiguous?run_id=${encodeURIComponent(runId)}`)
+  if (!res.ok) { toast(res.error || 'Could not prepare a fix', 'error'); return }
+
+  const canWait = !!res.wait_after
+  const anyLabel = res.kind === 'assertion'
+    ? 'Pass if <strong>any</strong> of them shows up'
+    : 'Use the <strong>first</strong> one'
+  const canSpecific = res.specific.some(m => m.aka)
+  const specificRows = res.specific.map(m => `
+    <option value="${m.index}" ${m.aka ? '' : 'disabled'}>${escHtml(m.label)}</option>`).join('')
+  const firstMode = canWait ? 'wait' : 'any'
+
+  const intro = res.already_waits
+    ? `<p class="text-muted">Step ${res.line_no} already waits for a single match, so this page really shows several. Choose how the test should treat them:</p>`
+    : `<p class="text-muted">At that moment step ${res.line_no} found <strong>${res.count}</strong> matching items, but the test needs exactly one. This often means the page was still updating (for example a filter had not finished). It found:</p>`
+  const body = `
+    ${intro}
+    <ul class="fix-match-list">${res.specific.map(m => `<li>${escHtml(m.label)}</li>`).join('')}</ul>
+    ${canWait ? `<div class="fix-choice">
+      <label><input type="radio" name="fix-mode" value="wait" checked> Wait until <strong>only one</strong> is left <span class="fix-reco">Recommended</span></label>
+      <div class="text-muted fix-help">Keeps the check strict. Waits for the page to finish updating, then checks.</div>
+    </div>` : ''}
+    <div class="fix-choice">
+      <label><input type="radio" name="fix-mode" value="any" ${canWait ? '' : 'checked'}> ${anyLabel}</label>
+      <div class="text-muted fix-help">Only if the page really shows several and any one is fine. It can pass on stale data.</div>
+    </div>
+    ${canSpecific ? `<div class="fix-choice">
+      <label><input type="radio" name="fix-mode" value="specific"> Only this one:</label>
+      <select id="fix-match" class="input" style="margin-left:6px">${specificRows}</select>
+      <div class="text-muted fix-help">Breaks if that item is removed or renamed.</div>
+    </div>` : ''}
+    <div class="fix-preview-label">Change to step ${res.line_no}</div>
+    <pre class="fix-preview" id="fix-preview"></pre>`
+
+  const current = () => {
+    const mode = document.querySelector('input[name="fix-mode"]:checked')?.value || firstMode
+    const idx = parseInt(document.getElementById('fix-match')?.value || '0', 10)
+    return { mode, idx }
+  }
+  const renderPreview = () => {
+    const { mode, idx } = current()
+    const before = `<span class="fix-del">- ${escHtml(res.before)}</span>`
+    let out
+    if (mode === 'wait') {
+      out = `<span class="fix-add">+ ${escHtml(res.wait_after)}</span>\n  ${escHtml(res.before)}`
+    } else {
+      const after = mode === 'any' ? res.any_after : (res.specific.find(m => m.index === idx)?.after || res.before)
+      out = `${before}\n<span class="fix-add">+ ${escHtml(after)}</span>`
+    }
+    document.getElementById('fix-preview').innerHTML = out
+  }
+
+  showOverlayModal('Fix: more than one match', body, [
+    { label: 'Cancel', cls: 'btn-ghost', action: closeOverlayModal },
+    { label: 'Fix & save', cls: 'btn-primary', action: async () => {
+      const { mode, idx } = current()
+      const r = await api('POST', `/scripts/${encodeURIComponent(scriptId)}/fix-ambiguous`, {
+        run_id: runId, mode, match_index: mode === 'specific' ? idx : null,
+      })
+      if (!r.ok) { toast(r.error || 'Could not save the fix', 'error'); return }
+      closeOverlayModal()
+      toast(`Step ${res.line_no} updated. Run again to verify.`)
+    } },
+  ])
+  const root = document.getElementById('modal-overlay-root')
+  root.addEventListener('change', renderPreview)
+  renderPreview()
+}
+window.openAmbiguousFix = openAmbiguousFix
 
 async function deleteSuite(id, name) {
   showModal('Delete Suite', `
