@@ -906,6 +906,94 @@ def delete_script_upload(script_id, filename):
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _load_ambiguity(conn, project_id, script_id, run_id):
+    """Shared by the fix preview/apply routes: (script_row, source, language, info)
+    or (None, error_message, status_code, None)."""
+    from cli.locator_fix import parse_strict_violation
+    script = conn.execute(
+        "SELECT id, file_path, language FROM scripts WHERE id = ? AND project_id = ?",
+        (script_id, project_id),
+    ).fetchone()
+    if not script:
+        return None, f"Script {script_id} not found", 404, None
+    run_row = conn.execute(
+        "SELECT scr.error_message FROM script_runs scr "
+        "JOIN suite_runs sr ON scr.suite_run_id = sr.id "
+        "WHERE scr.suite_run_id = ? AND scr.script_id = ? AND sr.project_id = ?",
+        (run_id, script_id, project_id),
+    ).fetchone()
+    info = parse_strict_violation(run_row["error_message"]) if run_row else None
+    if not info:
+        return None, "This failure is not a 'matched multiple elements' error.", 400, None
+    file_path = script["file_path"]
+    if not file_path or not os.path.exists(file_path):
+        return None, "Script file is missing.", 404, None
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        source = f.read()
+    return script, source, script["language"] or "python", info
+
+
+@bp.route('/api/scripts/<script_id>/fix-ambiguous', methods=['GET'])
+def preview_fix_ambiguous(script_id):
+    """Preview the one-click fixes for a 'selector matched multiple elements'
+    failure of ``?run_id=``. See cli/locator_fix.py."""
+    try:
+        from cli.locator_fix import build_options
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+        script, source, language, info = _load_ambiguity(
+            get_conn(), project_id, script_id, request.args.get("run_id", ""))
+        if script is None:
+            return jsonify({"ok": False, "error": source}), language
+        options = build_options(source, language, info)
+        if options is None:
+            return jsonify({
+                "ok": False,
+                "error": "The script has changed since this run, so the failing "
+                         "line can't be found. Re-run it, then try again.",
+            }), 409
+        return jsonify({
+            "ok": True, "kind": info["kind"], "count": info["count"],
+            "locator": info["locator"], **options,
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/scripts/<script_id>/fix-ambiguous', methods=['POST'])
+def apply_fix_ambiguous(script_id):
+    """Fix the failing step. Body: {run_id, mode: 'wait'|'any'|'specific', match_index?}."""
+    try:
+        from cli.locator_fix import apply_fix
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+        data = request.get_json(force=True) or {}
+        conn = get_conn()
+        script, source, language, info = _load_ambiguity(
+            conn, project_id, script_id, data.get("run_id", ""))
+        if script is None:
+            return jsonify({"ok": False, "error": source}), language
+        try:
+            new_source = apply_fix(source, language, info, data.get("mode"),
+                                   data.get("match_index"))
+        except ValueError as ve:
+            return jsonify({"ok": False, "error": str(ve)}), 409
+        with open(script["file_path"], "w", encoding="utf-8", newline="") as f:
+            f.write(new_source)
+        conn.execute(
+            "UPDATE scripts SET source = ?, var_keys = ? WHERE id = ?",
+            (new_source, json.dumps(_scan_var_keys(new_source)), script_id),
+        )
+        conn.commit()
+        from cli.sync_queue import enqueue
+        enqueue("script", script_id, "upsert")
+        return jsonify({"ok": True, "id": script_id})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @bp.route('/api/scripts/<script_id>/run', methods=['POST'])
 def run_script_solo(script_id):
     """Run a single script ad-hoc without a suite. Creates a temporary suite_run."""
