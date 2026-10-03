@@ -194,10 +194,10 @@ def _track_network(page):
     page.on("requestfailed", _on_done)
 
 
-def _wait_for_network_settle(page, grace_ms=700, quiet_ms=400, timeout_ms=15000):
+def _wait_for_network_settle(page, grace_ms=500, quiet_ms=250, timeout_ms=15000):
     # Wait until in-flight XHR/fetch stays 0 for `quiet_ms`, capped at
     # `timeout_ms`. Two-step grace probe: fast 150ms check catches the common
-    # case; a second probe at `grace_ms` (default 700ms) catches debounced
+    # case; a second probe at `grace_ms` (default 500ms) catches debounced
     # inputs whose XHR has not fired yet at 150ms.
     page.wait_for_timeout(150)
     if _in_flight == 0:
@@ -308,6 +308,9 @@ class PythonStrategy(ScriptStrategy):
 
     def settle_call_snippet(self) -> str:
         return "_wait_for_network_settle(page)"
+
+    def settle_call_snippet_fast(self) -> str:
+        return "_wait_for_network_settle(page, grace_ms=150)"
 
     def settle_marker(self) -> str:
         return "_wait_for_network_settle"
@@ -547,7 +550,7 @@ class PythonStrategy(ScriptStrategy):
 
     _UPLOAD_CLICK_RE = re.compile(
         r'^(?P<indent>[ \t]*)(?P<loc>page\.[^\n]*?)\.click\(\)[ \t]*\n'
-        r'(?:(?P=indent)_wait_for_network_settle\(page\)[ \t]*\n)?'
+        r'(?:(?P=indent)_wait_for_network_settle\(page(?:, [^)\n]*)?\)[ \t]*\n)?'
         r'(?=(?P=indent)(?P=loc)\.set_input_files\()',
         re.MULTILINE,
     )

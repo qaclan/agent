@@ -2686,6 +2686,60 @@ function _classifyAction(lineText, kind, recommendWords) {
   return { recommended: false, category: 'other' }
 }
 
+// ── "Next step already waits" hint ──────────────────────────────
+// A Playwright `expect(...)` keeps retrying until what it looks for shows up,
+// so a smart wait right before it only slows the test. We say so only when the
+// hint is safe:
+//   - the very next statement is an expect;
+//   - it is not a "should be gone / empty / zero" check (those can pass before
+//     the data has even started loading);
+//   - none of its quoted texts appear earlier in the script (otherwise it may
+//     match what was already on the page BEFORE the action, and pass too early).
+// Typed search steps are excluded by the caller: old results often still match.
+const _EXPECT_START_RE = /^\s*(?:await\s+)?expect\s*\(/
+const _EXPECT_NEGATIVE_RE = /\.not\b|not_to_|to_be_hidden|toBeHidden|to_be_empty|toBeEmpty|to_have_count\(\s*0\b|toHaveCount\(\s*0\b|to_be_detached|toBeDetached/
+const _EXPECT_ROLE_WORDS = new Set([
+  'button', 'link', 'textbox', 'heading', 'row', 'cell', 'checkbox', 'radio',
+  'combobox', 'listitem', 'option', 'menuitem', 'tab', 'dialog', 'img',
+  'searchbox', 'gridcell', 'alert', 'table', 'list', 'navigation',
+])
+
+function _quotedTexts(src) {
+  const out = []
+  const re = /(["'`])((?:\\.|(?!\1).)*)\1/g
+  let m
+  while ((m = re.exec(src))) {
+    const t = m[2].trim()
+    if (t.length >= 2 && !_EXPECT_ROLE_WORDS.has(t.toLowerCase())) out.push(t)
+  }
+  return out
+}
+
+function _nextExpectInfo(records, i, settleMarker) {
+  // records[i] is the action line. Returns { text } when a safe expect follows.
+  let k = i + 1
+  while (k < records.length) {
+    const t = records[k].text.trim()
+    if (!t || t.startsWith('//') || t.startsWith('#') ||
+        (settleMarker && t.includes(settleMarker))) { k++; continue }
+    break
+  }
+  if (k >= records.length || !_EXPECT_START_RE.test(records[k].text)) return null
+  // The expect may span lines — join until parentheses balance (max 5 lines).
+  let stmt = records[k].text
+  let depth = (stmt.match(/\(/g) || []).length - (stmt.match(/\)/g) || []).length
+  for (let n = k + 1; depth > 0 && n < records.length && n < k + 5; n++) {
+    stmt += ' ' + records[n].text
+    depth += (records[n].text.match(/\(/g) || []).length - (records[n].text.match(/\)/g) || []).length
+  }
+  if (_EXPECT_NEGATIVE_RE.test(stmt)) return null
+  const texts = _quotedTexts(stmt)
+  const before = records.slice(0, k).map(r => r.text).join('\n')
+  if (texts.some(t => before.includes(t))) return null
+  const isUrl = /toHaveURL|to_have_url/.test(stmt)
+  return { text: isUrl ? '' : (texts.length ? texts[0] : ''), isUrl }
+}
+
 function _parseActionCalls(content, settleMarker, recommendWords) {
   // Find every .click( / .goto( statement and build a candidate (auto-wait
   // §4.2). Steps are counted over ALL action statements so "Step N" matches
@@ -2737,6 +2791,9 @@ function _parseActionCalls(content, settleMarker, recommendWords) {
 
     const kind = isGoto ? 'goto' : (isFill ? 'fill' : 'click')
     const cls = _classifyAction(text, kind, recommendWords)
+    // Typed search is excluded: old results on screen can match the check.
+    const nextExpect = (cls.recommended && cls.category !== 'search')
+      ? _nextExpectInfo(records, i, settleMarker) : null
     candidates.push({
       index: candidates.length,
       stepNumber: stepCount,
@@ -2749,16 +2806,29 @@ function _parseActionCalls(content, settleMarker, recommendWords) {
       alreadyWaited,
       existingWaitStart,
       existingWaitEnd,
-      recommended: alreadyWaited || cls.recommended,
-      category: cls.category,
+      recommended: alreadyWaited || (cls.recommended && !nextExpect),
+      category: nextExpect ? 'expectNext' : cls.category,
+      nextExpect,
     })
   }
   return candidates
 }
 
 function _waitReasonText(cand) {
-  if (cand.alreadyWaited) return 'A wait is already added here.'
+  if (cand.alreadyWaited) {
+    return cand.nextExpect
+      ? 'A wait is already added here. The next step already waits by itself, so you can turn this off to make the test faster.'
+      : 'A wait is already added here.'
+  }
   switch (cand.category) {
+    case 'expectNext': {
+      const what = cand.nextExpect && cand.nextExpect.isUrl
+        ? 'checks the page address'
+        : (cand.nextExpect && cand.nextExpect.text
+          ? `checks that "${cand.nextExpect.text}" appears`
+          : 'is a check')
+      return `Probably not needed — the next step ${what}, and a check keeps waiting on its own until it shows up. A wait here would only slow the test.`
+    }
     case 'goto':   return 'Recommended — loading a new page usually needs a moment.'
     case 'nav':    return 'Recommended — opening this usually loads new information.'
     case 'button': return 'Recommended — this usually sends a request or loads data.'
@@ -2768,7 +2838,7 @@ function _waitReasonText(cand) {
   }
 }
 
-function _rewriteScriptWithWaits(content, candidates, pickedIndices, settleSnippet) {
+function _rewriteScriptWithWaits(content, candidates, pickedIndices, settleSnippet, settleSnippetFast) {
   // Three states per candidate:
   //   was off, now on   -> INSERT a settle line after the statement
   //   was on,  now off  -> DELETE the existing settle line that follows
@@ -2782,7 +2852,9 @@ function _rewriteScriptWithWaits(content, candidates, pickedIndices, settleSnipp
       ops.push({
         start: c.lineEndOffset,
         end: c.lineEndOffset,
-        text: '\n' + c.indent + settleSnippet,
+        // Typed input needs the debounce grace; click/goto fire their request
+        // with the action, so the fast variant skips the extra wait.
+        text: '\n' + c.indent + (c.kind === 'fill' ? settleSnippet : (settleSnippetFast || settleSnippet)),
       })
     } else if (c.alreadyWaited && !wantOn) {
       // Consume the trailing newline of the wait line so we don't leave a
@@ -2827,7 +2899,7 @@ function _qcWaitReviewSetAll(val) {
   _qcWaitReviewSync()
 }
 
-async function _showWaitReviewModalCore({ candidates, originalContent, settleSnippet, onApply, onSkip, useOverlay = false, wizardStepper = '', mountInto = null }) {
+async function _showWaitReviewModalCore({ candidates, originalContent, settleSnippet, settleSnippetFast, onApply, onSkip, useOverlay = false, wizardStepper = '', mountInto = null }) {
   // mountInto = wizard-owned body slot. When provided, this function renders
   // body HTML into that slot and returns { apply, dispose, sync } so the
   // wizard's persistent shell can drive Apply/Skip from its own footer.
@@ -2912,7 +2984,7 @@ async function _showWaitReviewModalCore({ candidates, originalContent, settleSni
     const pickedSet = new Set(pickedArr)
     const added = candidates.filter(c => pickedSet.has(c.index) && !c.alreadyWaited).length
     const removed = candidates.filter(c => !pickedSet.has(c.index) && c.alreadyWaited).length
-    const newContent = _rewriteScriptWithWaits(originalContent, candidates, pickedArr, settleSnippet)
+    const newContent = _rewriteScriptWithWaits(originalContent, candidates, pickedArr, settleSnippet, settleSnippetFast)
     return { newContent, meta: { added, removed } }
   }
 
@@ -2969,6 +3041,7 @@ async function scanAndAddWaitsFromEditor() {
     candidates,
     originalContent: content,
     settleSnippet: cfg.settle_snippet,
+    settleSnippetFast: cfg.settle_snippet_fast,
     useOverlay: true,  // render on top of the existing edit/create script modal
     onApply: (newContent, { added, removed }) => {
       const ed = window._qcCurrentEditor
@@ -3011,6 +3084,7 @@ async function _promptAddWaitsAfterRecording(scriptId) {
           candidates,
           originalContent: content,
           settleSnippet: cfg.settle_snippet,
+          settleSnippetFast: cfg.settle_snippet_fast,
           useOverlay: false,
           onApply: async (newContent, { added, removed }) => {
             const r = await api('PUT', '/scripts/' + scriptId, { content: newContent })
@@ -3691,6 +3765,7 @@ async function _wizardMountWait(state, slot) {
     candidates,
     originalContent: state.content,
     settleSnippet: state.cfgs.wait.settle_snippet,
+    settleSnippetFast: state.cfgs.wait.settle_snippet_fast,
     mountInto: slot,
   })
 }

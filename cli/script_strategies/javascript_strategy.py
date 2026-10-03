@@ -114,10 +114,10 @@ function _trackNetwork(page) {
 
 // Wait until in-flight XHR/fetch stays 0 for `quietMs`, capped at `timeoutMs`.
 // Two-step grace probe: fast 150ms check catches the common case (request
-// already in-flight) cheaply; a second probe at `graceMs` (default 700ms)
+// already in-flight) cheaply; a second probe at `graceMs` (default 500ms)
 // catches debounced inputs that delay before firing. Only after BOTH probes
 // see zero do we treat the action as non-network and return.
-async function _waitForNetworkSettle(page, { graceMs = 700, quietMs = 400, timeoutMs = 15000 } = {}) {
+async function _waitForNetworkSettle(page, { graceMs = 500, quietMs = 250, timeoutMs = 15000 } = {}) {
   await page.waitForTimeout(150);
   if (_inFlight === 0) {
     const extra = Math.max(0, graceMs - 150);
@@ -500,7 +500,7 @@ class JavaScriptStrategy(ScriptStrategy):
 
     _UPLOAD_CLICK_RE = re.compile(
         r'^(?P<indent>[ \t]*)await (?P<loc>page\.[^\n]*?)\.click\(\);[ \t]*\n'
-        r'(?:(?P=indent)await _waitForNetworkSettle\(page\);[ \t]*\n)?'
+        r'(?:(?P=indent)await _waitForNetworkSettle\(page(?:, \{[^}\n]*\})?\);[ \t]*\n)?'
         r'(?=(?P=indent)await (?P=loc)\.setInputFiles\()',
         re.MULTILINE,
     )

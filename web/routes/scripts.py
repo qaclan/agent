@@ -74,6 +74,7 @@ def get_wait_config():
         return jsonify({
             "ok": True,
             "settle_snippet": strategy.settle_call_snippet(),
+            "settle_snippet_fast": strategy.settle_call_snippet_fast(),
             "settle_marker": strategy.settle_marker(),
             "recommend_words": _WAIT_RECOMMEND_WORDS,
         })
