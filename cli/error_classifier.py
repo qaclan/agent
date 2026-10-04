@@ -348,6 +348,14 @@ def _is_element_not_found(rt: str, msg: str) -> bool:
     return False
 
 
+def _is_test_timeout(rt: str, msg: str) -> bool:
+    """@playwright/test aborted the whole test at its per-test timeout. Often
+    printed as the tail of a locator/expect call ("locator.click: Test timeout
+    of 75000ms exceeded"), so it must be checked before the element/assertion
+    rules or it is misread as a missing element."""
+    return "test timeout of" in msg.lower()
+
+
 def _is_timeout(rt: str, msg: str) -> bool:
     low = msg.lower()
     return (
@@ -465,7 +473,20 @@ def describe(category: str, fields: dict, meta: dict):
                        f"on the page.")
 
     elif category == "TIMEOUT":
-        if to:
+        tkind = fields.get("timeout_kind")
+        if tkind == "test":
+            title = "Test timeout exceeded"
+            message = (f"The whole test used up its {to} time budget before finishing."
+                       if to else "The whole test used up its time budget before finishing.")
+            next_step = ("Raise the test timeout (or the max script time) in the suite or "
+                         "project settings, or split the script into shorter ones.")
+        elif tkind == "script_kill":
+            title = "Script stopped at max script time"
+            message = (f"The script ran longer than its {to} limit and was stopped."
+                       if to else "The script ran longer than its max script time and was stopped.")
+            next_step = ("Raise the max script time in the suite or project settings, "
+                         "or check for a step that hangs.")
+        elif to:
             message = (f"The script ran longer than its {to} limit and "
                        f"was stopped.")
 
@@ -497,11 +518,15 @@ def classify(
     kind: str = "subprocess",
     returncode: Optional[int] = None,
     has_network_failures: bool = False,
+    limit_ms: Optional[int] = None,
 ) -> dict:
     """Classify a failure into a structured detail dict.
 
-    kind: "subprocess" (script exited non-zero) | "timeout" (300s kill) |
-          "internal" (runner-side exception).
+    kind: "subprocess" (script exited non-zero) | "timeout" (max-script-time
+          subprocess kill) | "internal" (runner-side exception).
+
+    limit_ms: for kind="timeout", the subprocess limit that was enforced, so
+    the message names the real limit instead of a fixed 300s.
 
     raw_type / raw_message come from the harness `error` object when present;
     otherwise the classifier falls back to the stderr/stdout blob.
@@ -533,7 +558,7 @@ def classify(
         else:
             category = "RUNTIME_ERROR"
     elif kind == "timeout":
-        # The 300s PER_SCRIPT_TIMEOUT_SEC subprocess kill.
+        # The max-script-time subprocess kill (limit_ms carries the value).
         category = "TIMEOUT"
     else:
         # Ordered rule list — first match wins.
@@ -542,6 +567,7 @@ def classify(
             ("SETUP_ERROR", _is_setup_error),
             ("CONFIG_ERROR", _is_config_error),
             ("BROWSER_CRASHED", _is_browser_crashed),
+            ("TIMEOUT", _is_test_timeout),
             ("ASSERTION_FAILED", _is_assertion),
             ("NAVIGATION_FAILED", _is_navigation),
             ("ELEMENT_NOT_FOUND", _is_element_not_found),
@@ -569,6 +595,20 @@ def classify(
         "url": extract_url(msg),
         "net_error": extract_net_error(msg),
     }
+    if kind == "timeout" and limit_ms:
+        fields["timeout_ms"] = limit_ms
+    # Which budget ran out: "script_kill" (max script time subprocess kill),
+    # "test" (per-test timeout), "wait" (a single action/expect hit the wait
+    # limit). None for non-timeout categories.
+    timeout_kind = None
+    if category == "TIMEOUT":
+        if kind == "timeout":
+            timeout_kind = "script_kill"
+        elif _is_test_timeout(rt, msg):
+            timeout_kind = "test"
+        else:
+            timeout_kind = "wait"
+    fields["timeout_kind"] = timeout_kind
     title, message, next_step = describe(category, fields, meta)
     return {
         "category": category,
@@ -585,4 +625,5 @@ def classify(
         "match_count": fields["match_count"],
         "url": fields["url"],
         "net_error": fields["net_error"],
+        "timeout_kind": timeout_kind,
     }

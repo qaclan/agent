@@ -1043,11 +1043,11 @@ def run_script_solo(script_id):
         from cli.db import generate_id as gen_id
         from cli.script_strategies._shared import substitute_template_vars
         from web.routes.runs import (
-            RUNS_DIR, SCREENSHOTS_DIR, PER_SCRIPT_TIMEOUT_SEC,
+            RUNS_DIR, SCREENSHOTS_DIR,
             DEFAULT_RECORD_RESOLUTION, _read_artifacts, _build_error_detail,
             get_default_playwright_browsers_path, is_frozen_binary,
         )
-        from cli import runtime_setup
+        from cli import runtime_setup, timeout_budget
 
         language = script.get("language") or "python"
         try:
@@ -1077,10 +1077,12 @@ def run_script_solo(script_id):
 
         run_id = gen_id("run")
         now = datetime.now(timezone.utc).isoformat()
+        project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
         conn.execute(
-            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless) "
-            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', 1, ?, ?, ?, ?)",
-            (run_id, solo_suite_id, project_id, environment_id, now, browser_type, resolution, 1 if headless else 0),
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless, timeout_config) "
+            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', 1, ?, ?, ?, ?, ?)",
+            (run_id, solo_suite_id, project_id, environment_id, now, browser_type, resolution, 1 if headless else 0,
+             json.dumps(timeout_budget.suite_snapshot(None, None, project_row))),
         )
         conn.commit()
 
@@ -1099,6 +1101,8 @@ def run_script_solo(script_id):
         screenshot_path = SCREENSHOTS_DIR / f"{srun_id}.png"
         artifacts_path = run_dir / f"{srun_id}.artifacts.json"
 
+        kill_timeout_sec = timeout_budget.subprocess_timeout_sec(timeout_budget.DEFAULT_MAX_SCRIPT_TIME)
+        effective_vals = None  # (wait, test timeout) once the budget resolves
         try:
             strategy = get_strategy(language)
             script_path = script.get("file_path")
@@ -1132,8 +1136,18 @@ def run_script_solo(script_id):
             # See docs/superpowers/specs/2026-07-05-api-script-run-capture-design.md Section 0.
             child_env["QACLAN_CAPTURE_REQUESTS"] = "0"
             child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
-            child_env["QACLAN_EXPECT_TIMEOUT"] = "15000"
-            child_env["QACLAN_ACTION_TIMEOUT"] = "15000"
+            # Same resolver as suite runs; a solo run has no suite or run pick,
+            # so it resolves script > project > built-in.
+            budget = timeout_budget.resolve_for_script(
+                language=language, source=source, strategy=strategy,
+                script_wait=script.get("wait_timeout"), project=project_row,
+            )
+            kill_timeout_sec = budget["subprocess_timeout_sec"]
+            effective_vals = (budget["wait_timeout"], budget["test_timeout"])
+            child_env["QACLAN_EXPECT_TIMEOUT"] = str(budget["wait_timeout"])
+            child_env["QACLAN_ACTION_TIMEOUT"] = str(budget["wait_timeout"])
+            if budget["test_timeout"] is not None:
+                child_env["QACLAN_TEST_TIMEOUT"] = str(budget["test_timeout"])
 
             pw_browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
             rt_browsers = runtime_setup.browsers_path_if_present()
@@ -1147,10 +1161,10 @@ def run_script_solo(script_id):
             child_env.update(strategy.extra_env())
             cmd = strategy.build_run_command(str(rendered_path))
 
-            proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True, timeout=PER_SCRIPT_TIMEOUT_SEC)
+            proc = subprocess.run(cmd, env=child_env, capture_output=True, text=True, timeout=kill_timeout_sec)
             duration_ms = int((time.time() - script_start) * 1000)
             finished_at = datetime.now(timezone.utc).isoformat()
-            console_errors, network_failures, artifacts_error = _read_artifacts(artifacts_path)
+            console_errors, network_failures, _captured, artifacts_error = _read_artifacts(artifacts_path)
 
             if proc.returncode == 0:
                 status = "PASSED"
@@ -1181,10 +1195,10 @@ def run_script_solo(script_id):
         except subprocess.TimeoutExpired:
             duration_ms = int((time.time() - script_start) * 1000)
             finished_at = datetime.now(timezone.utc).isoformat()
-            error_detail, error_msg = _build_error_detail(kind="timeout")
+            error_detail, error_msg = _build_error_detail(kind="timeout", timeout_sec=kill_timeout_sec)
             status = "FAILED"
             saved_screenshot = str(screenshot_path) if screenshot_path.exists() else None
-            console_errors, network_failures, _ = _read_artifacts(artifacts_path)
+            console_errors, network_failures, _captured, _ = _read_artifacts(artifacts_path)
             conn.execute(
                 "INSERT INTO script_runs (id, suite_run_id, script_id, order_index, status, "
                 "duration_ms, error_message, error_detail, console_errors, network_failures, "
@@ -1208,6 +1222,11 @@ def run_script_solo(script_id):
             final_status = "FAILED"
 
         env_vars_dict.clear()
+        if effective_vals:
+            conn.execute(
+                "UPDATE script_runs SET effective_wait_timeout = ?, effective_test_timeout = ? WHERE id = ?",
+                (*effective_vals, srun_id),
+            )
         conn.execute(
             "UPDATE suite_runs SET status=?, passed=?, failed=?, finished_at=? WHERE id=?",
             (final_status, 1 if final_status == "PASSED" else 0,

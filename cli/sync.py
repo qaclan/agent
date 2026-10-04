@@ -87,17 +87,38 @@ def _get_cloud_id(table, local_id):
     return row["cloud_id"] if row and row["cloud_id"] else None
 
 
+def _timeout_settings_payload(table, local_id):
+    """Non-NULL timeout settings (wait_timeout, test_timeout, max_script_time)
+    of a project or suite row. NULL values are left out so untouched
+    entities send exactly the payload they always did — same pattern as
+    script wait_timeout. See docs/test-timeout-budget-plan.md."""
+    from cli.db import get_conn
+    from cli.timeout_budget import SETTING_KEYS
+    row = get_conn().execute(
+        f"SELECT {', '.join(SETTING_KEYS)} FROM {table} WHERE id = ?", (local_id,)
+    ).fetchone()
+    if not row:
+        return {}
+    return {k: row[k] for k in SETTING_KEYS if row[k] is not None}
+
+
 def sync_project_to_cloud(project_id, name):
-    """Sync a project. Returns cloud project ID or None."""
+    """Sync a project. Returns cloud project ID or None.
+
+    Timeout settings are read from the row, so every caller (queue handler,
+    _ensure_project_synced, sync_all) sends them without changing signature.
+    """
     key = get_auth_key()
     if not key:
         return None
     cloud_id = _get_cloud_id("projects", project_id)
-    result = _try_sync("project", lambda: api.sync_project(key, {
+    payload = {
         "cli_project_id": project_id,
         "cloud_id": cloud_id,
         "name": name,
-    }))
+    }
+    payload.update(_timeout_settings_payload("projects", project_id))
+    result = _try_sync("project", lambda: api.sync_project(key, payload))
     if result:
         _save_cloud_id("projects", project_id, result["id"])
         return result["id"]
@@ -174,13 +195,15 @@ def sync_suite_to_cloud(suite_id, name, project_id, channel=None):
         row = get_conn().execute("SELECT channel FROM suites WHERE id = ?", (suite_id,)).fetchone()
         channel = row["channel"] if row else "web"
     cloud_id = _get_cloud_id("suites", suite_id)
-    result = _try_sync("suite", lambda: api.sync_suite(key, {
+    payload = {
         "cli_suite_id": suite_id,
         "cloud_id": cloud_id,
         "name": name,
         "project_id": cloud_project_id,
         "channel": channel,
-    }))
+    }
+    payload.update(_timeout_settings_payload("suites", suite_id))
+    result = _try_sync("suite", lambda: api.sync_suite(key, payload))
     if result:
         _save_cloud_id("suites", suite_id, result["id"])
     return result

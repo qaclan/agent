@@ -1,5 +1,11 @@
 # Expect Timeout Strategy Plan
 
+> **Extended by [test-timeout-budget-plan.md](./test-timeout-budget-plan.md).** The wait limit now
+> resolves script > run dialog pick > suite > project > 15000 (suite and project levels are new).
+> The hard backstop is no longer a fixed 300 s: it is the resolved *max script time* (default
+> 280 s) plus a 20 s kill margin, and `@playwright/test` scripts get a per-test timeout from
+> `QACLAN_TEST_TIMEOUT` (auto-scaled from action count). See `cli/timeout_budget.py`.
+
 ## Problem
 
 `execute_run()` ([web/routes/runs.py:148-150](../web/routes/runs.py#L148-L150)) reads a single
@@ -69,7 +75,7 @@ plan must cover both.
 
 2. **Widen the allowed set.** `_ALLOWED_EXPECT_TIMEOUTS` ([runs.py:148](../web/routes/runs.py#L148))
    becomes `{5000, 10000, 15000, 30000, 45000, 60000}`. The hard ceiling stays bounded by
-   `PER_SCRIPT_TIMEOUT_SEC = 300s` — a single subprocess is killed at 300 s regardless.
+   the max-script-time subprocess kill (default 300 s = 280 s + 20 s) — a single subprocess is killed at 300 s regardless.
 
 3. **Bump the `expect`-config default.** `javascript_test` / `typescript_test` share one
    `_render_config` — change its `_EXPECT_TIMEOUT` default `7000` → `15000`. (An earlier draft
@@ -200,7 +206,7 @@ has shipped.
    rejected option 1 never exists.
 
 4. **Bound.** The bump is one notch on the same `_ALLOWED_*` ladder (Layer 1) and still capped by
-   `PER_SCRIPT_TIMEOUT_SEC = 300s`. A repeated timeout after the highest notch is reported as a
+   the max-script-time subprocess kill (default 300 s = 280 s + 20 s). A repeated timeout after the highest notch is reported as a
    genuine failure, not bumped forever.
 
 > Sequencing: Layers 1–3 ship first (this plan). Layer 4 Tier A ships after error-reporting
@@ -218,7 +224,7 @@ has shipped.
   via the action timeout, `expect`-based strategies via both.
 - **Free by default.** The generous default (Layer 1) eliminates most false timeouts outright,
   because a higher ceiling does not slow passing assertions.
-- **Bounded.** `PER_SCRIPT_TIMEOUT_SEC = 300s` remains the hard backstop — no configuration can
+- **Bounded.** the max-script-time subprocess kill (default 300 s = 280 s + 20 s) remains the hard backstop — no configuration can
   hang a run indefinitely.
 
 ---
