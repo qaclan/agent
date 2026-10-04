@@ -15,6 +15,7 @@ from cli.config import get_active_project_id, QACLAN_DIR, UPLOADS_DIR
 from cli.runtime import is_frozen_binary, get_default_playwright_browsers_path
 from cli.runtime_setup import RUNTIME_DIR
 from cli.crypto import decrypt
+from cli import timeout_budget
 from cli.script_strategies import get_strategy
 from cli.script_strategies._shared import substitute_template_vars
 from cli.api_discovery.captured_request_parser import parse_captured_requests
@@ -25,7 +26,6 @@ bp = Blueprint('runs', __name__)
 
 RUNS_DIR = RUNTIME_DIR / "runs"
 SCREENSHOTS_DIR = Path(QACLAN_DIR) / "screenshots"
-PER_SCRIPT_TIMEOUT_SEC = 300  # 5 minutes per script before kill
 
 
 def _require_active_project():
@@ -58,12 +58,15 @@ def _read_artifacts(path: Path):
 
 
 def _build_error_detail(*, kind, returncode=None, stdout=None, stderr=None,
-                        artifacts_error=None, exc=None, has_network_failures=False):
+                        artifacts_error=None, exc=None, has_network_failures=False,
+                        timeout_sec=None):
     """Turn a failure into (detail, raw): `detail` is the structured dict for
     the error_detail column, `raw` is the raw blob for error_message. The raw
     blob is NOT embedded in detail — stored once. See error-reporting-plan §2.3.
 
     kind: "subprocess" | "timeout" | "internal".
+    timeout_sec: for kind="timeout", the subprocess limit actually enforced
+    (max script time + kill margin); falls back to the built-in default.
     """
     from cli.error_classifier import classify
 
@@ -77,8 +80,12 @@ def _build_error_detail(*, kind, returncode=None, stdout=None, stderr=None,
         return detail, raw
 
     if kind == "timeout":
-        raw = stderr or f"Script timed out after {PER_SCRIPT_TIMEOUT_SEC}s"
-        detail = classify(kind="timeout", has_network_failures=has_network_failures)
+        if timeout_sec is None:
+            timeout_sec = timeout_budget.subprocess_timeout_sec(timeout_budget.DEFAULT_MAX_SCRIPT_TIME)
+        limit_label = f"{timeout_sec:g}"
+        raw = stderr or f"Script timed out after {limit_label}s"
+        detail = classify(kind="timeout", has_network_failures=has_network_failures,
+                          limit_ms=int(timeout_sec * 1000))
         return detail, raw
 
     # subprocess: script exited non-zero.
@@ -152,7 +159,8 @@ def get_run(run_id):
         row = conn.execute(
             "SELECT sr.id, sr.suite_id, su.name AS suite_name, sr.environment_id, "
             "sr.channel, sr.status, sr.total, sr.passed, sr.failed, sr.skipped, "
-            "sr.started_at, sr.finished_at, sr.browser, sr.resolution, sr.headless, sr.capture_requests "
+            "sr.started_at, sr.finished_at, sr.browser, sr.resolution, sr.headless, sr.capture_requests, "
+            "sr.timeout_config "
             "FROM suite_runs sr JOIN suites su ON sr.suite_id = su.id "
             "WHERE sr.id = ? AND sr.project_id = ?",
             (run_id, project_id),
@@ -161,12 +169,20 @@ def get_run(run_id):
             return jsonify({"ok": False, "error": f"Run {run_id} not found"}), 404
 
         run = dict(row)
+        # timeout_config is stored as JSON text; NULL for runs recorded before
+        # the timeout record existed (timeout_summary is then None too).
+        try:
+            run["timeout_config"] = json.loads(run["timeout_config"]) if run.get("timeout_config") else None
+        except (TypeError, ValueError):
+            run["timeout_config"] = None
+        run["timeout_summary"] = timeout_budget.describe_snapshot(run["timeout_config"])
 
         script_rows = conn.execute(
             "SELECT scr.script_id, s.name, scr.status, scr.duration_ms, "
             "scr.console_errors, scr.network_failures, scr.error_message, scr.error_detail, "
             "scr.console_log, scr.network_log, scr.screenshot_path, "
             "scr.captured_requests_count, "
+            "scr.effective_wait_timeout, scr.effective_test_timeout, "
             "scr.order_index, scr.started_at, scr.finished_at "
             "FROM script_runs scr JOIN scripts s ON scr.script_id = s.id "
             "WHERE scr.suite_run_id = ? ORDER BY scr.order_index",
@@ -268,15 +284,14 @@ def execute_run():
         resolution = data.get("resolution") or None
         headless = data.get("headless", False)
         capture_requests = bool(data.get("capture_requests", False))
-        # Run-level "Wait limit" — one knob driving both QACLAN_EXPECT_TIMEOUT
-        # (assertions) and QACLAN_ACTION_TIMEOUT (clicks/fills/waits). A
-        # per-script wait_timeout column can override this inside the loop.
-        # See docs/expect-timeout-strategy-plan.md.
-        _ALLOWED_WAIT_TIMEOUTS = {5000, 10000, 15000, 30000, 45000, 60000}
-        _DEFAULT_WAIT_TIMEOUT = 15000
+        # Run-level "Wait limit" pick — one knob driving both
+        # QACLAN_EXPECT_TIMEOUT (assertions) and QACLAN_ACTION_TIMEOUT
+        # (clicks/fills/waits). None means "use suite default": the budget
+        # module resolves script > run pick > suite > project > built-in.
+        # See cli/timeout_budget.py and docs/test-timeout-budget-plan.md.
         # Accept both the new "wait_timeout" key and the legacy "expect_timeout".
         _raw_wait = data.get("wait_timeout", data.get("expect_timeout"))
-        run_wait_timeout = _raw_wait if isinstance(_raw_wait, int) and _raw_wait in _ALLOWED_WAIT_TIMEOUTS else _DEFAULT_WAIT_TIMEOUT
+        run_wait_timeout = _raw_wait if timeout_budget.valid_wait_timeout(_raw_wait) else None
         logger.info("execute_run: suite_id=%s env_name=%s stop_on_fail=%s browser=%s resolution=%s headless=%s wait_timeout=%s",
                      suite_id, env_name, stop_on_fail, browser_type, resolution, headless, run_wait_timeout)
 
@@ -297,6 +312,9 @@ def execute_run():
                 "ok": False,
                 "error": f"Suite {suite_id} is a {suite['channel'].upper()} suite, not a WEB suite"
             }), 400
+
+        # Project row feeds the project-level timeout defaults to the budget module.
+        project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
 
         items = conn.execute(
             "SELECT si.id AS item_id, si.order_index, si.item_type, "
@@ -354,11 +372,15 @@ def execute_run():
         run_id = generate_id("run")
         now = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless, capture_requests) "
-            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO suite_runs (id, suite_id, project_id, environment_id, channel, status, total, started_at, browser, resolution, headless, capture_requests, timeout_config) "
+            "VALUES (?, ?, ?, ?, 'web', 'RUNNING', ?, ?, ?, ?, ?, ?, ?)",
             (run_id, suite_id, project_id, environment_id, len(items), now, browser_type, resolution,
-             1 if headless else 0, 1 if capture_requests else 0),
+             1 if headless else 0, 1 if capture_requests else 0,
+             json.dumps(timeout_budget.suite_snapshot(run_wait_timeout, suite, project_row))),
         )
+        # srun_id -> (effective wait, effective test timeout); written to
+        # script_runs in the finally block, once every row exists.
+        effective_by_srun = {}
         conn.commit()
         logger.info("execute_run: created run %s at %s", run_id, now)
 
@@ -592,6 +614,10 @@ def execute_run():
                 script_start = time.time()
                 screenshot_path = SCREENSHOTS_DIR / f"{srun_id}.png"
                 artifacts_path = run_dir / f"{srun_id}.artifacts.json"
+                # Replaced below once the budget resolves; defined first so the
+                # TimeoutExpired handler can always report the enforced limit.
+                kill_timeout_sec = timeout_budget.subprocess_timeout_sec(
+                    timeout_budget.DEFAULT_MAX_SCRIPT_TIME)
 
                 try:
                     strategy = get_strategy(language)
@@ -655,17 +681,31 @@ def execute_run():
                     child_env["QACLAN_HEADLESS"] = "1" if headless else "0"
                     child_env["QACLAN_CAPTURE_REQUESTS"] = "1" if capture_requests else "0"
                     child_env["QACLAN_VIEWPORT"] = resolution or DEFAULT_RECORD_RESOLUTION
-                    # Resolve the effective wait limit for THIS script:
-                    #   script.wait_timeout  >  run-level pick  >  default.
-                    # One value drives both the expect (assertion) and action
+                    # Resolve every budget value for THIS script in one place:
+                    #   wait limit      script > run pick > suite > project > default
+                    #   max script time suite > project > default (-> kill time)
+                    #   test timeout    fixed (suite/project) or auto from action count
+                    # One wait value drives both the expect (assertion) and action
                     # (click/fill/wait) timeouts — see expect-timeout-strategy-plan.md.
-                    _script_wt = item["wait_timeout"]
-                    if isinstance(_script_wt, int) and _script_wt in _ALLOWED_WAIT_TIMEOUTS:
-                        effective_wait_timeout = _script_wt
-                    else:
-                        effective_wait_timeout = run_wait_timeout
+                    budget = timeout_budget.resolve_for_script(
+                        language=language, source=source, strategy=strategy,
+                        script_wait=item["wait_timeout"], run_pick=run_wait_timeout,
+                        suite=suite, project=project_row,
+                    )
+                    effective_wait_timeout = budget["wait_timeout"]
+                    kill_timeout_sec = budget["subprocess_timeout_sec"]
+                    effective_by_srun[srun_id] = (effective_wait_timeout, budget["test_timeout"])
                     child_env["QACLAN_EXPECT_TIMEOUT"] = str(effective_wait_timeout)
                     child_env["QACLAN_ACTION_TIMEOUT"] = str(effective_wait_timeout)
+                    if budget["test_timeout"] is not None:
+                        child_env["QACLAN_TEST_TIMEOUT"] = str(budget["test_timeout"])
+                    logger.info(
+                        "execute_run: %s budget wait=%sms(%s) test=%s(%s) max_script=%sms(%s) actions=%d settles=%d",
+                        item["script_name"], effective_wait_timeout, budget["wait_level"],
+                        budget["test_timeout"], budget["test_mode"] if budget["test_timeout"] is not None else "n/a",
+                        budget["max_script_time"], budget["max_level"],
+                        budget["steps"]["actions"], budget["steps"]["settles"],
+                    )
                     # Inject qaclan_vars from state.json so scripts can read them as QACLAN_STATE_* env vars
                     if state_file.exists():
                         try:
@@ -687,7 +727,7 @@ def execute_run():
                         env=child_env,
                         capture_output=True,
                         text=True,
-                        timeout=PER_SCRIPT_TIMEOUT_SEC,
+                        timeout=kill_timeout_sec,
                     )
 
                     duration_ms = int((time.time() - script_start) * 1000)
@@ -778,6 +818,7 @@ def execute_run():
                         captured_requests = []
                     error_detail, error_msg = _build_error_detail(
                         kind="timeout", has_network_failures=bool(network_failures),
+                        timeout_sec=kill_timeout_sec,
                     )
                     error_detail_json = json.dumps(error_detail)
                     captured_requests_json = json.dumps(captured_requests) if captured_requests else None
@@ -844,6 +885,12 @@ def execute_run():
             # don't linger in the Flask worker's memory.
             env_vars_dict.clear()
 
+            for _srun, (_wait, _test) in effective_by_srun.items():
+                conn.execute(
+                    "UPDATE script_runs SET effective_wait_timeout = ?, effective_test_timeout = ? WHERE id = ?",
+                    (_wait, _test, _srun),
+                )
+
             final_status = "PASSED" if failed == 0 and skipped == 0 else "FAILED"
             finished_at = datetime.now(timezone.utc).isoformat()
             total_duration_ms = int((time.time() - run_start) * 1000)
@@ -883,6 +930,8 @@ def execute_run():
                 "skipped": skipped,
                 "started_at": now,
                 "finished_at": finished_at,
+                "timeout_summary": timeout_budget.describe_snapshot(
+                    timeout_budget.suite_snapshot(run_wait_timeout, suite, project_row)),
                 "scripts": script_results,
             },
         })

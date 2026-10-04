@@ -420,9 +420,13 @@ class JavaScriptTestStrategy(JavaScriptStrategy):
             "const _ACTION_TIMEOUT = parseInt(process.env.QACLAN_ACTION_TIMEOUT || '30000', 10) || 30000;\n"
             # Per-test timeout must exceed the expect/action budget, else the
             # @playwright/test runner aborts the test before a slow-but-healthy
-            # assertion can settle. Give it generous headroom over the larger
-            # of the two; PER_SCRIPT_TIMEOUT_SEC (300s) is the real backstop.
-            "const _TEST_TIMEOUT = Math.max(_EXPECT_TIMEOUT, _ACTION_TIMEOUT) + 60000;\n"
+            # assertion can settle. The runner exports QACLAN_TEST_TIMEOUT
+            # (cli/timeout_budget.py: scaled from action count, capped at the max
+            # script time). Unset -> the older flat formula: generous headroom
+            # over the larger of expect/action. The max-script-time subprocess
+            # kill (cap + 20s) is the real backstop.
+            "const _TEST_TIMEOUT = parseInt(process.env.QACLAN_TEST_TIMEOUT || '', 10)"
+            " || (Math.max(_EXPECT_TIMEOUT, _ACTION_TIMEOUT) + 60000);\n"
             f"module.exports = {{ testDir: {json.dumps(test_dir)}, use: _use, "
             f"timeout: _TEST_TIMEOUT, expect: {{ timeout: _EXPECT_TIMEOUT }} }};\n"
         )

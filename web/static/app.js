@@ -308,7 +308,7 @@ function qcEditorSmokeTest() {
 // Keep in sync with the `routes` keys below — validated against a static
 // list (rather than `Object.keys(routes)`) since `state` is initialized
 // before `routes` is declared further down this module.
-const VALID_PAGES = ['features', 'scripts', 'suites', 'runs', 'envs', 'settings', 'api']
+const VALID_PAGES = ['features', 'scripts', 'suites', 'runs', 'envs', 'settings', 'project-settings', 'api']
 
 function getStoredPage() {
   const stored = localStorage.getItem('qaclan-page')
@@ -331,6 +331,7 @@ const routes = {
   runs:     renderRunsPage,
   envs:     renderEnvsPage,
   settings: renderSettingsPage,
+  'project-settings': renderProjectSettingsPage,
   api: () => {
     const page = document.getElementById('page-content')
     if (!state.activeProject) { renderNoProject(page); return }
@@ -504,6 +505,7 @@ async function renderTopbar() {
     runs:     ['Regression Runs', 'View execution history'],
     envs:     ['Environments', 'Manage environment variables'],
     settings: ['Settings', 'Manage auth key and preferences'],
+    'project-settings': ['Project Settings', 'Defaults for the active project'],
   }
   const [title, sub] = titles[state.page] || ['QAClan', '']
   const allProjects = await api('GET', '/projects')
@@ -540,6 +542,9 @@ async function renderTopbar() {
               <span class="project-delete-btn" onclick="event.stopPropagation();deleteProjectPrompt('${p.id}','${escHtml(p.name)}')" title="Delete">\u2715</span>
             </div>`).join('')}
           <div class="project-dropdown-divider"></div>
+          ${state.activeProject ? `<div class="project-dropdown-item" onclick="openProjectSettings()">
+            Project settings
+          </div>` : ''}
           <div class="project-dropdown-item project-dropdown-new" onclick="createProjectPrompt()">
             + New Project
           </div>
@@ -647,6 +652,11 @@ async function switchProject(id) {
   document.getElementById('project-dropdown').classList.add('hidden')
   await renderTopbar()
   await routes[state.page]()
+}
+
+function openProjectSettings() {
+  document.getElementById('project-dropdown').classList.add('hidden')
+  navigate('project-settings')
 }
 
 async function deleteProjectPrompt(id, name) {
@@ -957,6 +967,138 @@ async function submitAuthKey() {
 
 function iconSettings() {
   return '<svg viewBox="0 0 15 15" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7.5" cy="7.5" r="2.2"/><path d="M7.5 1.5v1.5M7.5 12v1.5M1.5 7.5H3M12 7.5h1.5M3.4 3.4l1 1M10.6 10.6l1 1M3.4 11.6l1-1M10.6 4.4l1-1"/></svg>'
+}
+
+// ── Timeout settings (project + suite) ───────────────────────────
+// Shared by the Project settings page and the suite editor. Values are ms in
+// the API, seconds in the inputs. Empty = inherit (wait/max) or auto (test).
+// Resolution lives in cli/timeout_budget.py; see docs/test-timeout-budget-plan.md.
+
+function _fmtMs(ms) {
+  const s = ms / 1000
+  return (Number.isInteger(s) ? s : s.toFixed(1)) + 's'
+}
+
+// labels: { wait: text of the "inherit" option, test: input placeholder, max: input placeholder }
+function _timeoutFieldsHTML(prefix, vals, labels, allowedWaits) {
+  const waitOpts = [`<option value="">${escHtml(labels.wait)}</option>`]
+    .concat(allowedWaits.map(ms =>
+      `<option value="${ms}"${vals.wait_timeout === ms ? ' selected' : ''}>${_fmtMs(ms)}</option>`))
+    .join('')
+  const secs = ms => (ms == null ? '' : ms / 1000)
+  return `
+    <div class="tb-grid">
+      <div class="tb-field">
+        <label class="tb-label" for="${prefix}-wait">Wait limit</label>
+        <div class="tb-control tb-select"><select id="${prefix}-wait">${waitOpts}</select></div>
+        <p class="tb-hint">How long one click, fill or check waits before it fails.</p>
+      </div>
+      <div class="tb-field">
+        <label class="tb-label" for="${prefix}-test">Test timeout</label>
+        <div class="tb-control">
+          <input type="number" id="${prefix}-test" min="30" step="1" value="${secs(vals.test_timeout)}" placeholder="${escHtml(labels.test)}">
+          <span class="tb-unit">sec</span>
+        </div>
+        <p class="tb-hint">Time for a whole test. Empty grows with script length. Playwright test scripts only.</p>
+      </div>
+      <div class="tb-field">
+        <label class="tb-label" for="${prefix}-max">Max script time</label>
+        <div class="tb-control">
+          <input type="number" id="${prefix}-max" min="60" max="1800" step="1" value="${secs(vals.max_script_time)}" placeholder="${escHtml(labels.max)}">
+          <span class="tb-unit">sec</span>
+        </div>
+        <p class="tb-hint">Hard stop for any script, 60 to 1800. Nothing runs longer.</p>
+      </div>
+    </div>
+    <div class="tb-actions">
+      <button class="btn btn-primary btn-sm" id="${prefix}-save" disabled>${escHtml(labels.saveLabel || 'Save')}</button>
+      <span class="tb-dirty" id="${prefix}-dirty" hidden>Unsaved changes</span>
+    </div>`
+}
+
+// Save stays disabled until a field differs from what was rendered.
+function _bindTimeoutFields(prefix, onSave) {
+  const ids = ['wait', 'test', 'max'].map(k => `${prefix}-${k}`)
+  const els = ids.map(id => document.getElementById(id))
+  if (els.some(e => !e)) return
+  const initial = els.map(e => e.value)
+  const btn = document.getElementById(prefix + '-save')
+  const note = document.getElementById(prefix + '-dirty')
+  const sync = () => {
+    const dirty = els.some((e, i) => e.value !== initial[i])
+    btn.disabled = !dirty
+    note.hidden = !dirty
+  }
+  els.forEach(e => { e.addEventListener('input', sync); e.addEventListener('change', sync) })
+  btn.addEventListener('click', onSave)
+}
+
+// The four budgets as nested boxes: each one limits the box inside it.
+function _timeoutNestHTML() {
+  return `
+    <div class="tb-nest">
+      <b>Max script time</b> stops any script, whatever else is set.
+      <div class="tb-nest">
+        <b>Test timeout</b> covers one whole test.
+        <div class="tb-nest">
+          <b>Wait limit</b> covers one step: a click or fill (action), an assertion (expect), or a page load (navigation).
+        </div>
+      </div>
+    </div>`
+}
+
+// Returns {wait_timeout, test_timeout, max_script_time} in ms (null = inherit/auto),
+// or null after toasting when a number input is malformed.
+function _readTimeoutFields(prefix) {
+  const waitVal = document.getElementById(prefix + '-wait').value
+  const toMs = (id, label) => {
+    const raw = document.getElementById(id).value.trim()
+    if (raw === '') return { ok: true, v: null }
+    const n = Number(raw)
+    if (!Number.isFinite(n) || n <= 0) { toast(label + ' must be a positive number of seconds', 'error'); return { ok: false } }
+    return { ok: true, v: Math.round(n * 1000) }
+  }
+  const t = toMs(prefix + '-test', 'Test timeout')
+  if (!t.ok) return null
+  const m = toMs(prefix + '-max', 'Max script time')
+  if (!m.ok) return null
+  return { wait_timeout: waitVal === '' ? null : Number(waitVal), test_timeout: t.v, max_script_time: m.v }
+}
+
+async function renderProjectSettingsPage() {
+  const page = document.getElementById('page-content')
+  if (!state.activeProject) { renderNoProject(page); return }
+  const res = await api('GET', '/projects/' + state.activeProject.id + '/settings')
+  if (res.ok === false) { page.innerHTML = `<div class="empty-state">${escHtml(res.error || 'Could not load settings')}</div>`; return }
+  const d = res.defaults
+  const labels = {
+    wait: `Built-in (${_fmtMs(d.wait_timeout)})`,
+    test: 'Auto',
+    max: String(d.max_script_time / 1000),
+    saveLabel: 'Save timeouts',
+  }
+  page.innerHTML = `
+    <div style="max-width:820px">
+      <div class="card">
+        <div class="card-header"><span>Timeouts</span></div>
+        <div class="card-body">
+          <p class="tb-hint" style="margin-bottom:18px;font-size:12.5px">Defaults for every suite in this project. A suite can override any of them.</p>
+          ${_timeoutFieldsHTML('ps', res.settings, labels, d.allowed_wait_timeouts)}
+          <h4 class="tb-h">How the three fit together</h4>
+          ${_timeoutNestHTML()}
+        </div>
+      </div>
+    </div>`
+  _bindTimeoutFields('ps', saveProjectTimeouts)
+}
+
+async function saveProjectTimeouts() {
+  const payload = _readTimeoutFields('ps')
+  if (!payload) return
+  const res = await api('PUT', '/projects/' + state.activeProject.id + '/settings', payload)
+  if (res.ok === false) { toast(res.error, 'error'); return }
+  toast('Project timeouts saved')
+  renderProjectSettingsPage()
 }
 
 async function renderSettingsPage() {
@@ -4208,13 +4350,23 @@ function createSuiteModal() {
   ])
 }
 
-async function editSuiteModal(id) {
-  const [suiteRes, scriptsRes] = await Promise.all([
+async function editSuiteModal(id, tab = 'items') {
+  const [suiteRes, scriptsRes, projRes] = await Promise.all([
     api('GET', '/suites/' + id),
-    api('GET', '/scripts')
+    api('GET', '/scripts'),
+    api('GET', '/projects/' + state.activeProject.id + '/settings'),
   ])
   if (suiteRes.ok === false) { toast(suiteRes.error, 'error'); return }
   const suite = suiteRes.suite || suiteRes
+  const projSettings = projRes.settings || {}
+  const projDefaults = projRes.defaults || { wait_timeout: 15000, max_script_time: 280000, allowed_wait_timeouts: [5000, 10000, 15000, 30000, 45000, 60000] }
+  // "Inherit" choices name the value they fall back to (project, else built-in).
+  const timeoutLabels = {
+    wait: `Project (${_fmtMs(projSettings.wait_timeout ?? projDefaults.wait_timeout)})`,
+    test: projSettings.test_timeout != null ? `Project: ${projSettings.test_timeout / 1000}` : 'Project: auto',
+    max: `Project: ${(projSettings.max_script_time ?? projDefaults.max_script_time) / 1000}`,
+    saveLabel: 'Save timeouts',
+  }
   const allScripts = scriptsRes.scripts || []
   const suiteScripts = suite.scripts || []
 
@@ -4260,33 +4412,65 @@ async function editSuiteModal(id) {
           </div>`
         }).join('')
 
+    const count = allItems.length
     return `
-      <div class="form-group">
-        <label class="form-label">Suite Name</label>
+      <div class="tb-tabs" role="tablist">
+        <button class="tb-tab${tab === 'items' ? ' active' : ''}" role="tab" data-suite-tab="items" onclick="switchSuiteTab('items')">Items<span class="tb-tab-count">${count}</span></button>
+        <button class="tb-tab${tab === 'timeouts' ? ' active' : ''}" role="tab" data-suite-tab="timeouts" onclick="switchSuiteTab('timeouts')">Timeouts</button>
+      </div>
+
+      <div id="suite-pane-items"${tab === 'items' ? '' : ' hidden'}>
+        <div class="form-group">
+          <label class="form-label">Suite Name</label>
+          <div class="input-row">
+            <input type="text" id="edit-suite-name" value="${escHtml(suite.name)}">
+            <button class="btn btn-sm btn-ghost" onclick="renameSuite('${id}')">Rename</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Items</label>
+        </div>
+        <div class="suite-item-list" id="suite-item-list">
+          ${itemsHtml}
+        </div>
+        ${scriptOpts ? `
         <div class="input-row">
-          <input type="text" id="edit-suite-name" value="${escHtml(suite.name)}">
-          <button class="btn btn-sm btn-ghost" onclick="renameSuite('${id}')">Rename</button>
+          <select id="add-suite-script">${scriptOpts}</select>
+          <button class="btn btn-sm btn-ghost" onclick="addSuiteScript('${id}')">Add</button>
+        </div>` : ''}
+        <div class="input-row" style="margin-top:8px">
+          <button class="btn btn-sm btn-ghost" onclick="addApiRequestToSuite('${id}')">+ Add API Request</button>
         </div>
       </div>
-      <div class="form-group">
-        <label class="form-label">Items</label>
-      </div>
-      <div class="suite-item-list" id="suite-item-list">
-        ${itemsHtml}
-      </div>
-      ${scriptOpts ? `
-      <div class="input-row">
-        <select id="add-suite-script">${scriptOpts}</select>
-        <button class="btn btn-sm btn-ghost" onclick="addSuiteScript('${id}')">Add</button>
-      </div>` : ''}
-      <div class="input-row" style="margin-top:8px">
-        <button class="btn btn-sm btn-ghost" onclick="addApiRequestToSuite('${id}')">+ Add API Request</button>
+
+      <div id="suite-pane-timeouts"${tab === 'timeouts' ? '' : ' hidden'}>
+        ${_timeoutFieldsHTML('st', suite, timeoutLabels, projDefaults.allowed_wait_timeouts)}
+        <h4 class="tb-h">Time budget</h4>
+        <div id="st-preview" class="tb-hint">Loading…</div>
+        <details class="tb-fold">
+          <summary>How the three fit together</summary>
+          ${_timeoutNestHTML()}
+        </details>
       </div>`
   }
 
   showModal('Edit Suite', renderBody(), [
     { label: 'Done', cls: 'btn-primary', action: () => { closeModal(); renderSuitesPage() } }
   ], suite.name)
+
+  _bindTimeoutFields('st', () => saveSuiteTimeouts(id))
+  window._suitePreviewLoaded = false
+  if (tab === 'timeouts') { window._suitePreviewLoaded = true; loadSuiteTimeoutPreview(id) }
+  // Re-preview on edit (unsaved values) so the table answers "what if" before saving.
+  let previewTimer = null
+  const queuePreview = () => {
+    clearTimeout(previewTimer)
+    previewTimer = setTimeout(() => loadSuiteTimeoutPreview(id), 250)
+  }
+  ;['st-wait', 'st-test', 'st-max'].forEach(fid => {
+    const el = document.getElementById(fid)
+    if (el) { el.addEventListener('input', queuePreview); el.addEventListener('change', queuePreview) }
+  })
 
   window._editSuiteId = id
   window._editAllScripts = allScripts
@@ -4337,6 +4521,106 @@ async function editSuiteModal(id) {
       if (res.ok === false) { toast(res.error, 'error'); editSuiteModal(id) }
     })
   }
+}
+
+// ── Suite time budget preview ───────────────────────────────────
+// Rows come from GET /suites/<id>/timeout-preview, which uses the same
+// resolver as the runner (cli/timeout_budget.py), so what is shown here is
+// what a run then applies.
+
+function _timeoutPreviewQuery() {
+  const waitEl = document.getElementById('st-wait')
+  if (!waitEl) return ''
+  const num = id => {
+    const raw = document.getElementById(id).value.trim()
+    const n = Number(raw)
+    return raw !== '' && Number.isFinite(n) && n > 0 ? String(Math.round(n * 1000)) : ''
+  }
+  const q = new URLSearchParams({
+    wait_timeout: waitEl.value,
+    test_timeout: num('st-test'),
+    max_script_time: num('st-max'),
+  })
+  return '?' + q.toString()
+}
+
+function _renderTimeoutPreview(res) {
+  const sm = res.summary
+  const rows = res.scripts || []
+  if (!rows.length) return '<p class="tb-hint">No scripts in this suite yet. Add one on the Items tab.</p>'
+  const cap = sm.max_script_time
+  const src = { default: 'built-in', project: 'project', suite: 'suite' }[sm.max_script_time_source] || sm.max_script_time_source
+  const pct = ms => Math.max(0, Math.min(100, (ms / cap) * 100))
+
+  const body = rows.map(r => {
+    const flags = []
+    if (r.over_cap) flags.push(`Worst case ${_fmtMs(r.worst_ms)} is over the cap`)
+    if (r.near_budget) flags.push(`Last run used ${Math.round(r.budget_used * 100)}% of budget`)
+    if (r.clamped) flags.push(`Fixed timeout clamped to ${_fmtMs(r.max_script_time)}`)
+    const warn = r.over_cap || r.near_budget || r.clamped
+    const fillClass = !r.has_test_timeout ? 'free' : warn ? 'warn' : ''
+    const valueText = r.has_test_timeout
+      ? `<b>${_fmtMs(r.test_timeout)}</b> test timeout (${escHtml(r.test_mode)})`
+      : 'No test timeout, stopped at max script time'
+    const lastText = r.last_duration_ms != null ? ` · last run ${_fmtMs(r.last_duration_ms)}` : ''
+    return `<div class="tb-row">
+      <div style="min-width:0">
+        <div class="tb-row-name" title="${escHtml(r.name)}">${escHtml(r.name)}</div>
+        <div class="tb-row-meta">
+          <span>${r.actions} action${r.actions === 1 ? '' : 's'}, ${r.settles} wait${r.settles === 1 ? '' : 's'} · ${_fmtMs(r.wait_timeout)} limit</span>
+          ${flags.map(f => `<span class="tb-flag">${escHtml(f)}</span>`).join('')}
+        </div>
+      </div>
+      <div>
+        <div class="tb-track" role="img" aria-label="${escHtml(r.name)}: budget ${_fmtMs(r.budget_ms)} of ${_fmtMs(cap)}${r.last_duration_ms != null ? ', last run ' + _fmtMs(r.last_duration_ms) : ''}">
+          <div class="tb-fill ${fillClass}" style="width:${pct(r.budget_ms)}%"></div>
+          ${r.last_duration_ms != null ? `<div class="tb-tick" style="left:calc(${pct(r.last_duration_ms)}% - 1px)"></div>` : ''}
+        </div>
+        <div class="tb-val">${valueText}${lastText}</div>
+      </div>
+    </div>`
+  }).join('')
+
+  return `
+    <div class="tb-summary">
+      <span>Suite total <b>${_fmtMs(sm.total_budget_ms)}</b></span>
+      <span>Longest <b>${_fmtMs(sm.longest_budget_ms)}</b></span>
+      <span>Max script time <b>${_fmtMs(cap)}</b> from ${escHtml(src)}</span>
+    </div>
+    <div class="tb-rows">${body}</div>
+    <p class="tb-legend">Each bar spans 0 to ${_fmtMs(cap)}. The filled part is the script's time budget, the tick is its last run.</p>
+    ${sm.skipped_api_items ? `<p class="tb-legend">${sm.skipped_api_items} API item(s) are not included.</p>` : ''}`
+}
+
+async function loadSuiteTimeoutPreview(suiteId) {
+  const el = document.getElementById('st-preview')
+  if (!el) return
+  const res = await api('GET', '/suites/' + suiteId + '/timeout-preview' + _timeoutPreviewQuery())
+  const target = document.getElementById('st-preview')  // modal may have closed or re-rendered
+  if (!target) return
+  target.innerHTML = res.ok === false
+    ? `<span style="color:var(--danger)">${escHtml(res.error || 'Preview unavailable')}</span>`
+    : _renderTimeoutPreview(res)
+}
+
+function switchSuiteTab(name) {
+  document.querySelectorAll('[data-suite-tab]').forEach(b =>
+    b.classList.toggle('active', b.dataset.suiteTab === name))
+  document.getElementById('suite-pane-items').hidden = name !== 'items'
+  document.getElementById('suite-pane-timeouts').hidden = name !== 'timeouts'
+  if (name === 'timeouts' && !window._suitePreviewLoaded && window._editSuiteId) {
+    window._suitePreviewLoaded = true
+    loadSuiteTimeoutPreview(window._editSuiteId)
+  }
+}
+
+async function saveSuiteTimeouts(suiteId) {
+  const payload = _readTimeoutFields('st')
+  if (!payload) return
+  const res = await api('PUT', '/suites/' + suiteId, payload)
+  if (res.ok === false) { toast(res.error, 'error'); return }
+  toast('Suite timeouts saved')
+  editSuiteModal(suiteId, 'timeouts')
 }
 
 async function renameSuite(suiteId) {
@@ -4490,8 +4774,23 @@ async function viewApiRequestInEditor(requestId) {
 }
 
 async function runSuiteModal(id, name) {
-  const envsRes = await api('GET', '/envs')
+  const [envsRes, suiteRes, projRes, budgetRes] = await Promise.all([
+    api('GET', '/envs'),
+    api('GET', '/suites/' + id),
+    api('GET', '/projects/' + state.activeProject.id + '/settings'),
+    api('GET', '/suites/' + id + '/timeout-preview'),
+  ])
   const envs = envsRes.environments || []
+  // One-line budget summary; the full table lives in the suite editor.
+  const budgetLine = budgetRes.ok !== false && budgetRes.summary && budgetRes.summary.script_count
+    ? `<div class="tb-runline">
+         Time budget: suite total ${_fmtMs(budgetRes.summary.total_budget_ms)}, longest script ${_fmtMs(budgetRes.summary.longest_budget_ms)}.
+         <a href="#" onclick="event.preventDefault();closeModal();editSuiteModal('${id}')">Details</a>
+       </div>`
+    : ''
+  // What "Use suite default" resolves to: suite value, else project, else built-in.
+  const suiteForWait = suiteRes.suite || suiteRes
+  const inheritedWait = suiteForWait.wait_timeout ?? projRes.settings?.wait_timeout ?? projRes.defaults?.wait_timeout ?? 15000
 
   // "Wait limit" — one knob, applies to every strategy (actions + assertions).
   // A per-script override can supersede this; see the script editor.
@@ -4499,17 +4798,19 @@ async function runSuiteModal(id, name) {
       <div class="form-group" style="flex:1">
         <label class="form-label">Wait limit</label>
         <select id="run-wait-timeout">
+          <option value="" selected>Use suite default (${_fmtMs(inheritedWait)})</option>
           <option value="5000">5s — Fast</option>
           <option value="10000">10s — Lenient</option>
-          <option value="15000" selected>15s — Default</option>
+          <option value="15000">15s — Default</option>
           <option value="30000">30s — Slow app</option>
           <option value="45000">45s — Heavy SPA</option>
           <option value="60000">60s — Very slow</option>
         </select>
-        <p class="form-hint">How long QAClan waits for a component before failing. Higher = more patient with slow pages.</p>
+        <p class="form-hint">How long QAClan waits for a component before failing. Picking a number here overrides the suite default for this run only.</p>
       </div>`
 
   showModal('Run Suite', `
+    ${budgetLine}
     <div class="form-group">
       <label class="form-label">Environment (optional)</label>
       <select id="run-env">
@@ -4557,7 +4858,7 @@ async function runSuiteModal(id, name) {
       const headless = document.getElementById('run-headless').checked
       const capture_requests = document.getElementById('run-capture-requests').checked
       const waitEl = document.getElementById('run-wait-timeout')
-      const wait_timeout = waitEl ? parseInt(waitEl.value, 10) : undefined
+      const wait_timeout = waitEl && waitEl.value ? parseInt(waitEl.value, 10) : undefined
       // Show spinner
       document.querySelector('.modal-body').innerHTML = `
         <div class="loading-state">
@@ -4657,6 +4958,7 @@ function showRunResults(run, suiteName) {
       <div class="stat-card"><div class="stat-value fail">${run.failed || 0}</div><div class="stat-label">Failed</div></div>
       <div class="stat-card"><div class="stat-value">${skipped}</div><div class="stat-label">Skipped</div></div>
     </div>
+    ${run.timeout_summary ? `<div class="text-muted" style="font-size:12px;margin:0 0 10px">Timeouts: ${escHtml(run.timeout_summary)}</div>` : ''}
     ${capturedSummaryHTML}
     ${failureSummary}
     <div class="run-history-scroll">

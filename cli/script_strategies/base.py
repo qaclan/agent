@@ -22,7 +22,6 @@ class ScriptStrategy(ABC):
     language: str = ""
     codegen_target: str = ""
     file_extension: str = ""
-    expect_timeout: int = 7000
 
     @abstractmethod
     def post_process_recording(self, raw: str) -> str:

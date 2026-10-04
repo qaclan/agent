@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id, set_active_project_id
+from cli import timeout_budget
 
 bp = Blueprint('projects', __name__)
 
@@ -89,6 +90,64 @@ def set_active_project():
 
         set_active_project_id(project_id)
         return jsonify({"ok": True, "id": row["id"], "name": row["name"]})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+def _settings_payload(row):
+    return {k: row[k] for k in timeout_budget.SETTING_KEYS}
+
+
+def _settings_defaults():
+    """Built-in values the UI shows next to 'inherit' / 'auto' choices."""
+    return {
+        "wait_timeout": timeout_budget.DEFAULT_WAIT_TIMEOUT,
+        "max_script_time": timeout_budget.DEFAULT_MAX_SCRIPT_TIME,
+        "allowed_wait_timeouts": sorted(timeout_budget.ALLOWED_WAIT_TIMEOUTS),
+        "min_max_script_time": timeout_budget.MIN_MAX_SCRIPT_TIME,
+        "max_max_script_time": timeout_budget.MAX_MAX_SCRIPT_TIME,
+        "min_test_timeout": timeout_budget.MIN_FIXED_TEST_TIMEOUT,
+    }
+
+
+@bp.route('/api/projects/<project_id>/settings', methods=['GET'])
+def get_project_settings(project_id):
+    try:
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": f"Project {project_id} not found"}), 404
+        return jsonify({"ok": True, "settings": _settings_payload(row), "defaults": _settings_defaults()})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/projects/<project_id>/settings', methods=['PUT'])
+def update_project_settings(project_id):
+    """Update timeout defaults. Only keys present in the body change; null
+    clears a value (wait/max -> built-in default, test_timeout -> auto)."""
+    try:
+        data = request.get_json(force=True) or {}
+        conn = get_conn()
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        if not row:
+            return jsonify({"ok": False, "error": f"Project {project_id} not found"}), 404
+
+        payload = {k: data[k] for k in timeout_budget.SETTING_KEYS if k in data}
+        updates, err = timeout_budget.validate_settings(payload, current=row, parent=None)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+
+        if updates:
+            sets = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(f"UPDATE projects SET {sets} WHERE id = ?", (*updates.values(), project_id))
+            conn.commit()
+
+            from cli.sync_queue import enqueue
+            enqueue("project", project_id, "upsert")
+
+        row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+        return jsonify({"ok": True, "settings": _settings_payload(row)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 

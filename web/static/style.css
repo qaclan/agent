@@ -601,6 +601,7 @@ tbody tr:hover td { background: var(--bg-elevated); }
 }
 input[type="text"],
 input[type="password"],
+input[type="number"],
 textarea,
 select {
   width: 100%;
@@ -620,6 +621,9 @@ input:focus, textarea:focus, select:focus {
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 input::placeholder, textarea::placeholder { color: var(--text-muted); }
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; font-variant-numeric: tabular-nums; }
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 textarea { resize: vertical; min-height: 120px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6; }
 select { cursor: pointer; }
 select option { background: var(--bg-panel); color: var(--text-primary); }
@@ -2291,3 +2295,83 @@ html[data-theme="light"] .req-method-select.m-DELETE { color: #dc2626; }
 .fix-del { color: var(--danger); }
 .fix-add { color: var(--success, #3fb950); }
 .fix-reco { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent); background: var(--accent-subtle); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+
+
+/* ── Timeout settings (project page + suite editor) ───────────────
+   Tokens only, so both themes follow. Fields share one grid; the budget
+   table draws each script as a bar on the suite's max-script-time axis. */
+.tb-tabs {
+  display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 18px;
+  background: var(--bg-inset); border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+}
+.tb-tab {
+  border: 0; background: transparent; cursor: pointer;
+  font: 500 12.5px var(--font-ui); color: var(--text-secondary);
+  padding: 6px 14px; border-radius: 6px; transition: color .12s, background .12s;
+}
+.tb-tab:hover { color: var(--text-primary); }
+.tb-tab.active { background: var(--accent-subtle); color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent-glow); }
+.tb-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tb-tab-count { margin-left: 6px; font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.tb-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.tb-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.tb-label { font-size: 12.5px; font-weight: 600; color: var(--text-primary); }
+.tb-control { position: relative; }
+.tb-control input, .tb-control select { padding-right: 34px; }
+.tb-unit {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  font-size: 12px; color: var(--text-muted); pointer-events: none;
+}
+.tb-select::after {
+  content: ''; position: absolute; right: 14px; top: 50%; width: 6px; height: 6px; pointer-events: none;
+  border-right: 1.5px solid var(--text-muted); border-bottom: 1.5px solid var(--text-muted);
+  transform: translateY(-70%) rotate(45deg);
+}
+.tb-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-secondary); }
+.tb-actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+.tb-dirty { font-size: 12px; color: var(--warning); }
+.btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+.tb-h { margin: 26px 0 10px; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.tb-h:first-child { margin-top: 0; }
+
+/* Nested budgets: the outer box limits the inner one. */
+.tb-nest {
+  border: 1px dashed var(--border-strong); border-radius: 10px; padding: 10px 12px;
+  font-size: 12px; line-height: 1.5; color: var(--text-secondary);
+}
+.tb-nest b { color: var(--text-primary); font-weight: 600; }
+.tb-nest > .tb-nest { margin-top: 8px; border-style: solid; border-color: var(--accent-glow); background: var(--accent-subtle); }
+.tb-nest > .tb-nest > .tb-nest { margin-top: 8px; border-color: var(--accent-glow); background: var(--accent-glow); }
+.tb-fold > summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); margin-top: 18px; }
+.tb-fold > summary:hover { color: var(--text-primary); }
+.tb-fold > .tb-nest { margin-top: 10px; }
+
+.tb-summary { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-bottom: 12px; font-size: 12.5px; color: var(--text-secondary); }
+.tb-summary b { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tb-rows { border: 1px solid var(--border-default); border-radius: var(--radius-md); overflow: hidden; }
+.tb-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 6px 18px; align-items: center;
+  padding: 10px 12px; background: var(--bg-elevated);
+}
+.tb-row + .tb-row { border-top: 1px solid var(--border-subtle); }
+.tb-row-name { font-size: 13px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tb-row-meta { margin-top: 2px; font-size: 11.5px; color: var(--text-secondary); display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; }
+.tb-track { position: relative; height: 8px; border-radius: 4px; background: var(--bg-inset); box-shadow: inset 0 0 0 1px var(--border-default); }
+.tb-fill { height: 100%; border-radius: 4px; background: var(--accent); }
+.tb-fill.warn { background: var(--warning); }
+.tb-fill.free { background: var(--border-strong); }
+.tb-tick { position: absolute; top: -3px; width: 2px; height: 14px; border-radius: 1px; background: var(--text-primary); }
+.tb-val { margin-top: 5px; font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.tb-val b { color: var(--text-primary); font-weight: 600; }
+.tb-flag { font-size: 11px; color: var(--warning); background: var(--warning-bg); border-radius: 4px; padding: 1px 6px; }
+.tb-legend { margin: 8px 0 0; font-size: 11.5px; color: var(--text-secondary); }
+.tb-runline { margin-bottom: 14px; font-size: 12px; color: var(--text-secondary); }
+
+@media (max-width: 720px) {
+  .tb-grid { grid-template-columns: 1fr; }
+  .tb-row { grid-template-columns: 1fr; }
+}
+html[data-theme="light"] .tb-flag,
+html[data-theme="light"] .tb-dirty { color: #b45309; }

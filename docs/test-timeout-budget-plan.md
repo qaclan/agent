@@ -6,15 +6,18 @@ what it left out: the **test timeout**, a configurable **max script time**, conf
 **project / suite** level (synced to the cloud), a **record of what each run used**, and a
 **preview UI** that shows the budget before running.
 
-Status: plan only. Nothing here is implemented.
+Status: implemented locally (OpenSpec change `test-timeout-budget`), phases 0 to 5. Cloud sync (phase 3)
+is coded but unverified against qaclan.com: the cloud contract below is still open.
 
 ---
 
 ## Problem
 
 1. The test timeout is a flat `max(expect, action) + 60s`
-   ([javascript_test_strategy.py:425](../cli/script_strategies/javascript_test_strategy.py#L425)),
-   so 90s with defaults. It does not grow with script length. A long recorded flow can pass every
+   ([javascript_test_strategy.py:425](../cli/script_strategies/javascript_test_strategy.py#L425)).
+   The runner sets expect and action to the same wait limit, so a real run gets 75s with the 15s
+   default (90s only appears when the env vars are unset and the config's 30000 action fallback
+   applies). It does not grow with script length. A long recorded flow can pass every
    individual wait and still fail on the total.
 2. Only `javascript_test` / `typescript_test` have a per-test timeout at all. `python`,
    `javascript` and `typescript` (raw playwright) have none; the only limit is the 300s subprocess
@@ -100,7 +103,7 @@ sanity check, not proof: few distinct scripts, small sample.
 | `python` | 6 | 0.3 / 0.4 / 0.8 | 9s, 22 actions, 6 settles |
 
 Failed runs reach 77s on a 26-action script (each failing expect burns the 15s wait limit), so
-the 90s floor is close for scripts only a little longer. A 40-action, settle-heavy passing script
+the 75s floor is already exceeded for scripts only a little longer. A 40-action, settle-heavy passing script
 would likely need 85-135s and hit the flat limit, which confirms the problem.
 
 Conclusions for the constants:
@@ -110,6 +113,9 @@ Conclusions for the constants:
 - Base 30s covers browser start (a 3-action script took 10s) and trailing state capture. The
   floor dominates up to 12 actions, so short scripts are unchanged.
 - Results: 20 actions gives 130s, 40 actions gives 230s, 50 or more is held by the cap.
+- Re-run before phase 1 (65 runs, same machine): `javascript_test` 8 passing, median 2.1 / max 3.4 s per
+  action, longest 42s; `typescript_test` 10 passing, median 1.4 / max 2.5, longest 60s; `python` 6
+  passing, median 0.3 / max 0.8. Constants hold (5s is still above 1.5x the worst rate).
 - Re-run this query before phase 1 ships and again after the first week of real use. The run
   snapshots (phase 4) make this routine.
 
@@ -257,7 +263,7 @@ finish before the cloud change ships.
 There are no automated tests in this repo, so check by hand:
 
 1. Phase 1: run a long `javascript_test` script, confirm the generated config shows the scaled
-   value, and that short scripts keep the old 90s floor.
+   value, and that short scripts keep the old 75s floor (wait limit 15s + 60s).
 2. Force a slow script past its budget. Confirm the test timeout message appears, not the
    subprocess kill.
 3. Run a `python` script and confirm nothing changes except the derived kill time.
@@ -281,6 +287,23 @@ There are no automated tests in this repo, so check by hand:
 - Wait-scan gap: the Review & Improve wizard does not know `selectOption`
   (`_parseActionCalls`, [app.js:2743](../web/static/app.js#L2743)). Tracked separately; it
   changes settle counts but not this design.
+
+---
+
+## Implementation notes (deviations from the plan above)
+
+- Cloud push reads the three project/suite fields from the row inside `sync_project_to_cloud` /
+  `sync_suite_to_cloud` (`_timeout_settings_payload`), so the queue handler, `_ensure_project_synced`
+  and `sync_all` send them without signature changes. Only non-NULL values are sent, so clearing a
+  setting locally does not reach a cloud that already holds a value (see design.md risks).
+- Failure reporting keeps the `TIMEOUT` category and adds a `timeout_kind` field (`test`,
+  `script_kill`, `wait`) instead of new categories, so cloud and UI category handling is untouched.
+  A `Test timeout of Nms exceeded` message is matched before the element and assertion rules,
+  because Playwright often prints it as the tail of a locator call.
+- A suite's `test_timeout` of NULL means "inherit the project value, else auto"; there is no way to
+  force auto at suite level when the project sets a fixed value.
+- `qaclan web run` (`cli/commands/web/run.py`) is a separate in-process runner and is not covered
+  by this budget.
 
 ---
 

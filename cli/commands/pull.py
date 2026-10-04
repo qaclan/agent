@@ -13,7 +13,26 @@ from cli.script_strategies import get_strategy, SUPPORTED_LANGUAGES
 console = Console()
 
 
+def _apply_timeout_settings(conn, table, local_id, payload):
+    """Copy wait_timeout / test_timeout / max_script_time from a cloud project
+    or suite payload onto the local row. A key that is present wins (null
+    clears it); a key that is absent leaves the local value alone, so an
+    older cloud response cannot wipe local settings. Non-int values are
+    ignored. See docs/test-timeout-budget-plan.md.
+    """
+    from cli.timeout_budget import SETTING_KEYS
+    updates = {
+        k: payload[k] for k in SETTING_KEYS
+        if k in payload and (payload[k] is None or (isinstance(payload[k], int) and not isinstance(payload[k], bool)))
+    }
+    if not updates:
+        return
+    sets = ", ".join(f"{k} = ?" for k in updates)
+    conn.execute(f"UPDATE {table} SET {sets} WHERE id = ?", (*updates.values(), local_id))
+
+
 @click.command()
+
 def pull():
     """Download team workspace from cloud."""
     key = get_auth_key()
@@ -70,6 +89,7 @@ def pull_workspace():
         existing = conn.execute("SELECT id FROM projects WHERE cloud_id = ?", (cloud_id,)).fetchone()
         if existing:
             conn.execute("UPDATE projects SET name = ? WHERE id = ?", (p["name"], existing["id"]))
+            _apply_timeout_settings(conn, "projects", existing["id"], p)
             project_map[cloud_id] = existing["id"]
         else:
             local_id = generate_id("proj")
@@ -77,6 +97,7 @@ def pull_workspace():
                 "INSERT INTO projects (id, name, created_at, cloud_id) VALUES (?, ?, ?, ?)",
                 (local_id, p["name"], now, cloud_id),
             )
+            _apply_timeout_settings(conn, "projects", local_id, p)
             project_map[cloud_id] = local_id
             counts["projects"] += 1
             console.print(f"  [green]✓[/green] Project: {p['name']}")
@@ -131,6 +152,11 @@ def pull_workspace():
             # Update name and file content and start_url_key, start_url_value and var_keys also.
             conn.execute("UPDATE scripts SET name = ?, channel = ?, start_url_key= ?, start_url_value = ?, var_keys = ? WHERE id = ?",
                          (s["name"], channel, start_url_key, start_url_value, var_keys, existing["id"]))
+            # Per-script wait limit override: present key wins (null clears),
+            # absent key keeps the local value.
+            if "wait_timeout" in s:
+                conn.execute("UPDATE scripts SET wait_timeout = ? WHERE id = ?",
+                             (s["wait_timeout"], existing["id"]))
             file_content = s.get("file_content")
             if file_content and existing["file_path"]:
                 with open(existing["file_path"], "w", encoding="utf-8") as fp:
@@ -152,9 +178,9 @@ def pull_workspace():
                 fp.write(file_content)
             created_by = s.get("created_by")
             conn.execute(
-                "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, created_at, cloud_id, created_by, start_url_key, start_url_value, var_keys) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'PULLED', ?, ?, ?, ?, ?, ?, ?)",
-                (local_id, local_feature_id, local_project_id, channel, s["name"], file_path, language, now, cloud_id, created_by, start_url_key, start_url_value, var_keys),
+                "INSERT INTO scripts (id, feature_id, project_id, channel, name, file_path, source, language, created_at, cloud_id, created_by, start_url_key, start_url_value, var_keys, wait_timeout) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'PULLED', ?, ?, ?, ?, ?, ?, ?, ?)",
+                (local_id, local_feature_id, local_project_id, channel, s["name"], file_path, language, now, cloud_id, created_by, start_url_key, start_url_value, var_keys, s.get("wait_timeout")),
             )
             script_map[s.get("cli_script_id", cloud_id)] = local_id
             counts["scripts"] += 1
@@ -394,6 +420,7 @@ def pull_workspace():
                 "UPDATE suites SET name = ?, channel = ? WHERE id = ?",
                 (s["name"], channel, existing["id"]),
             )
+            _apply_timeout_settings(conn, "suites", existing["id"], s)
             suite_map[cloud_id] = existing["id"]
         else:
             local_project_id = project_map.get(s["project_id"])
@@ -404,6 +431,7 @@ def pull_workspace():
                 "INSERT INTO suites (id, project_id, channel, name, created_at, cloud_id) VALUES (?, ?, ?, ?, ?, ?)",
                 (local_id, local_project_id, channel, s["name"], now, cloud_id),
             )
+            _apply_timeout_settings(conn, "suites", local_id, s)
             suite_map[cloud_id] = local_id
             counts["suites"] += 1
             console.print(f"  [green]✓[/green] Suite: {s['name']}")

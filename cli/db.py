@@ -139,6 +139,8 @@ def init_db():
     _migrate_script_templating(conn)
     _migrate_script_language(conn)
     _migrate_script_wait_timeout(conn)
+    _migrate_timeout_settings(conn)
+    _migrate_run_timeout_record(conn)
     _migrate_error_detail(conn)
     _migrate_api_tables(conn)
     _migrate_api_extractor(conn)
@@ -576,6 +578,35 @@ def _migrate_script_wait_timeout(conn):
         conn.execute("ALTER TABLE scripts ADD COLUMN wait_timeout INTEGER")
     except Exception:
         pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_timeout_settings(conn):
+    """Add nullable timeout settings (ms) to projects and suites. NULL means
+    inherit: suite -> project -> built-in default; NULL test_timeout means
+    'auto'. See docs/test-timeout-budget-plan.md and cli/timeout_budget.py."""
+    for table in ("projects", "suites"):
+        for col in ("wait_timeout", "test_timeout", "max_script_time"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} INTEGER")
+            except Exception:
+                pass  # Column already exists
+    conn.commit()
+
+
+def _migrate_run_timeout_record(conn):
+    """Record the timeouts a run used: a JSON snapshot on suite_runs and the
+    effective wait/test timeouts on script_runs. All nullable — runs from
+    before this migration keep NULL. See docs/test-timeout-budget-plan.md."""
+    for table, col, decl in (
+        ("suite_runs", "timeout_config", "TEXT"),
+        ("script_runs", "effective_wait_timeout", "INTEGER"),
+        ("script_runs", "effective_test_timeout", "INTEGER"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        except Exception:
+            pass  # Column already exists
     conn.commit()
 
 

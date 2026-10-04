@@ -1,7 +1,10 @@
+import os
 from flask import Blueprint, request, jsonify
 from datetime import datetime, timezone
 from cli.db import get_conn, generate_id
 from cli.config import get_active_project_id
+from cli import timeout_budget
+from cli.script_strategies import get_strategy
 
 bp = Blueprint('suites', __name__)
 
@@ -21,6 +24,7 @@ def list_suites():
         rows = conn.execute(
             "SELECT su.id, su.cloud_id, su.name, su.channel, su.first_run_at, su.last_run_at, "
             "su.last_run_status, su.created_at, "
+            "su.wait_timeout, su.test_timeout, su.max_script_time, "
             "(SELECT COUNT(*) FROM suite_items si WHERE si.suite_id = su.id) AS item_count "
             "FROM suites su WHERE su.project_id = ? "
             "ORDER BY su.created_at DESC",
@@ -42,7 +46,8 @@ def get_suite(suite_id):
 
         conn = get_conn()
         row = conn.execute(
-            "SELECT id, name, channel, first_run_at, last_run_at, last_run_status, created_at "
+            "SELECT id, name, channel, first_run_at, last_run_at, last_run_status, created_at, "
+            "wait_timeout, test_timeout, max_script_time "
             "FROM suites WHERE id = ? AND project_id = ?",
             (suite_id, project_id),
         ).fetchone()
@@ -110,31 +115,151 @@ def create_suite():
 
 @bp.route('/api/suites/<suite_id>', methods=['PUT'])
 def rename_suite(suite_id):
+    """Rename a suite and/or update its timeout settings. Only the keys sent
+    change: a settings-only body leaves the name alone, a rename-only body
+    leaves settings alone. null clears a setting (inherit project / auto)."""
     try:
         project_id = _require_active_project()
         if not project_id:
             return jsonify({"ok": False, "error": "No active project"}), 400
 
-        data = request.get_json(force=True)
-        name = data.get("name", "").strip()
-        if not name:
+        data = request.get_json(force=True) or {}
+        payload = {k: data[k] for k in timeout_budget.SETTING_KEYS if k in data}
+        has_name = "name" in data
+        name = (data.get("name") or "").strip()
+        if has_name and not name:
+            return jsonify({"ok": False, "error": "Suite name is required"}), 400
+        if not has_name and not payload:
             return jsonify({"ok": False, "error": "Suite name is required"}), 400
 
         conn = get_conn()
         row = conn.execute(
-            "SELECT id FROM suites WHERE id = ? AND project_id = ?",
+            "SELECT * FROM suites WHERE id = ? AND project_id = ?",
             (suite_id, project_id),
         ).fetchone()
         if not row:
             return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
 
-        conn.execute("UPDATE suites SET name = ? WHERE id = ?", (name, suite_id))
+        updates, err = {}, None
+        if payload:
+            project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+            updates, err = timeout_budget.validate_settings(payload, current=row, parent=project_row)
+            if err:
+                return jsonify({"ok": False, "error": err}), 400
+        if has_name:
+            updates["name"] = name
+
+        sets = ", ".join(f"{k} = ?" for k in updates)
+        conn.execute(f"UPDATE suites SET {sets} WHERE id = ?", (*updates.values(), suite_id))
         conn.commit()
 
         from cli.sync_queue import enqueue
         enqueue("suite", suite_id, "upsert")
 
-        return jsonify({"ok": True, "id": suite_id, "name": name})
+        row = conn.execute("SELECT * FROM suites WHERE id = ?", (suite_id,)).fetchone()
+        return jsonify({
+            "ok": True, "id": suite_id, "name": row["name"],
+            "settings": {k: row[k] for k in timeout_budget.SETTING_KEYS},
+        })
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@bp.route('/api/suites/<suite_id>/timeout-preview', methods=['GET'])
+def suite_timeout_preview(suite_id):
+    """Per-script time budget for a suite, computed by the same resolver the
+    runner uses. Optional query params wait_timeout / test_timeout /
+    max_script_time override the stored suite values so unsaved edits can be
+    previewed ('' or 'null' = inherit / auto). Nothing is stored."""
+    try:
+        project_id = _require_active_project()
+        if not project_id:
+            return jsonify({"ok": False, "error": "No active project"}), 400
+
+        conn = get_conn()
+        suite = conn.execute(
+            "SELECT * FROM suites WHERE id = ? AND project_id = ?", (suite_id, project_id)
+        ).fetchone()
+        if not suite:
+            return jsonify({"ok": False, "error": f"Suite {suite_id} not found"}), 404
+        project_row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+
+        overrides = {}
+        for key in timeout_budget.SETTING_KEYS:
+            if key not in request.args:
+                continue
+            raw = request.args.get(key, "").strip().lower()
+            if raw in ("", "null", "none"):
+                overrides[key] = None
+                continue
+            try:
+                overrides[key] = int(raw)
+            except ValueError:
+                return jsonify({"ok": False, "error": f"{key} must be an integer (ms), got {raw!r}"}), 400
+        _, err = timeout_budget.validate_settings(overrides, current=suite, parent=project_row)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        eff_suite = {k: suite[k] for k in timeout_budget.SETTING_KEYS}
+        eff_suite.update(overrides)
+
+        items = conn.execute(
+            "SELECT si.item_type, si.order_index, sc.id AS script_id, sc.name, sc.file_path, "
+            "sc.language, sc.wait_timeout "
+            "FROM suite_items si LEFT JOIN scripts sc ON si.script_id = sc.id "
+            "WHERE si.suite_id = ? ORDER BY si.order_index",
+            (suite_id,),
+        ).fetchall()
+
+        rows, warnings, skipped_api = [], [], 0
+        for it in items:
+            if it["item_type"] != "script":
+                skipped_api += 1
+                continue
+            language = it["language"] or "python"
+            source = ""
+            path = it["file_path"]
+            if path and os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as fh:
+                    source = fh.read()
+            else:
+                warnings.append(f"{it['name']}: script file not found, action count unknown")
+            last = conn.execute(
+                "SELECT duration_ms FROM script_runs WHERE script_id = ? AND duration_ms IS NOT NULL "
+                "AND status IN ('PASSED', 'FAILED') ORDER BY started_at DESC LIMIT 1",
+                (it["script_id"],),
+            ).fetchone()
+            row = timeout_budget.preview_script_row(
+                language=language, source=source, strategy=get_strategy(language),
+                script_wait=it["wait_timeout"], suite=eff_suite, project=project_row,
+                last_duration_ms=last["duration_ms"] if last else None,
+            )
+            row.update({"script_id": it["script_id"], "name": it["name"],
+                        "has_test_timeout": timeout_budget.has_test_timeout(language)})
+            rows.append(row)
+            if row["over_cap"]:
+                warnings.append(f"{it['name']}: worst case {row['worst_ms'] // 1000}s exceeds the max script time of {row['max_script_time'] // 1000}s")
+            if row["near_budget"]:
+                warnings.append(f"{it['name']}: last run used {round(row['budget_used'] * 100)}% of its budget")
+            if row["clamped"]:
+                warnings.append(f"{it['name']}: fixed test timeout is above the max script time and will be clamped to {row['max_script_time'] // 1000}s")
+
+        cap, cap_source = timeout_budget.resolve_max_script_time(
+            eff_suite.get("max_script_time"), project_row["max_script_time"])
+        longest = max(rows, key=lambda r: r["budget_ms"], default=None)
+        return jsonify({
+            "ok": True,
+            "scripts": rows,
+            "summary": {
+                "script_count": len(rows),
+                "skipped_api_items": skipped_api,
+                "total_budget_ms": sum(r["budget_ms"] for r in rows),
+                "longest_budget_ms": longest["budget_ms"] if longest else 0,
+                "longest_script": longest["name"] if longest else None,
+                "max_script_time": cap,
+                "max_script_time_source": cap_source,
+                "warnings": warnings,
+            },
+        })
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
